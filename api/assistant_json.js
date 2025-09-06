@@ -2,22 +2,20 @@
 module.exports = async function (req, res) {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
-  // read JSON body
   try {
+    // read JSON body
     let body = "";
     await new Promise((resolve) => { req.on("data", c => body += c); req.on("end", resolve); });
-    const parsed = body ? JSON.parse(body) : {};
-    const userMessage = parsed.userMessage;
-    const incomingThreadId = parsed.threadId || null;
+    const { userMessage, threadId: incomingThreadId } = body ? JSON.parse(body) : {};
 
     if (!userMessage || typeof userMessage !== "string") {
-      return res.status(400).json({ ok:false, error: "userMessage (string) required" });
+      return res.status(400).json({ ok:false, error:"userMessage (string) required" });
     }
 
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
     const ASSISTANT_ID   = process.env.ASSISTANT_ID;
     if (!OPENAI_API_KEY || !ASSISTANT_ID) {
-      return res.status(500).json({ ok:false, error: "Server not configured (missing env vars)." });
+      return res.status(500).json({ ok:false, error:"Server not configured (missing env vars)." });
     }
 
     const H = {
@@ -28,7 +26,7 @@ module.exports = async function (req, res) {
     const U = (p) => `https://api.openai.com/v1${p}`;
 
     // 1) Thread
-    let threadId = incomingThreadId;
+    let threadId = incomingThreadId || null;
     if (!threadId) {
       const tResp = await fetch(U("/threads"), { method:"POST", headers:H, body: JSON.stringify({}) });
       const tJson = await tResp.json();
@@ -50,11 +48,11 @@ module.exports = async function (req, res) {
     const run = await rResp.json();
     if (!rResp.ok) return res.status(rResp.status).json({ ok:false, step:"create_run", error:run });
 
-    // 4) Poll until complete (max ~120s)
+    // 4) Poll until complete (max 120s)
     const started = Date.now();
     let status = run.status, runId = run.id;
     while (["queued","in_progress","requires_action"].includes(status)) {
-      if (Date.now() - started > 120000) { // 2 minutes
+      if (Date.now() - started > 120000) {
         return res.status(504).json({ ok:false, error:"Timeout waiting for run to complete.", thread_id: threadId, run_id: runId });
       }
       await new Promise(r => setTimeout(r, 800));
@@ -74,6 +72,6 @@ module.exports = async function (req, res) {
 
     return res.status(200).json({ ok:true, thread_id: threadId, text });
   } catch (e) {
-    return res.status(500).json({ ok:false, error: String(e?.message || e) });
+    return res.status(500).json({ ok:false, error:String(e?.message || e) });
   }
 };
