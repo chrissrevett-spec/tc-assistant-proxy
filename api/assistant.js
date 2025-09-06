@@ -1,90 +1,59 @@
-// api/assistant.js - CommonJS style for maximum compatibility on Vercel
-module.exports = async function (req, res) {
+// /api/assistant.js
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+export default async function handler(req, res) {
   if (req.method !== "POST") {
-    res.status(405).send("Method Not Allowed");
-    return;
+    res.setHeader("Allow", ["POST"]);
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    // Read JSON body safely in Node
-    let body = "";
-    await new Promise((resolve) => {
-      req.on("data", (chunk) => (body += chunk));
-      req.on("end", resolve);
-    });
-    const parsed = body ? JSON.parse(body) : {};
-    const userMessage = parsed.userMessage;
-    const incomingThreadId = parsed.threadId;
+    const { userMessage, threadId } = req.body;
+    const stream = req.query.stream !== "off"; // default true unless ?stream=off
 
-    if (!userMessage || typeof userMessage !== "string") {
-      res.status(400).json({ error: "userMessage (string) required" });
-      return;
+    if (!userMessage) {
+      return res.status(400).json({ error: "Missing userMessage" });
     }
 
-    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-    const ASSISTANT_ID = process.env.ASSISTANT_ID;
-    if (!OPENAI_API_KEY || !ASSISTANT_ID) {
-      res.status(500).json({ error: "Server not configured. Missing env vars." });
-      return;
-    }
+    // Reuse thread if provided, otherwise create new
+    const thread = threadId
+      ? { id: threadId }
+      : await client.beta.threads.create();
 
-    // Shared headers for all OpenAI calls (IMPORTANT: Assistants v2 header)
-    const oaHeaders = {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-      "OpenAI-Beta": "assistants=v2"
-    };
-
-    // 1) Create (or reuse) a thread
-    let threadId = incomingThreadId;
-    if (!threadId) {
-      const t = await fetch("https://api.openai.com/v1/threads", {
-        method: "POST",
-        headers: oaHeaders,
-        body: JSON.stringify({})
-      }).then((r) => r.json());
-      threadId = t.id;
-    }
-
-    // 2) Add the user message
-    await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
-      method: "POST",
-      headers: oaHeaders,
-      body: JSON.stringify({ role: "user", content: userMessage })
+    const run = await client.beta.threads.runs.createAndStream(thread.id, {
+      assistant_id: process.env.ASSISTANT_ID,
+      instructions: userMessage,
     });
 
-    // 3) Start a Run with streaming
-    const runResp = await fetch(
-      `https://api.openai.com/v1/threads/${threadId}/runs`,
-      {
-        method: "POST",
-        headers: oaHeaders,
-        body: JSON.stringify({ assistant_id: ASSISTANT_ID, stream: true })
+    if (!stream) {
+      // collect all events into one message
+      let fullText = "";
+      for await (const event of run) {
+        if (event.type === "response.output_text.delta") {
+          fullText += event.delta;
+        }
       }
-    );
-
-    // Prepare to stream the SSE back to the browser
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-
-    // Send thread id first so the client can store it
-    res.write(`data: ${JSON.stringify({ thread_id: threadId })}\n\n`);
-
-    const reader = runResp.body.getReader();
-    const decoder = new TextDecoder();
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      res.write(decoder.decode(value)); // already SSE-formatted from OpenAI
+      return res.status(200).json({ text: fullText });
+    } else {
+      // stream out directly
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      });
+      for await (const event of run) {
+        res.write(`event: ${event.type}\n`);
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      }
+      res.write("data: [DONE]\n\n");
+      res.end();
     }
-
-    res.write("data: [DONE]\n\n");
-    res.end();
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Proxy error", detail: String(e?.message || e) });
+  } catch (err) {
+    console.error("Error in assistant handler:", err);
+    res.status(500).json({ error: err.message });
   }
-};
-
+}
