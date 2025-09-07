@@ -1,3 +1,52 @@
+// ---- CORS helpers (add at very top) ----
+const ALLOWED_ORIGINS = new Set([
+  "https://www.talkingcare.uk",
+  "https://talkingcare.uk",
+  // add any preview/testing hosts you use:
+  // "https://preview.squarespace.com",
+  // "http://localhost:5500",
+]);
+
+function pickOrigin(req) {
+  const o = req.headers["origin"];
+  if (o && ALLOWED_ORIGINS.has(o)) return o;
+  return null; // disallow others by default
+}
+
+function setCorsHeaders(res, origin) {
+  if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, x-vercel-protection-bypass");
+  res.setHeader("Access-Control-Max-Age", "86400");
+}
+
+function sendCorsPreflight(req, res) {
+  const origin = pickOrigin(req);
+  setCorsHeaders(res, origin);
+  res.statusCode = 204; // No Content
+  res.end();
+  return true;
+}
+
+function beginSSE(res, origin) {
+  if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // helps some CDNs
+}
+
+// Utility to safely send JSON with CORS on error/sync paths
+function sendJson(res, origin, code, obj) {
+  if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.statusCode = code;
+  res.end(JSON.stringify(obj));
+}
+
 // /api/assistant.js
 // Talking Care Navigator — unified JSON + SSE endpoint for Squarespace
 //
