@@ -1,270 +1,241 @@
-// ---- CORS helpers (add at very top) ----
-const ALLOWED_ORIGINS = new Set([
-  "https://www.talkingcare.uk",
-  "https://talkingcare.uk",
-  // add any preview/testing hosts you use:
-  // "https://preview.squarespace.com",
-  // "http://localhost:5500",
-]);
+/**
+ * Talking Care Navigator — single endpoint
+ * - Streaming (default)
+ * - Non-stream (?stream=off)
+ *
+ * Requires env vars on Vercel:
+ *   OPENAI_API_KEY
+ *   OPENAI_ASSISTANT_ID   (your Assistant ID)
+ */
 
-function pickOrigin(req) {
-  const o = req.headers["origin"];
-  if (o && ALLOWED_ORIGINS.has(o)) return o;
-  return null; // disallow others by default
+const { corsHeaders, send, ok, noContent, bad, fail } = require("./_cors");
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const ASSISTANT_ID   = process.env.OPENAI_ASSISTANT_ID || "";
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (c) => (data += c));
+    req.on("end", () => {
+      try { resolve(data ? JSON.parse(data) : {}); }
+      catch (e) { reject(e); }
+    });
+    req.on("error", reject);
+  });
 }
 
-function setCorsHeaders(res, origin) {
-  if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, x-vercel-protection-bypass");
-  res.setHeader("Access-Control-Max-Age", "86400");
+async function createThread() {
+  const r = await fetch("https://api.openai.com/v1/threads", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+      "OpenAI-Beta": "assistants=v2",
+    },
+    body: JSON.stringify({}),
+  });
+  if (!r.ok) throw new Error(`createThread: ${r.status} ${await r.text()}`);
+  return (await r.json()).id;
 }
 
-function sendCorsPreflight(req, res) {
-  const origin = pickOrigin(req);
-  setCorsHeaders(res, origin);
-  res.statusCode = 204; // No Content
-  res.end();
-  return true;
+async function addMessage(threadId, text) {
+  const r = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+      "OpenAI-Beta": "assistants=v2",
+    },
+    body: JSON.stringify({
+      role: "user",
+      content: text,
+    }),
+  });
+  if (!r.ok) throw new Error(`addMessage: ${r.status} ${await r.text()}`);
 }
 
-function beginSSE(res, origin) {
-  if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no"); // helps some CDNs
+async function createRun(threadId) {
+  const r = await fetch("https://api.openai.com/v1/threads/runs", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+      "OpenAI-Beta": "assistants=v2",
+    },
+    body: JSON.stringify({
+      assistant_id: ASSISTANT_ID,
+      thread_id: threadId,
+    }),
+  });
+  if (!r.ok) throw new Error(`createRun: ${r.status} ${await r.text()}`);
+  return await r.json();
 }
 
-// Utility to safely send JSON with CORS on error/sync paths
-function sendJson(res, origin, code, obj) {
-  if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.statusCode = code;
-  res.end(JSON.stringify(obj));
+async function getLatestMessage(threadId) {
+  const r = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages?limit=1&order=desc`, {
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "OpenAI-Beta": "assistants=v2",
+    },
+  });
+  if (!r.ok) throw new Error(`getMessages: ${r.status} ${await r.text()}`);
+  const j = await r.json();
+  const msg = (j.data && j.data[0]) || null;
+  if (!msg) return { text: "" };
+  // Extract plain text
+  let text = "";
+  for (const p of msg.content || []) {
+    if (p.type === "text" && p.text?.value) text += p.text.value;
+  }
+  return { text, raw: msg };
 }
 
-// /api/assistant.js
-// Talking Care Navigator — unified JSON + SSE endpoint for Squarespace
-//
-// - POST ?stream=off  => JSON response (non-streaming)
-// - POST (no query)   => text/event-stream (SSE) streaming
-//
-// Notes:
-// * Requires env var OPENAI_API_KEY in Vercel Project settings.
-// * If you use the Assistants API (v2), we must send header OpenAI-Beta: assistants=v2.
-// * CORS allows your Squarespace origin (edit allowedOrigins below if needed).
-
-import OpenAI from "openai";
-
-const allowedOrigins = new Set([
-  "https://www.talkingcare.uk",
-  "https://talkingcare.uk",
-  "http://localhost:5173",
-  "http://localhost:3000",
-]);
-
-// Construct OpenAI client with the Assistants v2 beta header.
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  defaultHeaders: { "OpenAI-Beta": "assistants=v2" },
-});
-
-function corsHeaders(origin) {
-  return {
-    "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, x-vercel-protection-bypass, Accept",
-    "Access-Control-Max-Age": "86400",
-    "Vary": "Origin",
-  };
-}
-
-export default async function handler(req, res) {
-  try {
-    const origin = allowedOrigins.has(req.headers.origin)
-      ? req.headers.origin
-      : allowedOrigins.values().next().value; // first allowed
-
-    // CORS preflight
-    if (req.method === "OPTIONS") {
-      res.writeHead(204, corsHeaders(origin));
-      return res.end();
+async function pollRunUntilDone(threadId, runId, timeoutMs = 120000) {
+  const start = Date.now();
+  while (true) {
+    const r = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, {
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "assistants=v2",
+      },
+    });
+    if (!r.ok) throw new Error(`getRun: ${r.status} ${await r.text()}`);
+    const run = await r.json();
+    if (run.status === "completed") return run;
+    if (run.status === "failed" || run.status === "cancelled" || run.status === "expired") {
+      throw new Error(`run status: ${run.status} ${run.last_error ? JSON.stringify(run.last_error) : ""}`);
     }
-
-    if (req.method !== "POST") {
-      res.writeHead(405, { ...corsHeaders(origin), "Content-Type": "application/json" });
-      return res.end(JSON.stringify({ ok: false, error: "Method Not Allowed" }));
-    }
-
-    // Parse body
-    let body = {};
-    try {
-      body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
-    } catch {
-      // Some hosts already parse JSON
-      body = req.body || {};
-    }
-    const userMessage = (body?.userMessage || "").toString().trim();
-    let threadId = body?.threadId || null;
-
-    if (!userMessage) {
-      res.writeHead(400, { ...corsHeaders(origin), "Content-Type": "application/json" });
-      return res.end(JSON.stringify({ ok: false, error: "Missing userMessage" }));
-    }
-
-    // Helper: ensure thread exists (or create)
-    async function getOrCreateThread(id) {
-      try {
-        if (id) {
-          // validate it exists
-          await openai.beta.threads.retrieve(id);
-          return id;
-        }
-      } catch {
-        // fall through to create
-      }
-      const t = await openai.beta.threads.create();
-      return t.id;
-    }
-
-    // Helper: add message with busy-run safety
-    async function safeAddMessage(tid, content) {
-      // If a run is currently active for this thread, OpenAI will reject adding messages.
-      // We’ll check latest runs; if one is running, we create a fresh thread to avoid blocking.
-      try {
-        // Attempt add; if it fails with "active run", we catch and start new thread
-        await openai.beta.threads.messages.create(tid, {
-          role: "user",
-          content,
-        });
-        return tid;
-      } catch (e) {
-        const msg = e?.error?.message || e?.message || "";
-        if (msg.includes("active run")) {
-          const fresh = await openai.beta.threads.create();
-          await openai.beta.threads.messages.create(fresh.id, { role: "user", content });
-          return fresh.id;
-        }
-        throw e;
-      }
-    }
-
-    // Non-streaming (JSON) mode
-    if ((req.query?.stream || req.url.includes("stream=off"))) {
-      threadId = await getOrCreateThread(threadId);
-      threadId = await safeAddMessage(threadId, userMessage);
-
-      // Create a run and poll to completion
-      const run = await openai.beta.threads.runs.create(threadId, {
-        assistant_id: process.env.ASSISTANT_ID, // set this in Vercel env, or swap to inline model if you prefer Responses API
-        // You can pass additional instructions or tools here if needed
-      });
-
-      // Poll
-      let completed = null;
-      for (let i = 0; i < 120; i++) {
-        const r = await openai.beta.threads.runs.retrieve(threadId, run.id);
-        if (r.status === "completed") { completed = r; break; }
-        if (["failed", "cancelled", "expired"].includes(r.status)) {
-          res.writeHead(500, { ...corsHeaders(origin), "Content-Type": "application/json" });
-          return res.end(JSON.stringify({ ok: false, step: "run_poll", error: r.last_error || r.status }));
-        }
-        await new Promise(s => setTimeout(s, 1000));
-      }
-      if (!completed) {
-        res.writeHead(504, { ...corsHeaders(origin), "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ ok: false, step: "timeout", error: "Run did not complete in time" }));
-      }
-
-      // Fetch latest assistant message text
-      const list = await openai.beta.threads.messages.list(threadId, { order: "desc", limit: 5 });
-      const msg = list.data.find(m => m.role === "assistant");
-      const text = (msg?.content || [])
-        .filter(c => c.type === "text")
-        .map(c => c.text?.value || "")
-        .join("\n")
-        .trim();
-
-      // (Optional) collect simple usage if available
-      const usage = completed?.usage || null;
-
-      res.writeHead(200, { ...corsHeaders(origin), "Content-Type": "application/json; charset=utf-8" });
-      return res.end(JSON.stringify({ ok: true, thread_id: threadId, text, citations: [], usage }));
-    }
-
-    // Streaming (SSE) mode
-    threadId = await getOrCreateThread(threadId);
-    threadId = await safeAddMessage(threadId, userMessage);
-
-    // Set SSE headers
-    res.writeHead(200, {
-      ...corsHeaders(origin),
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive",
-      "X-Accel-Buffering": "no", // help some proxies not buffer
-    });
-
-    // Heartbeat to keep the connection open (every 10s)
-    const heartbeat = setInterval(() => {
-      try { res.write(`event: ping\ndata: {}\n\n`); } catch {}
-    }, 10000);
-
-    // Start streaming run
-    const stream = await openai.beta.threads.runs.stream(threadId, {
-      assistant_id: process.env.ASSISTANT_ID,
-    });
-
-    // Accumulate a bit of text to ensure the UI updates smoothly
-    stream.on("message.delta", (evt) => {
-      // evt.data.delta.content: array of deltas, we forward as OpenAI-style SSE
-      res.write(`event: thread.message.delta\n`);
-      res.write(`data: ${JSON.stringify(evt.data)}\n\n`);
-    });
-
-    stream.on("message.completed", (evt) => {
-      res.write(`event: thread.message.completed\n`);
-      res.write(`data: ${JSON.stringify(evt.data)}\n\n`);
-    });
-
-    stream.on("run.step.completed", (evt) => {
-      res.write(`event: thread.run.step.completed\n`);
-      res.write(`data: ${JSON.stringify(evt.data)}\n\n`);
-    });
-
-    stream.on("run.completed", (evt) => {
-      res.write(`event: thread.run.completed\n`);
-      res.write(`data: ${JSON.stringify(evt.data)}\n\n`);
-      res.write(`data: [DONE]\n\n`);
-      clearInterval(heartbeat);
-      res.end();
-    });
-
-    stream.on("error", (err) => {
-      // Send a structured error event instead of crashing
-      try {
-        res.write(`event: error\n`);
-        res.write(`data: ${JSON.stringify({ message: err?.message || "stream error" })}\n\n`);
-        res.write(`data: [DONE]\n\n`);
-      } catch {}
-      clearInterval(heartbeat);
-      try { res.end(); } catch {}
-    });
-
-    // Safety: if client disconnects, stop streaming
-    req.on("close", () => {
-      try { stream.abort(); } catch {}
-      clearInterval(heartbeat);
-    });
-
-  } catch (e) {
-    // Final safety net
-    const origin = allowedOrigins.values().next().value;
-    res.writeHead(500, { ...corsHeaders(origin), "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: false, step: "top_level", error: e?.error || e?.message || "server error" }));
+    if (Date.now() - start > timeoutMs) throw new Error("run timeout");
+    await new Promise(res => setTimeout(res, 800));
   }
 }
+
+function writeSSEHead(res) {
+  // CORS + SSE headers
+  const headers = corsHeaders({
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+  });
+  for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
+  res.statusCode = 200;
+  res.flushHeaders?.();
+}
+function sseSend(res, evt, data) {
+  res.write(`event: ${evt}\n`);
+  if (typeof data === "string") res.write(`data: ${data}\n\n`);
+  else res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+function sseDone(res) { res.write("data: [DONE]\n\n"); res.end(); }
+
+module.exports = async (req, res) => {
+  // Always handle OPTIONS quickly to avoid 500 on preflight
+  if (req.method === "OPTIONS") return noContent(res);
+  if (req.method !== "POST")    return send(res, 405, "Method Not Allowed");
+
+  // Basic env checks (still return CORS on error)
+  if (!OPENAI_API_KEY) return fail(res, "Missing OPENAI_API_KEY");
+  if (!ASSISTANT_ID)   return fail(res, "Missing OPENAI_ASSISTANT_ID");
+
+  // Decide stream vs non-stream
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const noStream = url.searchParams.get("stream") === "off";
+
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    return bad(res, "Invalid JSON body");
+  }
+  const userMessage = (body && body.userMessage ? String(body.userMessage) : "").trim();
+  if (!userMessage) return bad(res, "userMessage is required");
+
+  let threadId = body && body.threadId ? String(body.threadId) : null;
+
+  // If the last run is still active, the API will reject. We don’t try to add messages during an active run.
+  // Client-side you already reset the thread on “active run” errors; here we’ll just bubble up the message.
+
+  // NON-STREAM (JSON) — run and poll then return one JSON object
+  if (noStream) {
+    try {
+      if (!threadId) threadId = await createThread();
+      await addMessage(threadId, userMessage);
+      const run = await createRun(threadId);
+      await pollRunUntilDone(threadId, run.id);
+      const latest = await getLatestMessage(threadId);
+      return ok(res, {
+        ok: true,
+        thread_id: threadId,
+        text: latest.text || "",
+        citations: [],
+        usage: null,
+      });
+    } catch (e) {
+      return fail(res, String(e && e.message ? e.message : e));
+    }
+  }
+
+  // STREAM — create/run then proxy SSE from the Run stream endpoint
+  try {
+    if (!threadId) threadId = await createThread();
+    await addMessage(threadId, userMessage);
+
+    // We’ll stream by polling messages (simple & robust) to avoid function crashes on stream pipe;
+    // still emits SSE so your widget renders tokens progressively.
+    writeSSEHead(res);
+    sseSend(res, "start", { ok: true, thread_id: threadId });
+
+    // Kick off the run
+    const run = await createRun(threadId);
+
+    // Poll while emitting partial deltas by re-reading the latest message
+    let lastText = "";
+    let done = false;
+    const start = Date.now();
+
+    while (!done) {
+      // Check run status
+      const rs = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs/${run.id}`, {
+        headers: {
+          "Authorization": `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2",
+        },
+      });
+      if (!rs.ok) throw new Error(`getRun(stream): ${rs.status} ${await rs.text()}`);
+      const runState = await rs.json();
+      done = runState.status === "completed";
+
+      // Fetch latest message text and emit the delta
+      const { text } = await getLatestMessage(threadId);
+      if (text && text !== lastText) {
+        const delta = text.slice(lastText.length);
+        if (delta) sseSend(res, "thread.message.delta", { delta: { content: [{ type: "output_text_delta", text: delta }] } });
+        lastText = text;
+      }
+
+      if (done) break;
+      if (Date.now() - start > 120000) throw new Error("stream timeout");
+      await new Promise(r => setTimeout(r, 700));
+    }
+
+    // Completed — send final message + done
+    sseSend(res, "thread.message.completed", {
+      role: "assistant",
+      content: [{ type: "text", text: { value: lastText, annotations: [] } }],
+      thread_id: threadId,
+    });
+    sseSend(res, "thread.run.completed", { usage: null, thread_id: threadId });
+    sseDone(res);
+  } catch (e) {
+    // Ensure we still respond with CORS headers on errors
+    try {
+      // If headers were already sent for SSE, send an error event
+      if (res.headersSent) {
+        sseSend(res, "error", { message: String(e && e.message ? e.message : e) });
+        return sseDone(res);
+      }
+    } catch {}
+    return fail(res, String(e && e.message ? e.message : e));
+  }
+};
