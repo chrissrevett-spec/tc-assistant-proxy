@@ -1,21 +1,21 @@
 // /api/log.js
-export const config = { runtime: "edge" };
-
-function corsHeaders(origin) {
-  const allow = origin && origin.includes("talkingcare.uk") ? origin : "*";
-  return {
-    "Access-Control-Allow-Origin": allow,
+export default async function handler(req, res) {
+  const origin = req.headers.origin || "*";
+  const headers = {
+    "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, x-vercel-protection-bypass, Accept",
     "Access-Control-Max-Age": "86400",
+    "Vary": "Origin",
   };
-}
-
-export default async function handler(req) {
-  const origin = req.headers.get("origin") || "";
-  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(origin) });
-  if (req.method !== "POST")    return new Response("Method Not Allowed", { status: 405, headers: corsHeaders(origin) });
-
-  // swallow the body; return 204
-  return new Response(null, { status: 204, headers: corsHeaders(origin) });
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, headers); return res.end();
+  }
+  if (req.method !== "POST") {
+    res.writeHead(405, { ...headers, "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok: false, error: "Method Not Allowed" }));
+  }
+  // You can forward to a real log here if you like.
+  res.writeHead(204, headers);
+  res.end();
 }
