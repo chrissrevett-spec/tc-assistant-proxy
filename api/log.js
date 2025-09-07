@@ -1,21 +1,25 @@
-// /api/log.js
-export default async function handler(req, res) {
-  const origin = req.headers.origin || "*";
-  const headers = {
-    "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, x-vercel-protection-bypass, Accept",
-    "Access-Control-Max-Age": "86400",
-    "Vary": "Origin",
-  };
-  if (req.method === "OPTIONS") {
-    res.writeHead(204, headers); return res.end();
-  }
-  if (req.method !== "POST") {
-    res.writeHead(405, { ...headers, "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ ok: false, error: "Method Not Allowed" }));
-  }
-  // You can forward to a real log here if you like.
-  res.writeHead(204, headers);
-  res.end();
+const { noContent, bad } = require("./_cors");
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (c) => (data += c));
+    req.on("end", () => {
+      try { resolve(data ? JSON.parse(data) : {}); }
+      catch (e) { reject(e); }
+    });
+    req.on("error", reject);
+  });
 }
+
+module.exports = async (req, res) => {
+  if (req.method === "OPTIONS") return noContent(res);
+  if (req.method !== "POST")    return noContent(res);
+  try {
+    await readBody(req); // we don’t store; this is a stub
+    return noContent(res);
+  } catch {
+    return bad(res, "invalid json");
+  }
+};
+
