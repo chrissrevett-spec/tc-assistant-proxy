@@ -1,229 +1,221 @@
 // /api/assistant.js
-export const config = { runtime: "edge" };
+// Talking Care Navigator — unified JSON + SSE endpoint for Squarespace
+//
+// - POST ?stream=off  => JSON response (non-streaming)
+// - POST (no query)   => text/event-stream (SSE) streaming
+//
+// Notes:
+// * Requires env var OPENAI_API_KEY in Vercel Project settings.
+// * If you use the Assistants API (v2), we must send header OpenAI-Beta: assistants=v2.
+// * CORS allows your Squarespace origin (edit allowedOrigins below if needed).
 
-// --- helpers ---
+import OpenAI from "openai";
+
+const allowedOrigins = new Set([
+  "https://www.talkingcare.uk",
+  "https://talkingcare.uk",
+  "http://localhost:5173",
+  "http://localhost:3000",
+]);
+
+// Construct OpenAI client with the Assistants v2 beta header.
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  defaultHeaders: { "OpenAI-Beta": "assistants=v2" },
+});
+
 function corsHeaders(origin) {
-  // Allow your Squarespace site
-  const allow = origin && origin.includes("talkingcare.uk")
-    ? origin
-    : "*";
   return {
-    "Access-Control-Allow-Origin": allow,
+    "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, x-vercel-protection-bypass, Accept",
     "Access-Control-Max-Age": "86400",
+    "Vary": "Origin",
   };
 }
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const ASSISTANT_ID   = process.env.ASSISTANT_ID; // asst_...
-const BASE_URL       = "https://api.openai.com/v1";
-
-async function api(path, options = {}) {
-  const headers = {
-    "Authorization": `Bearer ${OPENAI_API_KEY}`,
-    "OpenAI-Beta": "assistants=v2",
-    "Content-Type": "application/json",
-    ...(options.headers || {})
-  };
-  const res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Response(JSON.stringify({ ok: false, step: options.step || "api", error: text ? JSON.parseSafe?.(text) || text : "request failed" }), {
-      status: res.status,
-      headers: { "content-type": "application/json" },
-    });
-  }
-  return res;
-}
-
-// JSON.parse that won’t explode
-JSON.parseSafe = (t) => { try { return JSON.parse(t); } catch { return null; } };
-
-// Cancel any active run on a thread (queued/in_progress/requires_action)
-async function cancelActiveRun(threadId) {
+export default async function handler(req, res) {
   try {
-    const res = await api(`/threads/${threadId}/runs?limit=1&order=desc`, { method: "GET", step: "list_runs" });
-    const data = await res.json();
-    const run = data?.data?.[0];
-    if (!run) return null;
-    const active = ["queued", "in_progress", "requires_action"];
-    if (active.includes(run.status)) {
-      await api(`/threads/${threadId}/runs/${run.id}/cancel`, { method: "POST", body: "{}", step: "cancel_run" });
-      return run.id;
+    const origin = allowedOrigins.has(req.headers.origin)
+      ? req.headers.origin
+      : allowedOrigins.values().next().value; // first allowed
+
+    // CORS preflight
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, corsHeaders(origin));
+      return res.end();
     }
-    return null;
-  } catch {
-    // swallow; if cancel fails we’ll fall back to new thread
-    return null;
-  }
-}
 
-// Wait for a run to finish (used only if you ever choose to poll instead of SSE)
-async function waitForCompletion(threadId, runId, timeoutMs = 90000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const res = await api(`/threads/${threadId}/runs/${runId}`, { method: "GET", step: "get_run" });
-    const run = await res.json();
-    const done = ["completed", "failed", "cancelled", "expired"];
-    if (done.includes(run.status)) return run;
-    await new Promise(r => setTimeout(r, 800));
-  }
-  throw new Error("timeout");
-}
-
-export default async function handler(req) {
-  const origin = req.headers.get("origin") || "";
-  const method = req.method || "GET";
-  const url    = new URL(req.url);
-  const streamOff = url.searchParams.get("stream") === "off";
-
-  // CORS preflight
-  if (method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders(origin) });
-  }
-
-  if (method !== "POST") {
-    return new Response("Method Not Allowed", { status: 405, headers: corsHeaders(origin) });
-  }
-
-  if (!OPENAI_API_KEY || !ASSISTANT_ID) {
-    return new Response(JSON.stringify({ ok: false, error: "Server missing OPENAI_API_KEY or ASSISTANT_ID" }), {
-      status: 500,
-      headers: { ...corsHeaders(origin), "content-type": "application/json" }
-    });
-  }
-
-  let body;
-  try {
-    body = await req.json();
-  } catch {
-    return new Response(JSON.stringify({ ok: false, error: "Invalid JSON body" }), {
-      status: 400,
-      headers: { ...corsHeaders(origin), "content-type": "application/json" }
-    });
-  }
-
-  const userMessage = body?.userMessage || "";
-  let   threadId    = body?.threadId || null;
-
-  // If the incoming thread has an active run, try to cancel it; if that fails, reset to new thread
-  if (threadId) {
-    const cancelled = await cancelActiveRun(threadId);
-    if (cancelled === null) {
-      // if cancelActiveRun couldn’t verify/cancel (maybe API error), we’ll still try normal flow
-      // but we’ll catch “already has an active run” below and reset thread as a final fallback.
+    if (req.method !== "POST") {
+      res.writeHead(405, { ...corsHeaders(origin), "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: false, error: "Method Not Allowed" }));
     }
-  }
 
-  // Ensure we have a thread
-  if (!threadId) {
-    const t = await api(`/threads`, { method: "POST", body: "{}", step: "create_thread" }).then(r => r.json());
-    threadId = t.id;
-  }
-
-  // Add message to thread (guard against “active run” race)
-  async function safeAddMessage() {
+    // Parse body
+    let body = {};
     try {
-      return await api(`/threads/${threadId}/messages`, {
-        method: "POST",
-        body: JSON.stringify({ role: "user", content: userMessage }),
-        step: "add_message"
-      }).then(r => r.json());
-    } catch (resp) {
-      const txt = await resp.text?.() || "";
-      const err = JSON.parseSafe(txt);
-      const msg = (err?.error?.message || err) + "";
-      // If thread is busy, create a new thread and add message there
-      if (msg.includes("already has an active run")) {
-        const t = await api(`/threads`, { method: "POST", body: "{}", step: "create_thread_after_busy" }).then(r => r.json());
-        threadId = t.id;
-        return await api(`/threads/${threadId}/messages`, {
-          method: "POST",
-          body: JSON.stringify({ role: "user", content: userMessage }),
-          step: "add_message_retry"
-        }).then(r => r.json());
-      }
-      throw resp;
+      body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+    } catch {
+      // Some hosts already parse JSON
+      body = req.body || {};
     }
-  }
-  await safeAddMessage();
+    const userMessage = (body?.userMessage || "").toString().trim();
+    let threadId = body?.threadId || null;
 
-  // Create run for this assistant
-  async function safeCreateRun() {
-    try {
-      return await api(`/threads/${threadId}/runs`, {
-        method: "POST",
-        body: JSON.stringify({ assistant_id: ASSISTANT_ID }),
-        step: "create_run"
-      }).then(r => r.json());
-    } catch (resp) {
-      const txt = await resp.text?.() || "";
-      const err = JSON.parseSafe(txt);
-      const msg = (err?.error?.message || err) + "";
-      // If still busy, reset to a brand new thread and retry once
-      if (msg.includes("already has an active run")) {
-        const t = await api(`/threads`, { method: "POST", body: "{}", step: "create_thread_after_busy2" }).then(r => r.json());
-        threadId = t.id;
-        await api(`/threads/${threadId}/messages`, {
-          method: "POST",
-          body: JSON.stringify({ role: "user", content: userMessage }),
-          step: "add_message_retry2"
-        });
-        return await api(`/threads/${threadId}/runs`, {
-          method: "POST",
-          body: JSON.stringify({ assistant_id: ASSISTANT_ID }),
-          step: "create_run_retry2"
-        }).then(r => r.json());
-      }
-      throw resp;
+    if (!userMessage) {
+      res.writeHead(400, { ...corsHeaders(origin), "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: false, error: "Missing userMessage" }));
     }
-  }
-  const run = await safeCreateRun();
 
-  // Non-streaming JSON mode
-  if (streamOff) {
-    // Poll to completion
-    const done = await waitForCompletion(threadId, run.id).catch(() => null);
-    // Fetch the latest assistant message text
-    const msgsRes = await api(`/threads/${threadId}/messages?limit=1&order=desc`, { method: "GET", step: "list_messages" });
-    const msgs = await msgsRes.json();
-    const last = msgs?.data?.[0];
-    let text = "";
-    let citations = [];
-    if (last?.content?.length) {
-      for (const c of last.content) {
-        if (c.type === "text") {
-          text += c.text?.value || "";
-          (c.text?.annotations || []).forEach(a => {
-            if (a?.file_citation?.file_id) citations.push({ type: "file", file_id: a.file_citation.file_id });
-            if (a?.file_path?.file_id)    citations.push({ type: "file_path", file_id: a.file_path.file_id, path: a.file_path.path });
-            if (a?.url)                   citations.push({ type: "url", url: a.url });
-          });
+    // Helper: ensure thread exists (or create)
+    async function getOrCreateThread(id) {
+      try {
+        if (id) {
+          // validate it exists
+          await openai.beta.threads.retrieve(id);
+          return id;
         }
+      } catch {
+        // fall through to create
+      }
+      const t = await openai.beta.threads.create();
+      return t.id;
+    }
+
+    // Helper: add message with busy-run safety
+    async function safeAddMessage(tid, content) {
+      // If a run is currently active for this thread, OpenAI will reject adding messages.
+      // We’ll check latest runs; if one is running, we create a fresh thread to avoid blocking.
+      try {
+        // Attempt add; if it fails with "active run", we catch and start new thread
+        await openai.beta.threads.messages.create(tid, {
+          role: "user",
+          content,
+        });
+        return tid;
+      } catch (e) {
+        const msg = e?.error?.message || e?.message || "";
+        if (msg.includes("active run")) {
+          const fresh = await openai.beta.threads.create();
+          await openai.beta.threads.messages.create(fresh.id, { role: "user", content });
+          return fresh.id;
+        }
+        throw e;
       }
     }
-    return new Response(JSON.stringify({ ok: true, thread_id: threadId, text, citations, usage: done?.usage || null }), {
-      status: 200,
-      headers: { ...corsHeaders(origin), "content-type": "application/json" }
+
+    // Non-streaming (JSON) mode
+    if ((req.query?.stream || req.url.includes("stream=off"))) {
+      threadId = await getOrCreateThread(threadId);
+      threadId = await safeAddMessage(threadId, userMessage);
+
+      // Create a run and poll to completion
+      const run = await openai.beta.threads.runs.create(threadId, {
+        assistant_id: process.env.ASSISTANT_ID, // set this in Vercel env, or swap to inline model if you prefer Responses API
+        // You can pass additional instructions or tools here if needed
+      });
+
+      // Poll
+      let completed = null;
+      for (let i = 0; i < 120; i++) {
+        const r = await openai.beta.threads.runs.retrieve(threadId, run.id);
+        if (r.status === "completed") { completed = r; break; }
+        if (["failed", "cancelled", "expired"].includes(r.status)) {
+          res.writeHead(500, { ...corsHeaders(origin), "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ ok: false, step: "run_poll", error: r.last_error || r.status }));
+        }
+        await new Promise(s => setTimeout(s, 1000));
+      }
+      if (!completed) {
+        res.writeHead(504, { ...corsHeaders(origin), "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ ok: false, step: "timeout", error: "Run did not complete in time" }));
+      }
+
+      // Fetch latest assistant message text
+      const list = await openai.beta.threads.messages.list(threadId, { order: "desc", limit: 5 });
+      const msg = list.data.find(m => m.role === "assistant");
+      const text = (msg?.content || [])
+        .filter(c => c.type === "text")
+        .map(c => c.text?.value || "")
+        .join("\n")
+        .trim();
+
+      // (Optional) collect simple usage if available
+      const usage = completed?.usage || null;
+
+      res.writeHead(200, { ...corsHeaders(origin), "Content-Type": "application/json; charset=utf-8" });
+      return res.end(JSON.stringify({ ok: true, thread_id: threadId, text, citations: [], usage }));
+    }
+
+    // Streaming (SSE) mode
+    threadId = await getOrCreateThread(threadId);
+    threadId = await safeAddMessage(threadId, userMessage);
+
+    // Set SSE headers
+    res.writeHead(200, {
+      ...corsHeaders(origin),
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no", // help some proxies not buffer
     });
+
+    // Heartbeat to keep the connection open (every 10s)
+    const heartbeat = setInterval(() => {
+      try { res.write(`event: ping\ndata: {}\n\n`); } catch {}
+    }, 10000);
+
+    // Start streaming run
+    const stream = await openai.beta.threads.runs.stream(threadId, {
+      assistant_id: process.env.ASSISTANT_ID,
+    });
+
+    // Accumulate a bit of text to ensure the UI updates smoothly
+    stream.on("message.delta", (evt) => {
+      // evt.data.delta.content: array of deltas, we forward as OpenAI-style SSE
+      res.write(`event: thread.message.delta\n`);
+      res.write(`data: ${JSON.stringify(evt.data)}\n\n`);
+    });
+
+    stream.on("message.completed", (evt) => {
+      res.write(`event: thread.message.completed\n`);
+      res.write(`data: ${JSON.stringify(evt.data)}\n\n`);
+    });
+
+    stream.on("run.step.completed", (evt) => {
+      res.write(`event: thread.run.step.completed\n`);
+      res.write(`data: ${JSON.stringify(evt.data)}\n\n`);
+    });
+
+    stream.on("run.completed", (evt) => {
+      res.write(`event: thread.run.completed\n`);
+      res.write(`data: ${JSON.stringify(evt.data)}\n\n`);
+      res.write(`data: [DONE]\n\n`);
+      clearInterval(heartbeat);
+      res.end();
+    });
+
+    stream.on("error", (err) => {
+      // Send a structured error event instead of crashing
+      try {
+        res.write(`event: error\n`);
+        res.write(`data: ${JSON.stringify({ message: err?.message || "stream error" })}\n\n`);
+        res.write(`data: [DONE]\n\n`);
+      } catch {}
+      clearInterval(heartbeat);
+      try { res.end(); } catch {}
+    });
+
+    // Safety: if client disconnects, stop streaming
+    req.on("close", () => {
+      try { stream.abort(); } catch {}
+      clearInterval(heartbeat);
+    });
+
+  } catch (e) {
+    // Final safety net
+    const origin = allowedOrigins.values().next().value;
+    res.writeHead(500, { ...corsHeaders(origin), "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, step: "top_level", error: e?.error || e?.message || "server error" }));
   }
-
-  // Streaming (SSE) mode
-  const sseRes = await api(`/threads/${threadId}/runs/${run.id}/events`, {
-    method: "GET",
-    headers: { Accept: "text/event-stream" },
-    step: "stream_events"
-  });
-
-  const sseHeaders = {
-    ...corsHeaders(origin),
-    "content-type": "text/event-stream; charset=utf-8",
-    "cache-control": "no-cache, no-transform",
-    "x-accel-buffering": "no",
-    "connection": "keep-alive",
-  };
-
-  // Proxy the SSE stream straight through
-  return new Response(sseRes.body, { status: 200, headers: sseHeaders });
 }
