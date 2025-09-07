@@ -13,12 +13,12 @@
 
   "headers": [
     {
-      "source": "/api/(.*)",
+      "source": "/api/(assistant|echo|log)",
       "headers": [
         { "key": "Access-Control-Allow-Origin",  "value": "https://www.talkingcare.uk" },
         { "key": "Vary",                         "value": "Origin" },
         { "key": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" },
-        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, x-vercel-protection-bypass, Accept" },
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Accept, x-vercel-protection-bypass" },
         { "key": "Access-Control-Max-Age",       "value": "86400" }
       ]
     }
