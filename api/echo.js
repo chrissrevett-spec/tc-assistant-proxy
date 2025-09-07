@@ -1,65 +1,70 @@
-export const config = { runtime: "nodejs22.x" };
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
+export const config = { runtime: "nodejs" };
 
-function corsHeaders(extra = {}) {
+const PROD_ORIGIN = "https://www.talkingcare.uk";
+const EXTRA_ORIGIN = process.env.CORS_DEBUG_ORIGIN || "";
+function corsOrigin(req) {
+  const o = req.headers.get("origin");
+  if (o === PROD_ORIGIN || (EXTRA_ORIGIN && o === EXTRA_ORIGIN)) return o;
+  return PROD_ORIGIN;
+}
+function baseCorsHeaders(origin) {
   return {
-    "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Accept, x-vercel-protection-bypass",
-    "Access-Control-Max-Age": "86400",
+    "Access-Control-Allow-Origin": origin,
     "Vary": "Origin",
-    ...extra
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, x-vercel-protection-bypass, Accept",
+    "Access-Control-Max-Age": "86400"
   };
 }
-
-export async function OPTIONS() {
-  return new Response(null, { status: 204, headers: corsHeaders() });
+function json(body, { status = 200, headers = {} } = {}) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8", ...headers },
+  });
 }
 
 export default async function handler(req) {
-  if (req.method === "OPTIONS") return OPTIONS();
+  const origin = corsOrigin(req);
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: baseCorsHeaders(origin) });
+  }
+  if (req.method !== "POST") {
+    return json({ ok: false, error: "Method not allowed" }, { status: 405, headers: baseCorsHeaders(origin) });
+  }
 
-  const url = new URL(req.url);
-  const mode = url.searchParams.get("mode") || "sse";
-  const { message = "Hello from Talking Care Navigator!" } = await req.json().catch(() => ({}));
+  let body = {};
+  try { body = await req.json(); } catch {}
 
-  if (mode === "echo") {
-    // Plain JSON response
-    return new Response(JSON.stringify({ ok: true, message }), {
+  const mode = new URL(req.url).searchParams.get("mode");
+
+  if (mode === "stream") {
+    const encoder = new TextEncoder();
+    const { readable, writable } = new TransformStream();
+    const w = writable.getWriter();
+
+    // simple demo SSE
+    (async () => {
+      await w.write(encoder.encode(`event: start\ndata: {"ok":true}\n\n`));
+      const text = (body && body.message) ? String(body.message) : "Hello";
+      const chunks = [`{"message":"${text.slice(0, 10)}`, `${text.slice(10)}"}`];
+      for (const c of chunks) {
+        await w.write(encoder.encode(`event: thread.message.delta\ndata: {"delta":{"content":[{"type":"output_text_delta","text":"${c}"}]}}\n\n`));
+      }
+      await w.write(encoder.encode(`event: done\ndata: [DONE]\n\n`));
+      await w.close();
+    })();
+
+    return new Response(readable, {
       status: 200,
-      headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders() }
+      headers: {
+        ...baseCorsHeaders(origin),
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no"
+      }
     });
   }
 
-  // SSE streaming test
-  const stream = new ReadableStream({
-    async start(controller) {
-      controller.enqueue(sse("start", { ok: true }));
-      const parts = [`{"message":"`, ...message.split(""), `"}`];
-      for (const p of parts) {
-        await wait(120);
-        controller.enqueue(sse("thread.message.delta", { delta: { content: [{ type: "output_text_delta", text: p }] } }));
-      }
-      controller.enqueue(sse("done", "[DONE]"));
-      controller.close();
-    }
-  });
-
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      ...corsHeaders(),
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive",
-      "X-Accel-Buffering": "no"
-    }
-  });
+  return json({ ok: true, echo: body || null }, { headers: baseCorsHeaders(origin) });
 }
-
-function sse(event, data) {
-  const enc = new TextEncoder();
-  const payload = typeof data === "string" ? data : JSON.stringify(data);
-  return enc.encode(`event: ${event}\n` + `data: ${payload}\n\n`);
-}
-function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
