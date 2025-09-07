@@ -1,67 +1,54 @@
-import { commonCorsHeaders, errJson, handleOptions } from "./_cors.js";
+export const config = { runtime: "nodejs22.x" };
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
 
-/**
- * POST /api/echo
- * - mode=stream → sends SSE "start", several "chunk" events with your message, and "done".
- * - otherwise   → returns JSON { ok:true, message }
- */
-export async function OPTIONS() { return handleOptions(); }
+function corsHeaders(extra = {}) {
+  return {
+    "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Accept, x-vercel-protection-bypass",
+    "Access-Control-Max-Age": "86400",
+    "Vary": "Origin",
+    ...extra
+  };
+}
 
-export async function POST(req) {
-  const headers = commonCorsHeaders();
+export async function OPTIONS() {
+  return new Response(null, { status: 204, headers: corsHeaders() });
+}
 
-  let body;
-  try { body = await req.json(); } catch { body = {}; }
-  const msg = (body && body.message) ? String(body.message) : "Hello";
+export default async function handler(req) {
+  if (req.method === "OPTIONS") return OPTIONS();
 
   const url = new URL(req.url);
-  const mode = url.searchParams.get("mode") || "json";
+  const mode = url.searchParams.get("mode") || "sse";
+  const { message = "Hello from Talking Care Navigator!" } = await req.json().catch(() => ({}));
 
-  if (mode !== "stream") {
-    return new Response(JSON.stringify({ ok: true, message: msg }), {
+  if (mode === "echo") {
+    // Plain JSON response
+    return new Response(JSON.stringify({ ok: true, message }), {
       status: 200,
-      headers: { "Content-Type": "application/json; charset=utf-8", ...headers }
+      headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders() }
     });
   }
 
-  // SSE streaming
+  // SSE streaming test
   const stream = new ReadableStream({
-    start(controller) {
-      const enc = (obj, event = "message") => {
-        const lines = [];
-        if (event) lines.push(`event: ${event}`);
-        lines.push(`data: ${JSON.stringify(obj)}`);
-        lines.push(""); // blank line
-        controller.enqueue(new TextEncoder().encode(lines.join("\n")));
-      };
-
-      // let browsers know
-      enc({ ok: true }, "start");
-
-      const chunks = [
-        `{"message":"`,
-        msg.slice(0, Math.ceil(msg.length * 0.33)),
-        msg.slice(Math.ceil(msg.length * 0.33), Math.ceil(msg.length * 0.66)),
-        msg.slice(Math.ceil(msg.length * 0.66)) + `"}`
-      ];
-
-      let i = 0;
-      const interval = setInterval(() => {
-        if (i < chunks.length) {
-          enc({ chunk: chunks[i++] }, "chunk");
-        } else {
-          enc("[DONE]", "done");
-          clearInterval(interval);
-          controller.close();
-        }
-      }, 120);
+    async start(controller) {
+      controller.enqueue(sse("start", { ok: true }));
+      const parts = [`{"message":"`, ...message.split(""), `"}`];
+      for (const p of parts) {
+        await wait(120);
+        controller.enqueue(sse("thread.message.delta", { delta: { content: [{ type: "output_text_delta", text: p }] } }));
+      }
+      controller.enqueue(sse("done", "[DONE]"));
+      controller.close();
     }
   });
 
   return new Response(stream, {
     status: 200,
     headers: {
-      ...headers,
+      ...corsHeaders(),
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       "Connection": "keep-alive",
@@ -70,10 +57,9 @@ export async function POST(req) {
   });
 }
 
-export async function GET() {
-  // Helpful for quick health checks
-  return new Response("OK", {
-    status: 200,
-    headers: { "Content-Type": "text/plain; charset=utf-8", ...commonCorsHeaders() }
-  });
+function sse(event, data) {
+  const enc = new TextEncoder();
+  const payload = typeof data === "string" ? data : JSON.stringify(data);
+  return enc.encode(`event: ${event}\n` + `data: ${payload}\n\n`);
 }
+function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
