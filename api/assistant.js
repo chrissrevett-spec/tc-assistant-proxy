@@ -1,17 +1,19 @@
-// api/assistant.js — STREAMING SSE proxy for OpenAI Assistants v2
-// Branding: "Talking Care Navigator" (by Talking Care)
-// CORS enabled. Falls back to non-streaming if SSE is unavailable.
+// api/assistant.js — Combined STREAM + JSON for OpenAI Assistants v2
+// Branding: Talking Care Navigator
 
 module.exports = async function (req, res) {
   /* ---------- CORS ---------- */
-  const ORIGIN = req.headers.origin || "*"; // tighten later to your domains
+  const ORIGIN = req.headers.origin || "*";
   res.setHeader("Access-Control-Allow-Origin", ORIGIN);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-vercel-protection-bypass");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-vercel-protection-bypass, Accept");
   res.setHeader("Access-Control-Max-Age", "86400");
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const streamOff = url.searchParams.get("stream") === "off";
 
   try {
     /* ---------- Read JSON body ---------- */
@@ -25,8 +27,8 @@ module.exports = async function (req, res) {
     }
 
     /* ---------- Env ---------- */
-    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;  // set in Vercel
-    const ASSISTANT_ID   = process.env.ASSISTANT_ID;    // asst_...
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    const ASSISTANT_ID   = process.env.ASSISTANT_ID;
     if (!OPENAI_API_KEY || !ASSISTANT_ID) {
       res.status(500).json({ ok:false, error:"Server not configured (missing env vars)." });
       return;
@@ -36,7 +38,8 @@ module.exports = async function (req, res) {
     const H = {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
-      "OpenAI-Beta": "assistants=v2"
+      "OpenAI-Beta": "assistants=v2",
+      "Accept": streamOff ? "application/json" : "text/event-stream"
     };
     const U = p => `https://api.openai.com/v1${p}`;
 
@@ -68,59 +71,65 @@ module.exports = async function (req, res) {
     const mJ = await mR.json();
     if (!mR.ok) { res.status(mR.status).json({ ok:false, step:"add_message", error:mJ }); return; }
 
-    /* ---------- 3) Try to stream the run via SSE ---------- */
-    // We attempt: POST /threads/{threadId}/runs?stream=true  (SSE)
-    let sseResp = await fetch(U(`/threads/${threadId}/runs?stream=true`), {
-      method:"POST", headers:H,
-      body: JSON.stringify({ assistant_id: ASSISTANT_ID, instructions: BRAND_INSTRUCTIONS })
-    });
+    /* ---------- Paths ---------- */
+    // We keep answers short to prevent host/proxy timeouts
+    const runBody = {
+      assistant_id: ASSISTANT_ID,
+      instructions: BRAND_INSTRUCTIONS,
+      max_completion_tokens: 500,
+      temperature: 0.3
+    };
 
-    if (sseResp.ok && sseResp.headers.get("content-type")?.includes("text/event-stream")) {
-      // Prepare our SSE response to the browser
-      res.writeHead(200, {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-cache, no-transform",
-        "Connection": "keep-alive",
-        // Allow browsers to keep connection open
-        "X-Accel-Buffering": "no"
+    if (!streamOff) {
+      // ---------- STREAM via SSE ----------
+      const sseResp = await fetch(U(`/threads/${threadId}/runs?stream=true`), {
+        method:"POST", headers:H, body: JSON.stringify(runBody)
       });
 
-      // Keep-alive ping every 20s
-      const keepAlive = setInterval(() => {
-        try { res.write(": keep-alive\n\n"); } catch (_) {}
-      }, 20000);
+      const ct = sseResp.headers.get("content-type") || "";
+      const isSSE = sseResp.ok && ct.includes("text/event-stream");
 
-      try {
-        // Pipe OpenAI's SSE stream directly to the client
-        const reader = sseResp.body.getReader();
-        const decoder = new TextDecoder("utf-8");
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (value) {
-            const chunk = decoder.decode(value, { stream: true });
-            // Relay exactly as we receive (already SSE formatted)
-            res.write(chunk);
+      if (isSSE) {
+        // anti-buffering headers
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          "Connection": "keep-alive",
+          "Content-Encoding": "identity",
+          "X-Accel-Buffering": "no"
+        });
+        res.flushHeaders?.();
+
+        const keepAlive = setInterval(() => {
+          try { res.write(": keep-alive\n\n"); } catch {}
+        }, 15000);
+
+        try {
+          const reader = sseResp.body.getReader();
+          const decoder = new TextDecoder("utf-8");
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value) res.write(decoder.decode(value, { stream: true }));
           }
+          res.write("data: [DONE]\n\n");
+          res.end();
+        } catch (e) {
+          try {
+            res.write(`event: error\ndata: ${JSON.stringify({ message: String(e) })}\n\n`);
+            res.end();
+          } catch {}
+        } finally {
+          clearInterval(keepAlive);
         }
-        // Finish
-        res.write("data: [DONE]\n\n");
-        res.end();
-      } catch (e) {
-        // On stream error, end connection
-        try { res.write(`event: error\ndata: ${JSON.stringify({ message: String(e) })}\n\n`); } catch (_) {}
-        try { res.end(); } catch (_) {}
-      } finally {
-        clearInterval(keepAlive);
+        return;
       }
-      return;
+      // If we get here, stream wasn’t available; fall through to JSON path
     }
 
-    /* ---------- 4) Fallback: non-streaming poll + one-shot JSON ---------- */
-    // If we got here, streaming wasn't available; make a normal run and poll
+    // ---------- JSON one-shot fallback ----------
     const rR = await fetch(U(`/threads/${threadId}/runs`), {
-      method:"POST", headers:H,
-      body: JSON.stringify({ assistant_id: ASSISTANT_ID, instructions: BRAND_INSTRUCTIONS })
+      method:"POST", headers:H, body: JSON.stringify(runBody)
     });
     const run = await rR.json();
     if (!rR.ok) { res.status(rR.status).json({ ok:false, step:"create_run", error:run }); return; }
@@ -128,7 +137,7 @@ module.exports = async function (req, res) {
     const started = Date.now();
     let status = run.status, runId = run.id;
     while (["queued","in_progress","requires_action"].includes(status)) {
-      if (Date.now() - started > 120000) { // 2 minutes
+      if (Date.now() - started > 120000) {
         res.status(504).json({ ok:false, error:"Timeout waiting for run.", thread_id: threadId, run_id: runId });
         return;
       }
@@ -139,15 +148,14 @@ module.exports = async function (req, res) {
       status = sJ.status;
     }
 
-    // Get messages and return the last assistant text as a plain JSON (not SSE)
     const gR = await fetch(U(`/threads/${threadId}/messages?order=desc&limit=5`), { headers:H });
     const gJ = await gR.json();
     if (!gR.ok) { res.status(gR.status).json({ ok:false, step:"get_messages", error:gJ }); return; }
 
     const assistantMsg = (gJ.data || []).find(m => m.role === "assistant");
     const text = assistantMsg?.content?.find(c => c.type === "text")?.text?.value || "(no text)";
-    res.status(200).json({ ok:true, thread_id: threadId, text });
 
+    res.status(200).json({ ok:true, thread_id: threadId, text, citations: [], usage: run.usage || null });
   } catch (e) {
     res.status(500).json({ ok:false, error:String(e?.message || e) });
   }
