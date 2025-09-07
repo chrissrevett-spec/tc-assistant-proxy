@@ -1,231 +1,210 @@
-import { commonCorsHeaders, errJson, handleOptions } from "./_cors.js";
+export const config = { runtime: "nodejs22.x" };
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID || "";
-const OPENAI_BASE = process.env.OPENAI_BASE || "https://api.openai.com";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const ASSISTANT_ID   = process.env.OPENAI_ASSISTANT_ID;
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
 
-async function openai(path, init = {}) {
-  const headers = {
-    "Authorization": `Bearer ${OPENAI_API_KEY}`,
-    "Content-Type": "application/json",
-    ...(init.headers || {})
-  };
-  return fetch(`${OPENAI_BASE}${path}`, { ...init, headers });
-}
-
-function sseHeaders() {
+function corsHeaders(extra = {}) {
   return {
-    ...commonCorsHeaders(),
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache, no-transform",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no"
+    "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Accept, x-vercel-protection-bypass",
+    "Access-Control-Max-Age": "86400",
+    "Vary": "Origin",
+    ...extra
   };
 }
 
-function jsonHeaders() {
-  return {
-    "Content-Type": "application/json; charset=utf-8",
-    ...commonCorsHeaders()
-  };
+function json(status, body) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders() }
+  });
 }
 
-export async function OPTIONS() { return handleOptions(); }
+export async function OPTIONS() {
+  // Vercel also injects headers via vercel.json, but answering explicitly is safest.
+  return new Response(null, { status: 204, headers: corsHeaders() });
+}
 
-export async function POST(req) {
-  // Validate env first — return 400 JSON so the UI can show a useful error.
-  if (!OPENAI_API_KEY) {
-    return errJson(400, { ok: false, error: "Missing OPENAI_API_KEY" });
-  }
-  if (!OPENAI_ASSISTANT_ID) {
-    return errJson(400, { ok: false, error: "Missing OPENAI_ASSISTANT_ID" });
-  }
+export default async function handler(req) {
+  try {
+    if (req.method === "OPTIONS") return OPTIONS();
 
-  let body = {};
-  try { body = await req.json(); } catch {}
-  const userMessage = (body && body.userMessage) ? String(body.userMessage) : "";
-  let threadId = body && body.threadId ? String(body.threadId) : null;
+    if (!OPENAI_API_KEY) return json(500, { ok: false, error: "Missing OPENAI_API_KEY" });
+    if (!ASSISTANT_ID)   return json(500, { ok: false, error: "Missing OPENAI_ASSISTANT_ID" });
 
-  if (!userMessage) {
-    return errJson(400, { ok: false, error: "Missing userMessage" });
-  }
+    // Parse query and body
+    const url = new URL(req.url);
+    const streamOff = url.searchParams.get("stream") === "off";
 
-  const url = new URL(req.url);
-  const noStream = url.searchParams.get("stream") === "off";
+    const { userMessage, threadId } = await req.json().catch(() => ({}));
+    if (!userMessage) return json(400, { ok: false, error: "Missing userMessage" });
 
-  // Ensure a thread exists
-  if (!threadId) {
-    const r = await openai("/v1/threads", { method: "POST" });
-    if (!r.ok) {
-      const t = await r.text().catch(() => "");
-      return errJson(502, { ok: false, step: "create_thread", error: safeErr(t) });
-    }
-    const j = await r.json();
-    threadId = j.id;
-  }
-
-  // Add user message
-  {
-    const r = await openai(`/v1/threads/${threadId}/messages`, {
-      method: "POST",
-      body: JSON.stringify({ role: "user", content: userMessage })
-    });
-    if (!r.ok) {
-      const t = await r.text().catch(() => "");
-      // Busy thread case is common; surface clearly
-      return errJson(409, { ok: false, step: "add_message", error: safeErr(t), thread_id: threadId });
-    }
-  }
-
-  if (noStream) {
-    // ---------- Non-streaming path ----------
-    // Create run
-    let runId;
-    {
-      const r = await openai(`/v1/threads/${threadId}/runs`, {
+    // 1) Ensure thread
+    let tid = threadId;
+    if (!tid) {
+      const r = await fetch("https://api.openai.com/v1/threads", {
         method: "POST",
-        body: JSON.stringify({ assistant_id: OPENAI_ASSISTANT_ID })
+        headers: {
+          "Authorization": `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
       });
       if (!r.ok) {
-        const t = await r.text().catch(() => "");
-        return errJson(502, { ok: false, step: "create_run", error: safeErr(t), thread_id: threadId });
+        const t = await r.text();
+        return json(502, { ok: false, step: "create_thread", error: safeParse(t) ?? t });
       }
-      const j = await r.json();
-      runId = j.id;
+      const data = await r.json();
+      tid = data.id;
     }
 
-    // Poll for completion (simple polling; short backoff)
-    let done = false, usage = null;
-    for (let i = 0; i < 60; i++) {
-      await sleep(1000);
-      const r = await openai(`/v1/threads/${threadId}/runs/${runId}`, { method: "GET" });
-      if (!r.ok) continue;
-      const j = await r.json();
-      if (j.status === "completed") {
-        usage = j.usage || null;
-        done = true;
-        break;
+    // 2) Add user message
+    {
+      const r = await fetch(`https://api.openai.com/v1/threads/${tid}/messages`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ role: "user", content: userMessage })
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        // Busy run case (active run) — surface clearly to the widget so it can clear thread
+        return json(400, { ok: false, step: "add_message", error: safeParse(t) ?? t, thread_id: tid });
       }
-      if (["failed", "cancelled", "expired"].includes(j.status)) {
-        return errJson(502, { ok: false, step: "run_status", status: j.status, thread_id: threadId });
-      }
-    }
-    if (!done) {
-      return errJson(504, { ok: false, step: "timeout", error: "Run did not complete in time", thread_id: threadId });
     }
 
-    // Fetch latest assistant message
-    const r = await openai(`/v1/threads/${threadId}/messages?limit=1&order=desc`, { method: "GET" });
-    if (!r.ok) {
-      const t = await r.text().catch(() => "");
-      return errJson(502, { ok: false, step: "get_messages", error: safeErr(t), thread_id: threadId });
-    }
-    const j = await r.json();
-    const text = extractAssistantText(j) || "No text.";
-    const citations = extractCitations(j);
+    // 3) STREAMING branch
+    if (!streamOff) {
+      const upstream = await fetch(`https://api.openai.com/v1/threads/${tid}/runs`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ assistant_id: ASSISTANT_ID, stream: true })
+      });
 
-    return new Response(JSON.stringify({ ok: true, thread_id: threadId, text, citations, usage }), {
-      status: 200,
-      headers: jsonHeaders()
+      if (!upstream.ok || !upstream.body) {
+        const t = upstream ? await upstream.text().catch(() => "") : "";
+        return json(502, { ok: false, step: "create_run", error: safeParse(t) ?? t, thread_id: tid });
+      }
+
+      // Proxy SSE from OpenAI to the browser
+      const clientStream = new ReadableStream({
+        async start(controller) {
+          // Send a small 'start' event so the client knows the stream really began
+          controller.enqueue(encodeSSE("start", { ok: true, thread_id: tid }));
+
+          const reader = upstream.body.getReader();
+          const decoder = new TextDecoder();
+          try {
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              const chunk = decoder.decode(value, { stream: true });
+              controller.enqueue(new TextEncoder().encode(chunk));
+            }
+          } catch (e) {
+            controller.enqueue(encodeSSE("error", { message: String(e?.message || e) }));
+          } finally {
+            controller.enqueue(encodeSSE("done", "[DONE]"));
+            controller.close();
+          }
+        }
+      });
+
+      return new Response(clientStream, {
+        status: 200,
+        headers: {
+          ...corsHeaders(),
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          "Connection": "keep-alive",
+          "X-Accel-Buffering": "no"
+        }
+      });
+    }
+
+    // 4) NON-STREAM: create run, poll until completed, fetch final message text
+    const run = await fetch(`https://api.openai.com/v1/threads/${tid}/runs`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "assistants=v2",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ assistant_id: ASSISTANT_ID })
     });
-  }
 
-  // ---------- Streaming path ----------
-  // Create a streaming run and forward OpenAI SSE to the browser
-  const upstream = await openai(`/v1/threads/${threadId}/runs`, {
-    method: "POST",
-    body: JSON.stringify({ assistant_id: OPENAI_ASSISTANT_ID, stream: true })
-  });
-
-  if (!upstream.ok || !upstream.body) {
-    const t = await upstream.text().catch(() => "");
-    // Busy-thread or other errors bubble up cleanly
-    return errJson(502, { ok: false, step: "create_run_stream", error: safeErr(t), thread_id: threadId });
-  }
-
-  const reader = upstream.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-
-  const stream = new ReadableStream({
-    async start(controller) {
-      // Send a small "start" event for client code
-      const send = (event, data) => {
-        const lines = [];
-        if (event) lines.push(`event: ${event}`);
-        lines.push(`data: ${typeof data === "string" ? data : JSON.stringify(data)}`);
-        lines.push("");
-        controller.enqueue(new TextEncoder().encode(lines.join("\n")));
-      };
-
-      send("start", { ok: true, thread_id: threadId });
-
-      let done;
-      while (true) {
-        ({ value: done } = await readAndForward(reader, decoder, controller));
-        if (done) break;
-      }
-      controller.close();
+    if (!run.ok) {
+      const t = await run.text();
+      return json(502, { ok: false, step: "create_run", error: safeParse(t) ?? t, thread_id: tid });
     }
-  });
+    const runData = await run.json();
 
-  return new Response(stream, { status: 200, headers: sseHeaders() });
+    // Poll
+    let status = runData.status;
+    let safetyCounter = 0;
+    while (!["completed", "failed", "requires_action", "cancelled", "expired"].includes(status)) {
+      await sleep(900);
+      safetyCounter++;
+      const r = await fetch(`https://api.openai.com/v1/threads/${tid}/runs/${runData.id}`, {
+        headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "assistants=v2" }
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        return json(502, { ok: false, step: "get_run", error: safeParse(t) ?? t, thread_id: tid });
+      }
+      const d = await r.json();
+      status = d.status;
+      if (safetyCounter > 200) break; // ~3 minutes safeguard
+    }
+
+    if (status !== "completed") {
+      return json(502, { ok: false, step: "run_status", status, thread_id: tid });
+    }
+
+    // Get the latest assistant message
+    const msgs = await fetch(`https://api.openai.com/v1/threads/${tid}/messages?limit=10&order=desc`, {
+      headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "assistants=v2" }
+    });
+    if (!msgs.ok) {
+      const t = await msgs.text();
+      return json(502, { ok: false, step: "list_messages", error: safeParse(t) ?? t, thread_id: tid });
+    }
+    const list = await msgs.json();
+    const first = (list.data || []).find(m => m.role === "assistant");
+    const text = extractText(first);
+
+    return json(200, { ok: true, thread_id: tid, text, citations: [], usage: null });
+  } catch (err) {
+    return json(500, { ok: false, error: String(err?.message || err) });
+  }
 }
 
-/* ---------------- helpers ---------------- */
-
+// helpers
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function safeErr(raw) {
-  try {
-    const j = JSON.parse(raw);
-    return j;
-  } catch {
-    return String(raw || "Unknown error");
-  }
-}
-
-function extractAssistantText(listResponse) {
-  // listResponse.data[0] is the newest message
-  const m = listResponse?.data?.find(x => x.role === "assistant") || listResponse?.data?.[0];
-  if (!m || !m.content) return "";
+function extractText(msg) {
+  if (!msg || !msg.content) return "";
   let out = "";
-  for (const part of m.content) {
-    if (part.type === "text" && part.text?.value) out += part.text.value;
+  for (const c of msg.content) {
+    if (c.type === "text" && c.text?.value) out += c.text.value;
   }
   return out.trim();
 }
 
-function extractCitations(listResponse) {
-  const m = listResponse?.data?.find(x => x.role === "assistant") || listResponse?.data?.[0];
-  if (!m || !m.content) return [];
-  const cites = [];
-  for (const part of m.content) {
-    if (part.type === "text" && Array.isArray(part.text?.annotations)) {
-      for (const a of part.text.annotations) {
-        if (a?.file_citation?.file_id) cites.push({ type: "file", file_id: a.file_citation.file_id, quote: a.text || null });
-        if (a?.file_path?.file_id)    cites.push({ type: "file_path", file_id: a.file_path.file_id, path: a.file_path.path || null });
-        if (a?.url)                   cites.push({ type: "url", url: a.url });
-      }
-    }
-  }
-  return cites;
+function encodeSSE(event, data) {
+  const enc = new TextEncoder();
+  const payload = typeof data === "string" ? data : JSON.stringify(data);
+  return enc.encode(`event: ${event}\n` + `data: ${payload}\n\n`);
 }
 
-// Read from OpenAI SSE and forward chunks to our client as SSE.
-// Returns {value:true} when upstream ends.
-async function readAndForward(reader, decoder, controller) {
-  const { value, done } = await reader.read();
-  if (done) {
-    controller.enqueue(new TextEncoder().encode(`event: done\ndata: [DONE]\n\n`));
-    return { value: true };
-  }
-  const chunk = decoder.decode(value, { stream: true });
-  // OpenAI sends "data: {...}\n\n", possibly with "event: ...\n"
-  // We forward as-is (normalised) so your front-end parser works.
-  const blocks = chunk.split("\n\n");
-  for (const b of blocks) {
-    if (!b.trim()) continue;
-    controller.enqueue(new TextEncoder().encode(b.trim() + "\n\n"));
-  }
-  return { value: false };
-}
+function safeParse(t) { try { return JSON.parse(t); } catch { return null; } }
