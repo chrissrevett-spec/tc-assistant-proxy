@@ -1,26 +1,39 @@
-export const config = { runtime: "nodejs22.x" };
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
+export const config = { runtime: "nodejs" };
 
-function corsHeaders(extra = {}) {
+const PROD_ORIGIN = "https://www.talkingcare.uk";
+const EXTRA_ORIGIN = process.env.CORS_DEBUG_ORIGIN || "";
+function corsOrigin(req) {
+  const o = req.headers.get("origin");
+  if (o === PROD_ORIGIN || (EXTRA_ORIGIN && o === EXTRA_ORIGIN)) return o;
+  return PROD_ORIGIN;
+}
+function baseCorsHeaders(origin) {
   return {
-    "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Accept, x-vercel-protection-bypass",
-    "Access-Control-Max-Age": "86400",
+    "Access-Control-Allow-Origin": origin,
     "Vary": "Origin",
-    ...extra
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, x-vercel-protection-bypass, Accept",
+    "Access-Control-Max-Age": "86400"
   };
 }
-
-export async function OPTIONS() {
-  return new Response(null, { status: 204, headers: corsHeaders() });
+function json(body, { status = 200, headers = {} } = {}) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8", ...headers },
+  });
 }
 
 export default async function handler(req) {
-  if (req.method === "OPTIONS") return OPTIONS();
-  // Fire-and-forget logger (no storage, just a health check)
-  return new Response(JSON.stringify({ ok: true }), {
-    status: 200,
-    headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders() }
-  });
+  const origin = corsOrigin(req);
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: baseCorsHeaders(origin) });
+  }
+  if (req.method !== "POST") {
+    return json({ ok: false, error: "Method not allowed" }, { status: 405, headers: baseCorsHeaders(origin) });
+  }
+
+  // Fire-and-forget logging (keep simple)
+  try { await req.json(); } catch {}
+
+  return json({ ok: true }, { headers: baseCorsHeaders(origin) });
 }
