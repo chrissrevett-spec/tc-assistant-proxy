@@ -1,7 +1,15 @@
 {
   "functions": {
-    "api/**.js": {
-      "runtime": "nodejs18.x"
+    "api/**.js": { "runtime": "nodejs22.x" }
+  },
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" },
+        { "key": "X-Accel-Buffering", "value": "no" },
+        { "key": "Content-Encoding", "value": "identity" }
+      ]
     }
-  }
+  ]
 }
