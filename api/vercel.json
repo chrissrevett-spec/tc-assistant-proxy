@@ -2,7 +2,6 @@
   "version": 2,
   "name": "tc-assistant-proxy",
   "public": false,
-
   "functions": {
     "api/*.js": {
       "runtime": "nodejs22.x",
@@ -10,7 +9,6 @@
       "maxDuration": 60
     }
   },
-
   "headers": [
     {
       "source": "/api/(assistant|assistant_json)",
@@ -23,17 +21,7 @@
       ]
     },
     {
-      "source": "/api/log",
-      "headers": [
-        { "key": "Access-Control-Allow-Origin",  "value": "https://www.talkingcare.uk" },
-        { "key": "Vary",                         "value": "Origin" },
-        { "key": "Access-Control-Allow-Methods", "value": "POST, OPTIONS" },
-        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, x-vercel-protection-bypass, Accept" },
-        { "key": "Access-Control-Max-Age",       "value": "86400" }
-      ]
-    },
-    {
-      "source": "/api/echo",
+      "source": "/api/(log|echo)",
       "headers": [
         { "key": "Access-Control-Allow-Origin",  "value": "https://www.talkingcare.uk" },
         { "key": "Vary",                         "value": "Origin" },
@@ -43,7 +31,6 @@
       ]
     }
   ],
-
   "routes": [
     { "src": "/api/(.*)", "dest": "/api/$1" }
   ]
