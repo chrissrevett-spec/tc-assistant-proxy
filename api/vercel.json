@@ -5,7 +5,7 @@
 
   "functions": {
     "api/*.js": {
-      "runtime": "nodejs22.x",
+      "runtime": "nodejs",
       "memory": 1024,
       "maxDuration": 60
     }
@@ -18,7 +18,7 @@
         { "key": "Access-Control-Allow-Origin",  "value": "https://www.talkingcare.uk" },
         { "key": "Vary",                         "value": "Origin" },
         { "key": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" },
-        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Accept, x-vercel-protection-bypass" },
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, x-vercel-protection-bypass, Accept" },
         { "key": "Access-Control-Max-Age",       "value": "86400" }
       ]
     }
