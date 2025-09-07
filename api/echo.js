@@ -1,56 +1,79 @@
-const { corsHeaders, noContent, send } = require("./_cors");
+import { commonCorsHeaders, errJson, handleOptions } from "./_cors.js";
 
-function sseHead(res) {
-  const headers = corsHeaders({
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache, no-transform",
-    "Connection": "keep-alive",
-  });
-  for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
-  res.statusCode = 200;
-  res.flushHeaders?.();
-}
-function sse(res, evt, data) {
-  res.write(`event: ${evt}\n`);
-  res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
-}
+/**
+ * POST /api/echo
+ * - mode=stream → sends SSE "start", several "chunk" events with your message, and "done".
+ * - otherwise   → returns JSON { ok:true, message }
+ */
+export async function OPTIONS() { return handleOptions(); }
 
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (c) => (data += c));
-    req.on("end", () => {
-      try { resolve(data ? JSON.parse(data) : {}); }
-      catch (e) { reject(e); }
+export async function POST(req) {
+  const headers = commonCorsHeaders();
+
+  let body;
+  try { body = await req.json(); } catch { body = {}; }
+  const msg = (body && body.message) ? String(body.message) : "Hello";
+
+  const url = new URL(req.url);
+  const mode = url.searchParams.get("mode") || "json";
+
+  if (mode !== "stream") {
+    return new Response(JSON.stringify({ ok: true, message: msg }), {
+      status: 200,
+      headers: { "Content-Type": "application/json; charset=utf-8", ...headers }
     });
-    req.on("error", reject);
+  }
+
+  // SSE streaming
+  const stream = new ReadableStream({
+    start(controller) {
+      const enc = (obj, event = "message") => {
+        const lines = [];
+        if (event) lines.push(`event: ${event}`);
+        lines.push(`data: ${JSON.stringify(obj)}`);
+        lines.push(""); // blank line
+        controller.enqueue(new TextEncoder().encode(lines.join("\n")));
+      };
+
+      // let browsers know
+      enc({ ok: true }, "start");
+
+      const chunks = [
+        `{"message":"`,
+        msg.slice(0, Math.ceil(msg.length * 0.33)),
+        msg.slice(Math.ceil(msg.length * 0.33), Math.ceil(msg.length * 0.66)),
+        msg.slice(Math.ceil(msg.length * 0.66)) + `"}`
+      ];
+
+      let i = 0;
+      const interval = setInterval(() => {
+        if (i < chunks.length) {
+          enc({ chunk: chunks[i++] }, "chunk");
+        } else {
+          enc("[DONE]", "done");
+          clearInterval(interval);
+          controller.close();
+        }
+      }, 120);
+    }
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      ...headers,
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no"
+    }
   });
 }
 
-module.exports = async (req, res) => {
-  // CORS preflight
-  if (req.method === "OPTIONS") return noContent(res);
-
-  if (req.method !== "POST") return send(res, 405, "Method Not Allowed");
-
-  const url  = new URL(req.url, `http://${req.headers.host}`);
-  const mode = url.searchParams.get("mode") || "sse";
-
-  const body = await readBody(req).catch(() => ({}));
-  const msg  = body && body.message ? String(body.message) : "Hello";
-
-  if (mode === "echo") {
-    // Non-stream JSON test
-    return send(res, 200, { ok: true, echo: msg });
-  }
-
-  // SSE test
-  sseHead(res);
-  sse(res, "start", { ok: true });
-  for (const chunk of JSON.stringify({ message: msg }).match(/.{1,12}/g) || []) {
-    sse(res, "thread.message.delta", { delta: { content: [{ type: "output_text_delta", text: chunk }] } });
-    await new Promise(r => setTimeout(r, 120));
-  }
-  sse(res, "done", "[DONE]");
-  res.end();
-};
+export async function GET() {
+  // Helpful for quick health checks
+  return new Response("OK", {
+    status: 200,
+    headers: { "Content-Type": "text/plain; charset=utf-8", ...commonCorsHeaders() }
+  });
+}
