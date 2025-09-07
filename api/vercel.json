@@ -13,7 +13,7 @@
 
   "headers": [
     {
-      "source": "/api/(assistant|echo|log)",
+      "source": "/api/(.*)",
       "headers": [
         { "key": "Access-Control-Allow-Origin",  "value": "https://www.talkingcare.uk" },
         { "key": "Vary",                         "value": "Origin" },
