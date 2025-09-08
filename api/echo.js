@@ -1,63 +1,88 @@
 // File: api/echo.js
 
+const ORIGIN = "https://www.talkingcare.uk";
+
+/** Set CORS headers on every response */
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", ORIGIN);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+  res.setHeader("Access-Control-Max-Age", "86400");
+}
+
 export default async function handler(req, res) {
-  // Allow only POST requests
+  // CORS preflight
+  if (req.method === "OPTIONS") {
+    setCors(res);
+    return res.status(204).end();
+  }
+
+  // Only POST beyond this point
   if (req.method !== "POST") {
-    res.setHeader("Allow", ["POST"]);
+    setCors(res);
+    res.setHeader("Allow", "POST, OPTIONS");
     return res.status(405).json({ ok: false, error: "Method Not Allowed" });
   }
 
   try {
-    const { message } = req.body || {};
-    const mode = req.query.mode || "json";
+    setCors(res);
 
-    if (!message) {
-      return res.status(400).json({ ok: false, error: "Missing message in request body" });
-    }
+    const mode = (req.query.mode || "json").toString();
+    // Body may be empty in stream tests; make it optional
+    let message = "";
+    try { message = (req.body?.message ?? "").toString(); } catch {}
 
-    // --- STREAMING MODE ---
     if (mode === "stream") {
+      // --- SSE STREAM ---
       res.writeHead(200, {
         "Content-Type": "text/event-stream; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",
-        Connection: "keep-alive",
-        "Access-Control-Allow-Origin": "https://www.talkingcare.uk",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
+        "Connection": "keep-alive",
+        // Important: no Content-Length for SSE; do not gzip
       });
 
-      // Initial start event
-      res.write(`event: start\n`);
-      res.write(`data: ${JSON.stringify({ ok: true })}\n\n`);
+      // helper writers
+      const send = (event, dataObj) => {
+        res.write(`event: ${event}\n`);
+        res.write(`data: ${JSON.stringify(dataObj)}\n\n`);
+      };
 
-      // Stream message word by word
-      const words = `Echo stream from server ✅`.split(" ");
-      for (const word of words) {
-        res.write(`event: response.output_text.delta\n`);
-        res.write(`data: ${JSON.stringify({ delta: { type: "output_text_delta", text: word + " " } })}\n\n`);
-        await new Promise(r => setTimeout(r, 200));
+      // start event
+      send("start", { ok: true });
+
+      const words = (message?.trim()
+        ? `Echoing: ${message}`
+        : "Echo stream from server ✅").split(" ");
+
+      for (const w of words) {
+        send("response.output_text.delta", {
+          delta: { type: "output_text_delta", text: w + " " },
+        });
+        // small delay to simulate typing
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise(r => setTimeout(r, 180));
       }
 
-      // Final event
-      res.write(`event: done\n`);
-      res.write(`data: [DONE]\n\n`);
+      // light keep-alive (one ping, helps some proxies)
+      res.write(`: ping\n\n`);
 
+      send("done", "[DONE]");
       return res.end();
     }
 
-    // --- JSON MODE (default) ---
-    res.setHeader("Access-Control-Allow-Origin", "https://www.talkingcare.uk");
-    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    res.setHeader("Content-Type", "application/json");
-
+    // --- JSON MODE ---
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
     return res.status(200).json({
       ok: true,
-      message,
+      message: message || "Hello from echo (default)",
     });
 
   } catch (err) {
+    // Ensure CORS on error too (avoids “looks like CORS” masking real error)
+    setCors(res);
     console.error("Echo API Error:", err);
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
     return res.status(500).json({ ok: false, error: "Internal Server Error" });
   }
 }
