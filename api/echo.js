@@ -1,84 +1,59 @@
-// File: api/echo.js
+export const config = { runtime: "nodejs" };
 
-const ALLOWED_ORIGINS = new Set([
-  "https://www.talkingcare.uk",
-]);
+const ORIGIN = process.env.ALLOW_ORIGIN || "https://www.talkingcare.uk";
+const METHODS = "POST, OPTIONS";
+const HEADERS = "Content-Type, Accept";
+const MAX_AGE = "86400";
 
-function pickOrigin(req) {
-  const origin = req.headers?.origin || "";
-  return ALLOWED_ORIGINS.has(origin) ? origin : "https://www.talkingcare.uk";
-}
-
-function setCors(res, origin) {
-  res.setHeader("Access-Control-Allow-Origin", origin);
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", ORIGIN);
   res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
-  res.setHeader("Access-Control-Max-Age", "86400");
-}
-
-function endPreflight(res) {
-  res.statusCode = 204;
-  res.end();
+  res.setHeader("Access-Control-Allow-Methods", METHODS);
+  res.setHeader("Access-Control-Allow-Headers", HEADERS);
+  res.setHeader("Access-Control-Max-Age", MAX_AGE);
 }
 
 export default async function handler(req, res) {
-  const origin = pickOrigin(req);
-  setCors(res, origin);
-
-  if (req.method === "OPTIONS") {
-    return endPreflight(res);
-  }
-
+  setCors(res);
+  if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST, OPTIONS");
-    return res.status(405).json({ ok: false, error: "Method Not Allowed" });
+    return res.status(405).json({ ok:false, error:"Method Not Allowed" });
   }
 
-  try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
-    const { message } = body || {};
-    const mode = (req.query?.mode || "json").toString();
+  const mode = (req.query?.mode || "json").toString();
+  const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+  const message = body.message || "hello";
 
-    if (mode === "stream") {
-      res.writeHead(200, {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-cache, no-transform",
-        "Connection": "keep-alive",
-        "X-Accel-Buffering": "no",
-        "Access-Control-Allow-Origin": origin,
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Accept",
-      });
+  if (mode === "stream") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+      "Access-Control-Allow-Origin": ORIGIN,
+      "Access-Control-Allow-Methods": METHODS,
+      "Access-Control-Allow-Headers": HEADERS,
+    });
+    const send = (event, data) => {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
+    };
+    send("start", { ok:true });
 
-      const send = (event, data) => {
-        res.write(`event: ${event}\n`);
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
-      };
-
-      send("start", { ok: true });
-
-      const text = message ? `Echo stream: ${message}` : "Echo stream from server ✅";
-      const parts = text.split(" ");
-      for (const p of parts) {
-        send("response.output_text.delta", { delta: { type: "output_text_delta", text: p + " " } });
-        // eslint-disable-next-line no-await-in-loop
-        await new Promise(r => setTimeout(r, 120));
-      }
-
-      send("done", "[DONE]");
-      return res.end();
+    const parts = (`Echo stream: ${message} ✅`).split(" ");
+    for (const p of parts) {
+      send("response.output_text.delta", { delta: { type:"output_text_delta", text: p + " " }});
+      // tiny delay
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise(r => setTimeout(r, 80));
     }
 
-    if (!message) {
-      return res.status(400).json({ ok: false, error: "Missing 'message' in request body" });
-    }
-
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    return res.status(200).json({ ok: true, message });
-  } catch (err) {
-    console.error("Echo API Error:", err);
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    return res.status(500).json({ ok: false, error: "Internal Server Error" });
+    send("done", "[DONE]");
+    res.end();
+    return;
   }
+
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.status(200).json({ ok:true, message });
 }
