@@ -1,26 +1,27 @@
-// Runtime: Node on Vercel
-export const config = { runtime: "nodejs" };
+// api/assistant.js
+//
+// Assistants v2 proxy with JSON (non-stream) and SSE streaming modes.
+// Requirements (Vercel Project > Settings > Environment Variables):
+//   - OPENAI_API_KEY            (Required)   e.g. sk-...
+//   - OPENAI_ASSISTANT_ID       (Required)   e.g. asst_...
+//   - CORS_ALLOW_ORIGIN         (Optional)   default https://www.talkingcare.uk
+//
+// Notes:
+// - STREAM mode uses the official helper endpoint:
+//     POST /v1/threads/{thread_id}/runs/stream
+// - JSON mode creates a run and polls until completion, then returns the last message text.
 
-/**
- * ENV you MUST set at the Vercel project level (Project Settings → Environment Variables):
- *  - OPENAI_API_KEY         (required)
- *  - OPENAI_ASSISTANT_ID    (required) your assistants v2 assistant id, e.g. asst_XXXX
- *
- * Optional (if you want to restrict CORS to your prod site only):
- *  - ALLOW_ORIGIN=https://www.talkingcare.uk
- */
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID;
+const DEFAULT_ORIGIN = process.env.CORS_ALLOW_ORIGIN || "https://www.talkingcare.uk";
 
-const PROD_ORIGIN = process.env.ALLOW_ORIGIN || "https://www.talkingcare.uk";
-const ALLOWED_METHODS = "GET, POST, OPTIONS";
-const ALLOWED_HEADERS = "Content-Type, Accept";
-const MAX_AGE = "86400";
-
-function setCors(res, origin) {
+// --- Basic CORS helpers ---
+function setCors(res, origin = DEFAULT_ORIGIN) {
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", ALLOWED_METHODS);
-  res.setHeader("Access-Control-Allow-Headers", ALLOWED_HEADERS);
-  res.setHeader("Access-Control-Max-Age", MAX_AGE);
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+  res.setHeader("Access-Control-Max-Age", "86400"); // 1 day preflight cache
 }
 
 function endPreflight(res) {
@@ -28,264 +29,241 @@ function endPreflight(res) {
   res.end();
 }
 
-function bad(res, code, msg, extra = null) {
-  res.status(code).json({ ok: false, error: msg, ...(extra ? { detail: extra } : {}) });
+function pickOrigin(req) {
+  // If you want to strictly pin, just return DEFAULT_ORIGIN.
+  // If you want to allow the requesting Origin when present:
+  const origin = req.headers.origin || DEFAULT_ORIGIN;
+  return origin;
 }
 
-async function readJsonBody(req) {
-  try {
-    if (typeof req.body === "string") return JSON.parse(req.body || "{}");
-    if (req.body && typeof req.body === "object") return req.body;
-    // Manually read if body parsing is not applied
-    const buf = await new Promise((resolve, reject) => {
-      const chunks = [];
-      req.on("data", c => chunks.push(c));
-      req.on("end", () => resolve(Buffer.concat(chunks)));
-      req.on("error", reject);
-    });
-    return buf.length ? JSON.parse(buf.toString("utf-8")) : {};
-  } catch {
-    return {};
-  }
+// Small helper
+async function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
 }
 
-async function pollRunUntilTerminal(openaiKey, threadId, runId) {
-  const headers = {
-    "Authorization": `Bearer ${openaiKey}`,
-    "Content-Type": "application/json",
-    "OpenAI-Beta": "assistants=v2",
-  };
-
-  // Poll runs/{id}
-  for (;;) {
-    const r = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, { headers });
-    if (!r.ok) {
-      const t = await r.text().catch(() => "");
-      throw new Error(`pollRun failed: ${r.status} ${t}`);
-    }
-    const run = await r.json();
-    if (["completed", "failed", "cancelled", "expired"].includes(run.status)) return run;
-    await new Promise(r => setTimeout(r, 700));
-  }
-}
-
-async function listLatestAssistantMessage(openaiKey, threadId) {
-  const headers = {
-    "Authorization": `Bearer ${openaiKey}`,
-    "Content-Type": "application/json",
-    "OpenAI-Beta": "assistants=v2",
-  };
-
-  // We want the most recent assistant message
-  const r = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages?order=desc&limit=10`, { headers });
+// Get latest assistant text from thread
+async function fetchLatestMessageText(threadId) {
+  const r = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages?limit=20&order=desc`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "OpenAI-Beta": "assistants=v2",
+    },
+  });
   if (!r.ok) {
     const t = await r.text().catch(() => "");
-    throw new Error(`listMessages failed: ${r.status} ${t}`);
+    throw new Error(`messages list failed ${r.status}: ${t}`);
   }
   const data = await r.json();
-  const msg = (data?.data || []).find(m => m.role === "assistant");
-  if (!msg) return { text: "", citations: [] };
-
-  // Extract text + citations
-  let outText = "";
-  const cites = [];
-  for (const c of msg.content || []) {
-    if (c.type === "text") {
-      outText += c.text?.value || "";
-      const anns = c.text?.annotations || [];
-      for (const a of anns) {
-        if (a?.file_citation?.file_id) cites.push({ type: "file", file_id: a.file_citation.file_id });
-        if (a?.file_path?.file_id) cites.push({ type: "file_path", file_id: a.file_path.file_id, path: a.file_path.path || null });
-        if (a?.url) cites.push({ type: "url", url: a.url });
+  for (const m of data.data || []) {
+    if (m.role === "assistant" && Array.isArray(m.content)) {
+      for (const c of m.content) {
+        if (c.type === "output_text" && c.text?.value) return c.text.value;
+        if (c.type === "text" && c.text?.value) return c.text.value; // older shape just in case
       }
     }
   }
-  return { text: outText, citations: cites };
+  return "";
 }
 
 export default async function handler(req, res) {
-  const origin = req.headers.origin || PROD_ORIGIN;
+  const origin = pickOrigin(req);
   setCors(res, origin);
 
+  // OPTIONS preflight
   if (req.method === "OPTIONS") return endPreflight(res);
-  if (!["POST"].includes(req.method)) {
+
+  if (req.method !== "POST") {
     res.setHeader("Allow", "POST, OPTIONS");
-    return bad(res, 405, "Method Not Allowed");
+    return res.status(405).json({ ok: false, error: "Method Not Allowed" });
   }
 
-  const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-  const OPENAI_ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID || "";
+  // Validate env
+  if (!OPENAI_API_KEY || !OPENAI_ASSISTANT_ID) {
+    return res.status(500).json({ ok: false, error: "Missing OPENAI_API_KEY or OPENAI_ASSISTANT_ID" });
+  }
 
-  if (!OPENAI_API_KEY) return bad(res, 500, "Missing OPENAI_API_KEY");
-  if (!OPENAI_ASSISTANT_ID) return bad(res, 500, "Missing OPENAI_ASSISTANT_ID");
+  // Parse JSON body
+  const raw = typeof req.body === "string" ? req.body : JSON.stringify(req.body || {});
+  let body;
+  try { body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {}); }
+  catch { body = {}; }
+
+  const userMessage = (body.userMessage || "").toString();
+  let threadId = body.threadId || null;
+
+  // Decide mode: stream=off (default JSON) vs stream (SSE)
+  const url = new URL(req.url, "http://localhost");
+  const streamFlag = (url.searchParams.get("stream") || "").toLowerCase();
+  const wantStream = streamFlag && streamFlag !== "off";
 
   try {
-    const body = await readJsonBody(req);
-    const userMessage = (body.userMessage || "").toString();
-    let threadId = body.threadId || null;
-    const streamMode = (req.query?.stream || "").toString() !== "off";
-
-    if (!userMessage) return bad(res, 400, "Missing userMessage");
-
-    // 1) Create thread if none
+    // Ensure we have a thread
     if (!threadId) {
-      const r = await fetch("https://api.openai.com/v1/threads", {
+      const t = await fetch("https://api.openai.com/v1/threads", {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
           "OpenAI-Beta": "assistants=v2",
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({}),
       });
-      if (!r.ok) {
-        const t = await r.text().catch(() => "");
-        return bad(res, 502, "create_thread_failed", t);
+      if (!t.ok) {
+        const txt = await t.text().catch(() => "");
+        return res.status(502).json({ ok: false, step: "create_thread", error: txt || `thread create failed ${t.status}` });
       }
-      const data = await r.json();
-      threadId = data.id;
+      const td = await t.json();
+      threadId = td.id;
     }
 
-    // 2) Add the user message to the thread
-    {
-      const r = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-          "OpenAI-Beta": "assistants=v2",
-        },
-        body: JSON.stringify({ role: "user", content: userMessage }),
-      });
-      if (!r.ok) {
-        const t = await r.text().catch(() => "");
-        // Busy-run guard
-        if (t.includes("active run")) return bad(res, 409, "thread_busy_retry");
-        return bad(res, 502, "add_message_failed", t);
-      }
-    }
-
-    // 3) STREAMING path (SSE directly from OpenAI)
-    if (streamMode) {
-      // Important: return SSE headers to client first
+    // --- STREAMING MODE ---
+    if (wantStream) {
+      // SSE headers (also include CORS headers)
       res.writeHead(200, {
         "Content-Type": "text/event-stream; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
         "Access-Control-Allow-Origin": origin,
-        "Access-Control-Allow-Methods": ALLOWED_METHODS,
-        "Access-Control-Allow-Headers": ALLOWED_HEADERS,
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Accept",
       });
 
-      const send = (event, data) => {
+      const sse = (event, data) => {
         res.write(`event: ${event}\n`);
         res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
       };
 
-      // Start event for your UI
-      send("start", { ok: true, thread_id: threadId });
+      // Tell the client which thread we’re using
+      sse("start", { ok: true, thread_id: threadId });
 
-      // 3a) OpenAI run with stream=true
-      const openaiResp = await fetch(
-        `https://api.openai.com/v1/threads/${threadId}/runs/stream`,
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${OPENAI_API_KEY}`,
-            "Content-Type": "application/json",
-            "OpenAI-Beta": "assistants=v2",
-          },
-          body: JSON.stringify({
-            assistant_id: OPENAI_ASSISTANT_ID,
-            // You can also include instructions or metadata here if you want
-          }),
-        }
-      );
+      // Correct helper endpoint — THIS is the key fix:
+      // POST /v1/threads/{thread_id}/runs/stream  (Accept: text/event-stream)
+      const upstream = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs/stream`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2",
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({
+          assistant_id: OPENAI_ASSISTANT_ID,
+          // Use "instructions" to pass your composed prompt
+          instructions: userMessage || "Reply briefly.",
+        }),
+      });
 
-      if (!openaiResp.ok || !openaiResp.body) {
-        const text = await openaiResp.text().catch(() => "");
-        send("error", { ok: false, step: "create_run_stream", error: text || `HTTP ${openaiResp.status}` });
-        send("done", "[DONE]");
-        res.end();
-        return;
+      if (!upstream.ok || !upstream.body) {
+        const txt = await upstream.text().catch(() => "");
+        sse("error", { ok: false, step: "create_run_stream", error: txt || `upstream ${upstream.status}` });
+        sse("done", "[DONE]");
+        return res.end();
       }
 
-      // 3b) Pipe OpenAI SSE to your client, remapping only event names that your UI expects
-      const reader = openaiResp.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let buffer = "";
+      // Pipe OpenAI SSE through unchanged so your frontend can handle
+      const reader = upstream.body.getReader();
+      const decoder = new TextDecoder();
 
       try {
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const chunks = buffer.split("\n\n");
-          buffer = chunks.pop() || "";
-
-          for (const chunk of chunks) {
-            const lines = chunk.split("\n");
-            let event = null;
-            let data = "";
-            for (const line of lines) {
-              if (line.startsWith("event:")) event = line.slice(6).trim();
-              else if (line.startsWith("data:")) data += line.slice(5).trim();
-            }
-            if (!event) continue;
-
-            // Pass through most events as-is; your page already handles
-            // thread.message.delta and thread.run.completed etc.
-            // If you want to cohere names, you can map some:
-            // Example: event 'thread.message.delta' → keep same.
-            // We’ll just forward.
-            send(event, data === "" ? "{}" : data);
-          }
+          const chunk = decoder.decode(value, { stream: true });
+          // The chunk from OpenAI is already SSE-formatted (event: ..., data: ...).
+          // We forward as-is.
+          res.write(chunk);
         }
       } catch (e) {
-        send("error", { ok: false, error: "stream_broken" });
+        // If the client disconnects, just stop
       }
 
-      // 3c) Finalise
-      send("done", "[DONE]");
-      res.end();
-      return;
+      // End our stream cleanly
+      sse("done", "[DONE]");
+      return res.end();
     }
 
-    // 4) NON-STREAMING (poll until completed, then return last assistant message)
-    const createRun = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
+    // --- JSON (non-streaming) MODE ---
+    // 1) Add user message to the thread (optional in v2; instructions alone also works).
+    if (userMessage) {
+      const addMsg = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          role: "user",
+          content: userMessage,
+        }),
+      });
+      if (!addMsg.ok) {
+        const txt = await addMsg.text().catch(() => "");
+        return res.status(502).json({ ok: false, step: "add_message", error: txt || `add message failed ${addMsg.status}` });
+      }
+    }
+
+    // 2) Create a run
+    const runResp = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
         "OpenAI-Beta": "assistants=v2",
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify({ assistant_id: OPENAI_ASSISTANT_ID }),
+      body: JSON.stringify({
+        assistant_id: OPENAI_ASSISTANT_ID,
+        instructions: userMessage || "",
+      }),
     });
-    if (!createRun.ok) {
-      const t = await createRun.text().catch(() => "");
-      if (t.includes("active run")) return bad(res, 409, "thread_busy_retry");
-      return bad(res, 502, "create_run_failed", t);
+    if (!runResp.ok) {
+      const txt = await runResp.text().catch(() => "");
+      return res.status(502).json({ ok: false, step: "create_run", error: txt || `run create failed ${runResp.status}` });
     }
-    const run = await createRun.json();
+    const run = await runResp.json();
 
-    const terminal = await pollRunUntilTerminal(OPENAI_API_KEY, threadId, run.id);
-    if (terminal.status !== "completed") {
-      return bad(res, 502, "run_not_completed", terminal.status);
+    // 3) Poll for completion
+    let status = run.status;
+    let guard = 0;
+    while (!["completed", "failed", "cancelled", "expired"].includes(status)) {
+      await sleep(700);
+      guard++;
+      const check = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs/${run.id}`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2",
+        },
+      });
+      if (!check.ok) {
+        const txt = await check.text().catch(() => "");
+        return res.status(502).json({ ok: false, step: "get_run", error: txt || `get run failed ${check.status}` });
+      }
+      const info = await check.json();
+      status = info.status;
+      if (guard > 180) break; // ~2 minutes safety
     }
 
-    const { text, citations } = await listLatestAssistantMessage(OPENAI_API_KEY, threadId);
+    if (status !== "completed") {
+      return res.status(502).json({ ok: false, step: "run_status", error: `Run not completed (${status})`, thread_id: threadId });
+    }
+
+    // 4) Fetch last assistant message text
+    const text = await fetchLatestMessageText(threadId);
 
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     return res.status(200).json({
       ok: true,
-      text,
-      citations,
       thread_id: threadId,
-      usage: null, // (optional) you can call /runs/{id} usage if you need token stats
+      text,
+      citations: [],
+      usage: null,
     });
+
   } catch (err) {
-    console.error("assistant error:", err);
-    return bad(res, 500, "internal_error");
+    console.error("assistant API error:", err);
+    return res.status(500).json({ ok: false, error: "Internal Server Error" });
   }
 }
