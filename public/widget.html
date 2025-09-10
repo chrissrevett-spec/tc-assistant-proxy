@@ -1,66 +1,175 @@
- (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
-diff --git a/public/widget.html b/public/widget.html
-index ce8a32779ac396884a55c0c7dd8ac36922b92044..e20776ce2cee68758102ba697aa53bc4919ba19e 100644
---- a/public/widget.html
-+++ b/public/widget.html
-@@ -24,51 +24,56 @@
-       <div style="display:flex; flex-direction:column; gap:8px;">
-         <button id="tc-ask-stream">Ask (stream)</button>
-         <button id="tc-ask-json">Ask (non-stream)</button>
-         <button id="tc-clear">Clear</button>
-       </div>
-     </div>
-     <div id="out"></div>
-   </div>
- 
-   <script>
-   (function () {
-     // IMPORTANT: no automatic POST on load.
-     // User must click one of the buttons.
- 
-     const API_BASE = location.origin.replace(/\/$/, ""); // tc-assistant-proxy.vercel.app
-     const $in   = document.getElementById("tc-input");
-     const $out  = document.getElementById("out");
-     const $stat = document.getElementById("status");
-     const $btnS = document.getElementById("tc-ask-stream");
-     const $btnJ = document.getElementById("tc-ask-json");
-     const $btnC = document.getElementById("tc-clear");
- 
-     let currentThreadId = null;
- 
-     function setStatus(t){ $stat.textContent = t || ""; }
--    function append(t){ $out.textContent += t; }
-+    function append(t){
-+      // Ensure we always append text. If an object sneaks through, convert it
-+      // to a string so the UI doesn't render "[object Object]" repeatedly.
-+      if (t === undefined || t === null) return;
-+      $out.textContent += t.toString();
-+    }
-     function nl(){ append("\n"); }
-     function clearOut(){ $out.textContent = ""; }
- 
-     async function askJson(prompt) {
-       setStatus("Thinking…");
-       const r = await fetch(`${API_BASE}/api/assistant?stream=off`, {
-         method: "POST",
-         headers: { "Content-Type": "application/json", "Accept": "application/json" },
-         body: JSON.stringify({ userMessage: prompt, threadId: currentThreadId })
-       });
-       setStatus("");
-       if (!r.ok) { append(`⚠️ HTTP ${r.status}`); nl(); return; }
-       const data = await r.json().catch(() => null);
-       if (!data || !data.ok) { append("⚠️ Request failed."); nl(); return; }
-       if (data.thread_id) currentThreadId = data.thread_id;
-       if (data.text) append(data.text + "\n");
-     }
- 
-     async function askStream(prompt) {
-       setStatus("Typing…");
-       const r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
-         method: "POST",
-         headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
-         body: JSON.stringify({ userMessage: prompt, threadId: currentThreadId })
-       });
- 
-EOF
-)
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Talking Care Navigator</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 16px; }
+    .wrap { max-width: 820px; margin: 0 auto; }
+    .row { display: flex; gap: 8px; margin-bottom: 8px; }
+    textarea { flex: 1; min-height: 112px; padding: 10px; }
+    button { padding: 10px 14px; cursor: pointer; }
+    #status { font-size: 12px; opacity: .8; margin-bottom: 8px; }
+    #out { white-space: pre-wrap; border: 1px solid #9993; border-radius: 8px; padding: 12px; min-height: 160px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1 style="margin:0 0 8px">Talking Care Navigator</h1>
+    <div id="status"></div>
+    <div class="row">
+      <textarea id="tc-input" placeholder="Type your question…"></textarea>
+      <div style="display:flex; flex-direction:column; gap:8px;">
+        <button id="tc-ask-stream">Ask (stream)</button>
+        <button id="tc-ask-json">Ask (non-stream)</button>
+        <button id="tc-clear">Clear</button>
+      </div>
+    </div>
+    <div id="out"></div>
+  </div>
+
+  <script>
+  (function () {
+    // IMPORTANT: no automatic POST on load.
+    // User must click one of the buttons.
+
+    const API_BASE = location.origin.replace(/\/$/, ""); // tc-assistant-proxy.vercel.app
+    const $in   = document.getElementById("tc-input");
+    const $out  = document.getElementById("out");
+    const $stat = document.getElementById("status");
+    const $btnS = document.getElementById("tc-ask-stream");
+    const $btnJ = document.getElementById("tc-ask-json");
+    const $btnC = document.getElementById("tc-clear");
+
+    let currentThreadId = null;
+
+    function setStatus(t){ $stat.textContent = t || ""; }
+    function append(t){
+      // Ensure we always append text. If an object sneaks through, convert it
+      // to a string so the UI doesn't render "[object Object]" repeatedly.
+      if (t === undefined || t === null) return;
+      $out.textContent += t.toString();
+    }
+    function nl(){ append("\n"); }
+    function clearOut(){ $out.textContent = ""; }
+
+    async function askJson(prompt) {
+      setStatus("Thinking…");
+      const r = await fetch(`${API_BASE}/api/assistant?stream=off`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({ userMessage: prompt, threadId: currentThreadId })
+      });
+      setStatus("");
+      if (!r.ok) { append(`⚠️ HTTP ${r.status}`); nl(); return; }
+      const data = await r.json().catch(() => null);
+      if (!data || !data.ok) { append("⚠️ Request failed."); nl(); return; }
+      if (data.thread_id) currentThreadId = data.thread_id;
+      if (data.text) append(data.text + "\n");
+    }
+
+    async function askStream(prompt) {
+      setStatus("Typing…");
+      const r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+        body: JSON.stringify({ userMessage: prompt, threadId: currentThreadId })
+      });
+      if (!r.ok || !r.body) { setStatus(""); append(`⚠️ Stream HTTP ${r.status}`); nl(); return; }
+
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+
+      const flushBlocks = (chunk) => {
+        buffer += chunk;
+        const blocks = buffer.split(/\n\n/);
+        buffer = blocks.pop(); // keep partial
+        for (const block of blocks) {
+          // parse SSE block (multiple "data:" lines; optional "event:")
+          let event = "message";
+          const dataLines = [];
+          for (const line of block.split(/\n/)) {
+            if (!line) continue;
+            if (line.startsWith(":")) continue; // comment/keep-alive
+            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
+            if (line.startsWith("data:")) { dataLines.push(line.slice(5).trim()); continue; }
+          }
+          const raw = dataLines.join("\n");
+          handleEvent(event, raw);
+        }
+      };
+
+      function handleEvent(event, raw) {
+        if (event === "start") {
+          try { const d = JSON.parse(raw); if (d?.thread_id) currentThreadId = d.thread_id; } catch {}
+          return;
+        }
+
+        if (event === "done" ||
+            event === "response.completed" ||
+            event === "thread.message.completed") {
+          setStatus("");
+          return;
+        }
+
+        if (event === "error") {
+          setStatus("");
+          append(`⚠️ ${raw}`);
+          nl();
+          return;
+        }
+
+        try {
+          const d = JSON.parse(raw);
+          if (d?.delta?.text) append(d.delta.text);
+          else if (Array.isArray(d?.delta?.content)) {
+            for (const part of d.delta.content) {
+              if (part.type === "output_text_delta") append(part.text);
+            }
+          }
+        } catch {
+          // ignore JSON parse errors
+        }
+      }
+
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          flushBlocks(decoder.decode(value, { stream: true }));
+        }
+      } catch {
+        // network aborted
+      } finally {
+        setStatus("");
+      }
+    }
+
+    function guardAndGetPrompt() {
+      const p = ($in.value || "").trim();
+      if (!p) return null;
+      return p;
+    }
+
+    $btnS.addEventListener("click", async () => {
+      const p = guardAndGetPrompt(); if (!p) return;
+      clearOut();
+      await askStream(p);
+    });
+
+    $btnJ.addEventListener("click", async () => {
+      const p = guardAndGetPrompt(); if (!p) return;
+      clearOut();
+      await askJson(p);
+    });
+
+    $btnC.addEventListener("click", () => { clearOut(); setStatus(""); });
+
+    // No auto-call on load. No timers. No hidden test requests.
+  })();
+  </script>
+</body>
+</html>
