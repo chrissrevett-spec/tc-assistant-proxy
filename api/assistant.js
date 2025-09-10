@@ -1,250 +1,261 @@
-// api/assistant.js
+// /api/assistant.js
+// Node runtime on Vercel (NOT edge). Make sure vercel.json sets runtime: "nodejs" for api/*.
 //
-// Robust Assistants v2 JSON + Streaming proxy for Squarespace.
-// - Non-streaming: POST /api/assistant?stream=off  -> returns { ok, text, thread_id, citations, usage }
-// - Streaming:     POST /api/assistant            -> SSE pass-through of OpenAI events
-//
-// ENV required (at project level in Vercel):
-//   OPENAI_API_KEY           = sk-...               (required)
-//   OPENAI_ASSISTANT_ID      = asst_...             (required)
-// Optional:
-//   CORS_ALLOW_ORIGIN        = https://www.talkingcare.uk
-//   CORS_ALLOW_METHODS       = GET,POST,OPTIONS
-//   CORS_ALLOW_HEADERS       = Content-Type, Accept
-//
-// NOTE: We add 'OpenAI-Beta' automatically when calling OpenAI.
-//       We also widen CORS-Allow-Headers to include 'OpenAI-Beta' and 'Authorization' so your
-//       preflights never block (even if you add headers later).
+// Env you need (Project-level):
+// - OPENAI_API_KEY            (required)
+// - OPENAI_ASSISTANT_ID       (required)
+// - CORS_ALLOW_ORIGIN         (optional; default https://www.talkingcare.uk)
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const ASSISTANT_ID   = process.env.OPENAI_ASSISTANT_ID || "";
+const OPENAI_API = "https://api.openai.com/v1";
+const ASSISTANTS_BETA = "assistants=v2";
 
-if (!OPENAI_API_KEY) console.error("Missing OPENAI_API_KEY");
-if (!ASSISTANT_ID)   console.error("Missing OPENAI_ASSISTANT_ID");
+const ALLOW_ORIGIN = process.env.CORS_ALLOW_ORIGIN || "https://www.talkingcare.uk";
+const API_KEY = process.env.OPENAI_API_KEY || "";
+const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID || "";
 
-const ORIGIN  = process.env.CORS_ALLOW_ORIGIN  || "https://www.talkingcare.uk";
-const METHODS = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
-const HDRS    = (process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept")
-  // make sure these two are *always* present so future changes don't break preflight
-  .split(",").map(s=>s.trim()).filter(Boolean)
-  .concat(["OpenAI-Beta","Authorization"])
-  .filter((v,i,a)=>a.indexOf(v)===i) // dedupe
-  .join(", ");
-
-function setCORS(res) {
-  res.setHeader("Access-Control-Allow-Origin", ORIGIN);
+function setCORS(req, res) {
+  const origin = req.headers.origin || "";
+  const allow = origin && origin === ALLOW_ORIGIN ? origin : ALLOW_ORIGIN;
+  res.setHeader("Access-Control-Allow-Origin", allow);
   res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", METHODS);
-  res.setHeader("Access-Control-Allow-Headers", HDRS);
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-function json(res, code, obj) {
-  if (!res.headersSent) {
-    setCORS(res);
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-  }
-  res.status(code).end(JSON.stringify(obj));
+function endPreflight(res) {
+  res.statusCode = 204;
+  res.end();
 }
 
-async function oaJson(path, opt = {}) {
-  const url = `https://api.openai.com${path}`;
-  const r = await fetch(url, {
-    method: "POST",
+function bad(res, code, error) {
+  res.status(code).json({ ok: false, error });
+}
+
+async function oaFetch(path, opts = {}) {
+  const headers = {
+    "Authorization": `Bearer ${API_KEY}`,
+    "OpenAI-Beta": ASSISTANTS_BETA,
+    ...(opts.headers || {})
+  };
+  const r = await fetch(`${OPENAI_API}${path}`, { ...opts, headers });
+  return r;
+}
+
+async function oaJson(path, opts = {}) {
+  const r = await oaFetch(path, {
+    ...opts,
     headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
-      "OpenAI-Beta": "assistants=v2",
-      ...opt.headers
-    },
-    body: opt.body ? JSON.stringify(opt.body) : undefined
+      ...(opts.headers || {})
+    }
   });
   if (!r.ok) {
-    const errText = await r.text().catch(()=> "");
-    throw new Error(`${opt.method||"POST"} ${url} failed: ${r.status} ${errText || r.statusText}`);
+    const text = await r.text().catch(() => "");
+    throw new Error(`${opts.method || "GET"} ${OPENAI_API}${path} failed: ${r.status} ${text}`);
   }
   return r.json();
 }
 
-// GET event stream from OpenAI and pipe to client
-async function oaStream(path, res) {
-  const url = `https://api.openai.com${path}`;
-  const r = await fetch(url, {
-    method: "GET",
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Accept": "text/event-stream",
-      "OpenAI-Beta": "assistants=v2"
-    }
-  });
-  if (!r.ok || !r.body) {
-    const errText = await r.text().catch(()=> "");
-    throw new Error(`GET ${url} failed: ${r.status} ${errText || r.statusText}`);
-  }
+function isRunTerminal(status) {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "expired"
+  );
+}
 
-  // Prepare SSE headers for the browser
-  setCORS(res);
-  res.writeHead(200, {
+async function waitForRun(threadId, runId, timeoutMs = 60000, pollMs = 1100) {
+  const start = Date.now();
+  // Poll until run is terminal or timed out
+  // We keep it simple & robust.
+  while (true) {
+    const run = await oaJson(`/threads/${threadId}/runs/${runId}`, { method: "GET" });
+    if (isRunTerminal(run.status)) return run;
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`Run timeout after ${timeoutMs}ms (status: ${run.status})`);
+    }
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+}
+
+// Get last assistant message text (merge parts)
+function extractLastAssistantText(messages) {
+  for (const msg of (messages.data || [])) {
+    if (msg.role === "assistant") {
+      let text = "";
+      for (const p of (msg.content || [])) {
+        if (p.type === "text" && p.text?.value) text += p.text.value;
+      }
+      return text || "";
+    }
+  }
+  return "";
+}
+
+// Remove the raw “file file-xxxxx” dump from our JSON result.
+// We simply don’t return a separate citations array anymore.
+// If the assistant inserted inline bracketed citations, you’ll still see those in `text`.
+function stripCitationsForClient() {
+  return []; // intentionally empty
+}
+
+// STREAMING: pipe OpenAI SSE directly to client
+async function streamRunToClient({ res, threadId, instructions }) {
+  // Create run with stream=true -> OpenAI returns SSE directly in this single response.
+  const r = await oaFetch(`/threads/${threadId}/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: JSON.stringify({
+      assistant_id: ASSISTANT_ID,
+      // Optional: pass short per-run instructions if you need (we forward from client)
+      ...(instructions ? { instructions } : {}),
+      stream: true
+    })
+  });
+
+  // Forward OpenAI SSE headers
+  res.writeHead(r.status, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
-    "X-Accel-Buffering": "no"
+    "X-Accel-Buffering": "no",
+    "Access-Control-Allow-Origin": ALLOW_ORIGIN,
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Accept",
   });
 
-  // keep-alive pings (helps some proxies)
-  const keepAlive = setInterval(() => {
-    try { res.write(`: ping ${Date.now()}\n\n`); } catch {}
-  }, 15000);
+  if (!r.ok || !r.body) {
+    const text = await r.text().catch(() => "");
+    // Emit a single error event in SSE format
+    res.write(`event: error\n`);
+    res.write(`data: ${JSON.stringify({ ok: false, step: "create_run_stream", error: text || `HTTP ${r.status}` })}\n\n`);
+    res.write(`event: done\n`);
+    res.write(`data: [DONE]\n\n`);
+    res.end();
+    return;
+  }
 
+  // Optionally notify client of thread id up-front
+  res.write(`event: start\n`);
+  res.write(`data: ${JSON.stringify({ ok: true, thread_id: threadId })}\n\n`);
+
+  // Pipe chunks as-is
+  const reader = r.body.getReader();
   try {
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      const chunk = decoder.decode(value);
-      // Pass chunks straight through (already Server-Sent Events)
-      res.write(chunk);
+      if (value) res.write(Buffer.from(value));
     }
+  } catch (err) {
+    // Best-effort error event (stream may have ended already)
+    try {
+      res.write(`event: error\n`);
+      res.write(`data: ${JSON.stringify({ ok: false, step: "stream_forward", error: String(err && err.message || err) })}\n\n`);
+    } catch {}
   } finally {
-    clearInterval(keepAlive);
-    // end *once*
-    if (!res.writableEnded) res.end();
+    // Finish the SSE stream
+    try {
+      res.write(`event: done\n`);
+      res.write(`data: [DONE]\n\n`);
+    } catch {}
+    res.end();
   }
-}
-
-function extractTextAndCitations(messageObj) {
-  // Concatenate all text parts; extract URL annotations only (hide file_ids)
-  let text = "";
-  const cites = [];
-  for (const p of (messageObj?.content || [])) {
-    if (p.type === "text" && p.text?.value) {
-      text += p.text.value;
-      const anns = p.text.annotations || [];
-      for (const a of anns) {
-        if (a?.url) cites.push({ type: "url", url: a.url });
-      }
-    }
-  }
-  return { text, citations: cites };
 }
 
 export default async function handler(req, res) {
+  setCORS(req, res);
+
+  if (req.method === "OPTIONS") return endPreflight(res);
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "POST, OPTIONS");
+    return bad(res, 405, "Method Not Allowed");
+  }
+
+  if (!API_KEY || !ASSISTANT_ID) {
+    return bad(res, 500, "Server is missing OPENAI_API_KEY or OPENAI_ASSISTANT_ID");
+  }
+
   try {
-    setCORS(res);
-    if (req.method === "OPTIONS") return res.status(204).end();
-    if (req.method !== "POST")   return json(res, 405, { ok:false, error:"Method Not Allowed" });
-
-    // Parse JSON (Squarespace sometimes gives string bodies)
-    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
-    const streamOff = (req.query?.stream === "off");
-    const userMessage = (body.userMessage || "").toString();
-    let threadId = body.threadId || null;
-
-    if (!OPENAI_API_KEY) return json(res, 500, { ok:false, error:"Missing OPENAI_API_KEY" });
-    if (!ASSISTANT_ID)   return json(res, 500, { ok:false, error:"Missing OPENAI_ASSISTANT_ID" });
-    if (!userMessage)    return json(res, 400, { ok:false, error:"Missing userMessage" });
-
-    // Ensure a thread exists
-    if (!threadId) {
-      const t = await oaJson("/v1/threads");
-      threadId = t.id;
+    // Some browsers (or your site JS) may send text/plain; parse safely
+    let bodyRaw = req.body;
+    if (typeof bodyRaw !== "object") {
+      try { bodyRaw = JSON.parse(bodyRaw || "{}"); } catch { bodyRaw = {}; }
     }
 
-    // Add the user message
-    await oaJson(`/v1/threads/${threadId}/messages`, {
-      body: { role: "user", content: userMessage }
-    });
+    const { userMessage = "", threadId = null, instructions = "" } = bodyRaw;
+    const streamFlag = String((req.query?.stream || "off")).toLowerCase();
 
-    // Non-streaming: create a run, poll completion, fetch the latest assistant message, return as JSON
-    if (streamOff) {
-      const run = await oaJson(`/v1/threads/${threadId}/runs`, {
-        body: { assistant_id: ASSISTANT_ID }
-      });
+    // 1) Create or reuse thread
+    let tid = threadId;
+    if (!tid) {
+      // Create a new thread first; you can also create a combined run in one call, but
+      // we keep a clear sequence to match your existing client logic.
+      const t = await oaJson(`/threads`, { method: "POST", body: JSON.stringify({}) });
+      tid = t.id;
+    }
 
-      // Simple poll loop
-      let status = run.status;
-      let runId = run.id;
-      const started = Date.now();
-      while (status === "queued" || status === "in_progress") {
-        await new Promise(r => setTimeout(r, 600));
-        const rj = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, {
-          headers: {
-            "Authorization": `Bearer ${OPENAI_API_KEY}`,
-            "OpenAI-Beta": "assistants=v2"
-          }
-        });
-        if (!rj.ok) {
-          const et = await rj.text().catch(()=> "");
-          throw new Error(`GET run status failed: ${rj.status} ${et}`);
-        }
-        const rd = await rj.json();
-        status = rd.status;
-
-        // hard timeout guard (60s)
-        if (Date.now() - started > 60000) break;
-      }
-
-      // Fetch the latest messages
-      const msgsR = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages?limit=5&order=desc`, {
-        headers: {
-          "Authorization": `Bearer ${OPENAI_API_KEY}`,
-          "OpenAI-Beta": "assistants=v2"
-        }
-      });
-      if (!msgsR.ok) {
-        const et = await msgsR.text().catch(()=> "");
-        throw new Error(`GET messages failed: ${msgsR.status} ${et}`);
-      }
-      const msgsJ = await msgsR.json();
-
-      // Find the first assistant message
-      const assistantMsg = (msgsJ.data || []).find(m => m.role === "assistant");
-      const { text, citations } = assistantMsg ? extractTextAndCitations(assistantMsg) : { text: "", citations: [] };
-
-      return json(res, 200, {
-        ok: true,
-        text: text || "(no text)",
-        thread_id: threadId,
-        citations,
-        usage: null
+    // 2) Add user message to thread
+    if (userMessage && streamFlag !== "none") {
+      // Guard: If a previous run is somehow still active, OpenAI rejects new messages.
+      // You already handle clearing thread client-side on error; here we simply add message.
+      await oaJson(`/threads/${tid}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ role: "user", content: userMessage })
       });
     }
 
-    // Streaming: create a run, then GET /events and pipe it to the browser
-    const run = await oaJson(`/v1/threads/${threadId}/runs`, {
-      body: { assistant_id: ASSISTANT_ID }
-    });
-    const runId = run.id;
+    // 3) STREAMING mode — single request with stream=true (no /events)
+    if (streamFlag === "on" || streamFlag === "true") {
+      return await streamRunToClient({ res, threadId: tid, instructions });
+    }
 
-    // Pro tip: send a tiny "start" event before proxying OpenAI stream (UX feedback)
-    setCORS(res);
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive",
-      "X-Accel-Buffering": "no"
+    // 4) NON-STREAMING mode — create run, poll, fetch last message
+    const run = await oaJson(`/threads/${tid}/runs`, {
+      method: "POST",
+      body: JSON.stringify({
+        assistant_id: ASSISTANT_ID,
+        ...(instructions ? { instructions } : {})
+      })
     });
-    res.write(`event: start\n`);
-    res.write(`data: ${JSON.stringify({ ok:true, thread_id: threadId, run_id: runId })}\n\n`);
 
-    // Now proxy OpenAI events
-    await oaStream(`/v1/threads/${threadId}/runs/${runId}/events`, res);
-    // oaStream ends the response safely.
+    const finalRun = await waitForRun(tid, run.id, 60000, 1100);
+
+    if (finalRun.status !== "completed") {
+      return res.status(500).json({
+        ok: false,
+        step: "run_wait",
+        error: `Run ended with status: ${finalRun.status}`,
+        thread_id: tid,
+      });
+    }
+
+    // Get last assistant message
+    const msgs = await oaJson(`/threads/${tid}/messages?limit=10&order=desc`, { method: "GET" });
+    const text = extractLastAssistantText(msgs);
+    const citations = stripCitationsForClient();
+
+    return res.status(200).json({
+      ok: true,
+      text: text || "Done.",
+      thread_id: tid,
+      citations,
+      usage: null // (usage from Assistants is not always present per message)
+    });
 
   } catch (err) {
+    // Handle "active run" specifically so your client can clear the thread and retry
+    const msg = String(err?.message || err || "");
+    if (msg.includes("active run")) {
+      return res.status(409).json({
+        ok: false,
+        busy: true,
+        error: "Thread has an active run; please retry with a new thread.",
+      });
+    }
     console.error("assistant handler error:", err);
-    // If headers already sent (e.g., during streaming), emit an SSE error event once.
-    try {
-      if (!res.headersSent) {
-        json(res, 500, { ok:false, error:String(err?.message || err) });
-      } else if (!res.writableEnded) {
-        res.write(`event: error\n`);
-        res.write(`data: ${JSON.stringify({ ok:false, step:"create_run_stream", error:String(err?.message || err) })}\n\n`);
-        res.write(`event: done\n`);
-        res.write(`data: [DONE]\n\n`);
-        res.end();
-      }
-    } catch {}
+    return res.status(500).json({ ok: false, error: "Internal Server Error" });
   }
 }
