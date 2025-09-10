@@ -98,55 +98,36 @@
       };
 
       function handleEvent(event, raw) {
-        // start -> thread id
         if (event === "start") {
           try { const d = JSON.parse(raw); if (d?.thread_id) currentThreadId = d.thread_id; } catch {}
           return;
         }
 
+        if (event === "done" ||
+            event === "response.completed" ||
+            event === "thread.message.completed") {
+          setStatus("");
+          return;
+        }
+
         if (event === "error") {
           setStatus("");
-          try { const d = JSON.parse(raw); append(`⚠️ ${JSON.stringify(d)}`); } catch { append(`⚠️ ${raw}`); }
+          append(`⚠️ ${raw}`);
           nl();
           return;
         }
 
-        if (event === "done" || event === "response.completed" || event === "thread.message.completed") {
-          setStatus("");
-          return;
-        }
-
-        // (A) Our echo test uses this format (keep for diagnostics)
-        if (event === "response.output_text.delta") {
-          try {
-            const d = JSON.parse(raw);
-            const t = d?.delta?.text || "";
-            if (t) append(t);
-          } catch {}
-          return;
-        }
-
-        // (B) Assistants v2: thread.message.delta -> { delta: { content: [ {type, text}, ... ] } }
-        if (event === "thread.message.delta") {
-          try {
-            const d = JSON.parse(raw);
-            const parts = d?.delta?.content || [];
-            for (const p of parts) {
-              if (p?.type === "output_text_delta" && typeof p.text === "string") {
-                append(p.text);
-              }
+        try {
+          const d = JSON.parse(raw);
+          if (d?.delta?.text) append(d.delta.text);
+          else if (Array.isArray(d?.delta?.content)) {
+            for (const part of d.delta.content) {
+              if (part.type === "output_text_delta") append(part.text);
             }
-          } catch {}
-          return;
+          }
+        } catch {
+          // ignore JSON parse errors
         }
-
-        // (C) Some models emit response.refusal.delta with same {delta:{text}}
-        if (event === "response.refusal.delta") {
-          try { const d = JSON.parse(raw); if (d?.delta?.text) append(d.delta.text); } catch {}
-          return;
-        }
-
-        // Ignore tools, steps, etc.
       }
 
       try {
