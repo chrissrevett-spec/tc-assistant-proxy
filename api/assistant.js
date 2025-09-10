@@ -66,9 +66,11 @@ async function oaJson(path, method, body) {
     headers: {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
+      "OpenAI-Beta": "responses=v1"
     },
     body: body ? JSON.stringify(body) : undefined,
   });
+
   if (!r.ok) {
     const errTxt = await r.text().catch(() => "");
     throw new Error(`${method} ${path} failed: ${r.status} ${errTxt}`);
@@ -99,7 +101,9 @@ function buildResponsesRequest(userMessage, opts = {}) {
 async function handleNonStreaming(userMessage) {
   const payload = buildResponsesRequest(userMessage, { stream: false });
 
-  const resp = await oaJson("/responses", "POST", payload);
+  const resp = await oaJson("/responses", "POST", payload)
+    .catch(e => { console.error("OpenAI error", e); return null; });
+  if (!resp) return { ok: false, text: "", usage: null };
 
   // Extract plain text
   let text = "";
@@ -132,12 +136,14 @@ async function handleStreaming(res, userMessage) {
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Accept",
   });
+  res.flushHeaders?.();  // push headers immediately
 
   // Small helper to write an SSE block safely
   const forward = (event, data) => {
     try {
       if (event) res.write(`event: ${event}\n`);
       if (data !== undefined) res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
+      res.flush?.();        // flush every block
     } catch {
       // ignore broken pipe
     }
@@ -153,6 +159,7 @@ async function handleStreaming(res, userMessage) {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
       "Accept": "text/event-stream",
+      "OpenAI-Beta": "responses=v1"
     },
     body: JSON.stringify(buildResponsesRequest(userMessage, { stream: true })),
   });
@@ -173,9 +180,8 @@ async function handleStreaming(res, userMessage) {
       const { value, done } = await reader.read();
       if (done) break;
       const chunk = decoder.decode(value, { stream: true });
-      // Forward raw SSE bytes: keep the original OpenAI event names:
-      // response.output_text.delta, response.completed, etc.
       res.write(chunk);
+      res.flush?.();         // flush each chunk to client
     }
   } catch {
     // client aborted / network hiccup
