@@ -1,238 +1,226 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Talking Care – Assistant Widget</title>
+  <title>Talking Care Navigator</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root { color-scheme: light dark; }
-    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #0b1220; color: #e6edf3; }
-    .wrap { max-width: 880px; margin: 0 auto; padding: 16px; }
-    .card { background: #0f172a; border: 1px solid #26314c; border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.35); overflow: hidden; }
-    .card-header { padding: 14px 16px; border-bottom: 1px solid #26314c; display: flex; align-items: center; gap: 10px; }
-    .pill { background: #101a33; border: 1px solid #1f2a48; padding: 6px 10px; border-radius: 999px; font-size: 12px; color: #9fb5dd; }
-    .row { display: flex; gap: 12px; padding: 14px 16px; }
-    textarea { width: 100%; min-height: 84px; resize: vertical; border-radius: 10px; border: 1px solid #2a3a61; background: #0d152b; color: #e6edf3; padding: 12px; outline: none; }
-    textarea:focus { border-color: #4f8cff; box-shadow: 0 0 0 3px rgba(79,140,255,.2); }
-    .side { width: 220px; display: flex; flex-direction: column; gap: 8px; }
-    button { appearance: none; border: 1px solid #2a3a61; background: #112047; color: #e6edf3; border-radius: 10px; padding: 10px 12px; cursor: pointer; }
-    button:hover { background: #162a5c; }
-    .btn-primary { background: #1d4ed8; border-color: #1d4ed8; }
-    .btn-primary:hover { background: #275eea; border-color: #275eea; }
-    .btn-danger { background: #7f1d1d; border-color: #7f1d1d; }
-    .muted { color: #9fb5dd; font-size: 12px; }
-    .out { padding: 0 16px 16px; }
-    .bubbles { background: #0b1329; border-top: 1px dashed #26314c; padding: 14px 16px; max-height: 420px; overflow: auto; }
-    .msg { padding: 10px 12px; border-radius: 12px; margin: 8px 0; white-space: pre-wrap; line-height: 1.45; }
-    .msg.user { background: #122040; border: 1px solid #2a3a61; }
-    .msg.assistant { background: #102131; border: 1px solid #273a54; }
-    .row2 { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 12px 16px; border-top: 1px solid #26314c; }
-    .small { font-size: 12px; color: #8aa2c8; }
-    .status { color: #9fb5dd; font-size: 12px; }
-    .hidden { display: none; }
-    .bad { color: #ffb4b4; }
-    .good { color: #9be29b; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    :root { --bg:#0b0c10; --card:#14161a; --muted:#8892a6; --text:#e6edf3; --accent:#6aa3ff; }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Apple Color Emoji","Segoe UI Emoji";
+      background:var(--bg); color:var(--text);
+    }
+    .wrap{max-width:980px;margin:0 auto;padding:16px}
+    .panel{background:var(--card);border:1px solid #23262d;border-radius:14px;overflow:hidden}
+    .row{display:flex;gap:8px;align-items:stretch}
+    .col{flex:1}
+    textarea{
+      width:100%; height:120px; resize:vertical; padding:12px 12px;
+      background:#0f1115; color:var(--text); border:1px solid #22262c; border-radius:10px; outline:none;
+    }
+    button{
+      background:var(--accent); color:#06122e; font-weight:700; border:0; border-radius:10px; padding:12px 16px; cursor:pointer;
+    }
+    button.secondary{ background:#273246; color:#c9d7ee }
+    .out{
+      min-height:280px; white-space:pre-wrap; padding:16px; line-height:1.5;
+      border-top:1px solid #23262d; background:#0e1116; font-size:15px;
+    }
+    .bar{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #23262d}
+    .status{color:var(--muted);font-size:13px}
+    .tiny{font-size:12px;color:#9aa7bd}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="card" id="card">
-      <div class="card-header">
-        <div class="pill">Talking Care Navigator</div>
-        <div class="small">Embedded widget (runs on the same Vercel origin as the API)</div>
+    <div class="panel">
+      <div class="bar">
+        <div><strong>Talking Care Navigator</strong> <span class="tiny">— beta</span></div>
+        <div class="status" id="tc-status"></div>
       </div>
-      <div class="row">
-        <textarea id="input" placeholder="Ask: e.g. ‘summarise the MCA and cite the exact regs at the end’"></textarea>
-        <div class="side">
-          <button id="askStream" class="btn-primary">Ask (stream)</button>
-          <button id="askJson">Ask (non-stream)</button>
-          <button id="stop" class="btn-danger" disabled>Stop</button>
-          <div class="muted">
-            <label style="display:flex;gap:6px;align-items:center;">
-              <input type="checkbox" id="keepThread" checked />
-              Keep conversation (thread)
-            </label>
+
+      <div style="padding:16px">
+        <div class="row" style="margin-bottom:8px">
+          <div class="col">
+            <textarea id="tc-input" placeholder="Ask a question for a Registered Manager in adult social care…"></textarea>
           </div>
-          <div class="small mono" id="threadInfo">thread: (new)</div>
+        </div>
+        <div class="row" style="margin-bottom:8px">
+          <button id="tc-ask-stream">Ask (Streaming)</button>
+          <button id="tc-ask-nonstream" class="secondary">Ask (Non-streaming)</button>
+          <button id="tc-clear" class="secondary">Clear</button>
         </div>
       </div>
-      <div class="out">
-        <div class="status" id="status">Ready.</div>
-      </div>
-      <div class="bubbles" id="bubbles"></div>
-      <div class="row2">
-        <div class="small">Tip: streaming runs entirely on this origin to avoid CORS/CSP issues.</div>
-        <div class="small">© Talking Care</div>
-      </div>
+
+      <div class="out" id="tc-output"></div>
     </div>
   </div>
 
   <script>
-    // ----------------------------
-    // Minimal client for your /api/assistant
-    // This page sits on tc-assistant-proxy.vercel.app (same origin as API),
-    // so no CORS headaches and SSE works reliably.
-    // ----------------------------
+    // --- CONFIG ---------------------------------------------------------------
+    const API_BASE = location.origin; // widget is served from tc-assistant-proxy.vercel.app
+    // If you serve widget.html elsewhere, hardcode: const API_BASE = "https://tc-assistant-proxy.vercel.app";
 
-    const $input = document.getElementById('input');
-    const $askStream = document.getElementById('askStream');
-    const $askJson = document.getElementById('askJson');
-    const $stop = document.getElementById('stop');
-    const $status = document.getElementById('status');
-    const $bubbles = document.getElementById('bubbles');
-    const $keepThread = document.getElementById('keepThread');
-    const $threadInfo = document.getElementById('threadInfo');
+    // --- ELEMENTS -------------------------------------------------------------
+    const $status = document.getElementById("tc-status");
+    const $input  = document.getElementById("tc-input");
+    const $out    = document.getElementById("tc-output");
+    const $btnS   = document.getElementById("tc-ask-stream");
+    const $btnN   = document.getElementById("tc-ask-nonstream");
+    const $btnC   = document.getElementById("tc-clear");
 
-    // Persist thread id if requested
-    const LS_KEY = 'tc_thread_id_v2';
-    let threadId = localStorage.getItem(LS_KEY) || null;
-    updateThreadInfo();
+    // Persist one thread id inside this iframe (no CORS headaches)
+    let currentThreadId = null;
 
-    let abortCtrl = null;
+    function setStatus(s){ $status.textContent = s || ""; }
+    function write(t){ $out.textContent += t; }
+    function writeln(t=""){ $out.textContent += t + "\n"; }
+    function clear(){ $out.textContent = ""; }
 
-    function addBubble(txt, who) {
-      const d = document.createElement('div');
-      d.className = 'msg ' + who;
-      d.textContent = txt;
-      $bubbles.appendChild(d);
-      $bubbles.scrollTop = $bubbles.scrollHeight;
-      return d;
-    }
-    function setStatus(t, cls = '') {
-      $status.textContent = t;
-      $status.className = 'status ' + cls;
-    }
-    function updateThreadInfo() {
-      $threadInfo.textContent = 'thread: ' + (threadId || '(new)');
-    }
-    function resetAbort() {
-      if (abortCtrl) {
-        try { abortCtrl.abort(); } catch {}
-      }
-      abortCtrl = new AbortController();
-    }
-
-    // --- Non-stream
-    async function askJson() {
-      const q = ($input.value || '').trim();
-      if (!q) return;
-      const userBubble = addBubble(q, 'user');
-      const assistBubble = addBubble('…', 'assistant');
-      setStatus('Sending (JSON)…');
-
-      try {
-        const r = await fetch('/api/assistant?stream=off', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userMessage: q, threadId }),
-          cache: 'no-store',
-        });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        const data = await r.json();
-        // Update thread id if provided
-        if (data.thread_id) {
-          threadId = data.thread_id;
-          if ($keepThread.checked) localStorage.setItem(LS_KEY, threadId);
-        }
-        assistBubble.textContent = data.text || '(no text)';
-        setStatus('Done.', 'good');
-      } catch (e) {
-        assistBubble.textContent = 'Error: ' + (e && e.message ? e.message : e);
-        setStatus('Failed.', 'bad');
-      } finally {
-        updateThreadInfo();
+    // --- NON-STREAMING --------------------------------------------------------
+    async function askNonStreaming(prompt){
+      setStatus("Thinking…");
+      const r = await fetch(`${API_BASE}/api/assistant?stream=off`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userMessage: prompt, threadId: currentThreadId })
+      });
+      setStatus("");
+      if(!r.ok){ writeln(`⚠️ HTTP ${r.status}`); return; }
+      const data = await r.json().catch(()=> ({}));
+      if (data?.thread_id) currentThreadId = data.thread_id;
+      if (data?.ok && data?.text){
+        writeln(data.text);
+      } else {
+        writeln("⚠️ No response.");
       }
     }
 
-    // --- Stream
-    async function askStream() {
-      const q = ($input.value || '').trim();
-      if (!q) return;
-      const userBubble = addBubble(q, 'user');
-      const assistBubble = addBubble('', 'assistant');
-      setStatus('Starting stream…');
+    // --- STREAMING (SSE over fetch POST) -------------------------------------
+    async function askStreaming(prompt){
+      setStatus("Typing…");
+      const resp = await fetch(`${API_BASE}/api/assistant?stream=on`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userMessage: prompt, threadId: currentThreadId })
+      });
+      if (!resp.ok || !resp.body){ setStatus(""); writeln(`⚠️ Stream failed (${resp.status}).`); return; }
 
-      resetAbort();
-      $stop.disabled = false;
+      const reader  = resp.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buf = "";
 
-      try {
-        const r = await fetch('/api/assistant?stream=on', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userMessage: q, threadId }),
-          cache: 'no-store',
-          signal: abortCtrl.signal,
-        });
-
-        if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
-
-        const reader = r.body.getReader();
-        const dec = new TextDecoder('utf-8');
-        let buf = '';
-
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buf += dec.decode(value, { stream: true });
-
-          // Parse SSE lines
-          let idx;
-          while ((idx = buf.indexOf('\n\n')) !== -1) {
-            const chunk = buf.slice(0, idx);
-            buf = buf.slice(idx + 2);
-
-            // Each chunk can contain multiple "event:" / "data:" lines
-            const lines = chunk.split('\n');
-            let ev = 'message';
-            let data = '';
-            for (const ln of lines) {
-              if (ln.startsWith('event:')) ev = ln.slice(6).trim();
-              if (ln.startsWith('data:')) data += ln.slice(5).trim();
-            }
-
-            if (ev === 'start') {
-              try {
-                const j = JSON.parse(data || '{}');
-                if (j.thread_id) {
-                  threadId = j.thread_id;
-                  if ($keepThread.checked) localStorage.setItem(LS_KEY, threadId);
-                  updateThreadInfo();
-                }
-              } catch {}
-              setStatus('Streaming…');
-            } else if (ev.endsWith('.delta')) {
-              try {
-                const j = JSON.parse(data || '{}');
-                const t = j?.delta?.text || j?.delta?.content || '';
-                if (t) assistBubble.textContent += t;
-              } catch {}
-            } else if (ev === 'error') {
-              setStatus('Stream error.', 'bad');
-            } else if (ev === 'done') {
-              setStatus('Done.', 'good');
-            }
+      const flushBlocks = (raw) => {
+        buf += raw;
+        const blocks = buf.split(/\n\n/);
+        buf = blocks.pop(); // keep incomplete tail
+        for (const block of blocks){
+          const lines = block.split(/\n/);
+          let event = "message";
+          const datas = [];
+          for (const line of lines){
+            if (line.startsWith(":")) continue;                 // comment/keep-alive
+            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
+            if (line.startsWith("data:"))  { datas.push(line.slice(5).trim()); continue; }
           }
+          const payload = datas.join("\n");
+          handleSSE(event, payload);
         }
-      } catch (e) {
-        if (e.name === 'AbortError') {
-          setStatus('Stopped.', 'bad');
-        } else {
-          setStatus('Failed: ' + e.message, 'bad');
+      };
+
+      function safeAppendText(val){
+        // Handle strings or nested deltas robustly; avoid [object Object]
+        if (typeof val === "string"){ write(val); return; }
+        if (val && typeof val === "object"){
+          // Known shapes:
+          // { delta: { type:"output_text_delta", text:"..." } }
+          if (val.delta?.text && typeof val.delta.text === "string"){
+            write(val.delta.text);
+            return;
+          }
+          // { delta:{ content:[{type:"output_text_delta", text:"..."}] } }
+          const arr = val.delta?.content;
+          if (Array.isArray(arr)){
+            for (const c of arr){
+              if (c && typeof c.text === "string") write(c.text);
+            }
+            return;
+          }
+          // Fallback: try a few common property names
+          if (typeof val.text === "string"){ write(val.text); return; }
         }
-      } finally {
-        $stop.disabled = true;
+        // If completely unknown, ignore to avoid “[object Object]”
+      }
+
+      function handleSSE(event, rawData){
+        if (event === "start"){
+          try {
+            const d = JSON.parse(rawData);
+            if (d?.thread_id) currentThreadId = d.thread_id;
+          } catch {}
+          return;
+        }
+        if (event === "error"){
+          setStatus("");
+          try { writeln(`⚠️ ${rawData}`); } catch { writeln("⚠️ Stream error"); }
+          return;
+        }
+        if (event === "done" || event === "response.completed" || event === "thread.message.completed"){
+          setStatus(""); writeln(); return;
+        }
+
+        // Echo test path (your /api/echo?mode=stream)
+        if (event === "response.output_text.delta"){
+          try {
+            const d = JSON.parse(rawData);
+            safeAppendText(d);
+          } catch {}
+          return;
+        }
+
+        // Real Assistants v2 streaming paths
+        if (event === "thread.message.delta" || event === "response.output_text.delta" || event === "response.refusal.delta"){
+          try {
+            const d = JSON.parse(rawData);
+            safeAppendText(d);
+          } catch {}
+          return;
+        }
+
+        // Ignore tool events etc.
+      }
+
+      try{
+        while(true){
+          const {value, done} = await reader.read();
+          if (done) break;
+          flushBlocks(decoder.decode(value, { stream:true }));
+        }
+      }catch{} finally{
+        setStatus("");
       }
     }
 
-    $askJson.addEventListener('click', askJson);
-    $askStream.addEventListener('click', askStream);
-    $stop.addEventListener('click', () => {
-      if (abortCtrl) abortCtrl.abort();
+    // --- UI BINDINGS ----------------------------------------------------------
+    $btnS.addEventListener("click", () => {
+      const prompt = ($input.value || "").trim();
+      if (!prompt) return;
+      clear(); askStreaming(prompt);
     });
 
-    // Optional: auto-focus
-    $input.focus();
+    $btnN.addEventListener("click", () => {
+      const prompt = ($input.value || "").trim();
+      if (!prompt) return;
+      clear(); askNonStreaming(prompt);
+    });
+
+    $btnC.addEventListener("click", () => { clear(); setStatus(""); });
+
+    // Optional: expose for console quick tests
+    window.tcAskS = askStreaming;
+    window.tcAskN = askNonStreaming;
   </script>
 </body>
 </html>
