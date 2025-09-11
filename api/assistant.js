@@ -1,9 +1,8 @@
 // api/assistant.js
 //
 // One endpoint, two modes using the OpenAI "Responses" API:
-//
-//  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
-//  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
+//   • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
+//   • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL   = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -28,6 +27,8 @@ function endPreflight(res) {
 
 /* ---------- Body parsing ---------- */
 async function readBody(req) {
+  if (req.body && typeof req.body === "object") return req.body;
+
   return await new Promise((resolve, reject) => {
     let data = "";
     req.setEncoding("utf8");
@@ -52,7 +53,7 @@ async function oaJson(path, method, body) {
     headers: {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
-      "OpenAI-Beta": "responses=v1"
+      "OpenAI-Beta": "responses=v1"        // <-- REQUIRED
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -110,13 +111,13 @@ async function handleStreaming(res, userMessage) {
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Accept",
   });
-  res.flushHeaders?.();
+  res.flushHeaders?.();                       // <-- push headers immediately
 
   const forward = (event, data) => {
     try {
       if (event) res.write(`event: ${event}\n`);
       if (data !== undefined) res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
-      res.flush?.();
+      res.flush?.();                           // <-- flush each block
     } catch {}
   };
 
@@ -149,7 +150,7 @@ async function handleStreaming(res, userMessage) {
       if (done) break;
       const chunk = decoder.decode(value, { stream: true });
       res.write(chunk);
-      res.flush?.();
+      res.flush?.();                           // <-- flush each chunk
     }
   } catch {
   } finally {
