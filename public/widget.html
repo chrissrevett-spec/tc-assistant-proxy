@@ -32,10 +32,7 @@
 
   <script>
   (function () {
-    // IMPORTANT: no automatic POST on load.
-    // User must click one of the buttons.
-
-    const API_BASE = location.origin.replace(/\/$/, ""); // tc-assistant-proxy.vercel.app
+    const API_BASE = location.origin.replace(/\/$/, "");
     const $in   = document.getElementById("tc-input");
     const $out  = document.getElementById("out");
     const $stat = document.getElementById("status");
@@ -46,12 +43,7 @@
     let currentThreadId = null;
 
     function setStatus(t){ $stat.textContent = t || ""; }
-    function append(t){
-      // Ensure we always append text. If an object sneaks through, convert it
-      // to a string so the UI doesn't render "[object Object]" repeatedly.
-      if (t === undefined || t === null) return;
-      $out.textContent += t.toString();
-    }
+    function append(t){ $out.textContent += t; }
     function nl(){ append("\n"); }
     function clearOut(){ $out.textContent = ""; }
 
@@ -86,14 +78,13 @@
       const flushBlocks = (chunk) => {
         buffer += chunk;
         const blocks = buffer.split(/\n\n/);
-        buffer = blocks.pop(); // keep partial
+        buffer = blocks.pop();
         for (const block of blocks) {
-          // parse SSE block (multiple "data:" lines; optional "event:")
           let event = "message";
           const dataLines = [];
           for (const line of block.split(/\n/)) {
             if (!line) continue;
-            if (line.startsWith(":")) continue; // comment/keep-alive
+            if (line.startsWith(":")) continue;
             if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
             if (line.startsWith("data:")) { dataLines.push(line.slice(5).trim()); continue; }
           }
@@ -130,9 +121,7 @@
               if (part.type === "output_text_delta") append(part.text);
             }
           }
-        } catch {
-          // ignore JSON parse errors
-        }
+        } catch {}
       }
 
       try {
@@ -142,7 +131,6 @@
           flushBlocks(decoder.decode(value, { stream: true }));
         }
       } catch {
-        // network aborted
       } finally {
         setStatus("");
       }
@@ -167,9 +155,8 @@
     });
 
     $btnC.addEventListener("click", () => { clearOut(); setStatus(""); });
-
-    // No auto-call on load. No timers. No hidden test requests.
   })();
   </script>
 </body>
 </html>
+
