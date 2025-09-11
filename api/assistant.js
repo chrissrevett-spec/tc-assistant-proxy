@@ -1,18 +1,30 @@
 // api/assistant.js
 //
 // One endpoint, two modes using the OpenAI "Responses" API:
-//   • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
-//   • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
+//
+//  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
+//  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
+//
+// Why Responses API?
+// - Clean SSE (events: response.output_text.delta, response.completed, etc.).
+// - Avoids threads/runs race conditions and 404/invalid run_id problems.
+// - Faster first token than polling runs.
+//
+// Notes
+// - We accept JSON and text/plain (Squarespace sometimes posts text/plain).
+// - CORS tuned for Squarespace/Firefox.
+// - You can keep your Squarespace widget code unchanged; it already expects
+//   "response.output_text.delta" which this emits.
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL   = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_MODEL   = process.env.OPENAI_MODEL || "gpt-4o-mini"; // pick what you want
 const CORS_ALLOW_ORIGIN = process.env.CORS_ALLOW_ORIGIN || "https://www.talkingcare.uk";
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY");
 }
 
-/* ---------- CORS ---------- */
+// ---------- CORS ----------
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN);
   res.setHeader("Vary", "Origin");
@@ -25,7 +37,7 @@ function endPreflight(res) {
   res.end();
 }
 
-/* ---------- Body parsing ---------- */
+// ---------- Body parsing ----------
 async function readBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
 
@@ -36,6 +48,7 @@ async function readBody(req) {
     req.on("end", () => {
       const t = (data || "").trim();
       if (!t) return resolve({});
+      // If JSON, parse; else treat as raw text as the user message
       if (t.startsWith("{") || t.startsWith("[")) {
         try { resolve(JSON.parse(t)); } catch { resolve({}); }
       } else {
@@ -46,14 +59,14 @@ async function readBody(req) {
   });
 }
 
-/* ---------- OpenAI helper ---------- */
+// ---------- OpenAI helpers ----------
 async function oaJson(path, method, body) {
   const r = await fetch(`https://api.openai.com/v1${path}`, {
     method,
     headers: {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
-      "OpenAI-Beta": "responses=v1"        // <-- REQUIRED
+      "OpenAI-Beta": "responses=v1"
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -65,7 +78,7 @@ async function oaJson(path, method, body) {
   return r.json();
 }
 
-/* ---------- Build Responses API request ---------- */
+// Build a Responses API request payload
 function buildResponsesRequest(userMessage, opts = {}) {
   const systemPreamble =
     "You are Talking Care Navigator. Be concise, practical, and cite official UK guidance at the end.";
@@ -80,7 +93,7 @@ function buildResponsesRequest(userMessage, opts = {}) {
   };
 }
 
-/* ---------- Non-streaming ---------- */
+// ---------- Non-streaming path ----------
 async function handleNonStreaming(userMessage) {
   const payload = buildResponsesRequest(userMessage, { stream: false });
 
@@ -100,8 +113,9 @@ async function handleNonStreaming(userMessage) {
   return { ok: true, text, usage };
 }
 
-/* ---------- Streaming ---------- */
+// ---------- Streaming path ----------
 async function handleStreaming(res, userMessage) {
+  // Tell the browser we’ll stream SSE
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -111,18 +125,19 @@ async function handleStreaming(res, userMessage) {
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Accept",
   });
-  res.flushHeaders?.();                       // <-- push headers immediately
+  res.flushHeaders?.();  // push headers immediately
 
   const forward = (event, data) => {
     try {
       if (event) res.write(`event: ${event}\n`);
       if (data !== undefined) res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
-      res.flush?.();                           // <-- flush each block
+      res.flush?.();      // flush each block
     } catch {}
   };
 
   forward("start", { ok: true });
 
+  // Request streaming from OpenAI
   const upstream = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -150,7 +165,7 @@ async function handleStreaming(res, userMessage) {
       if (done) break;
       const chunk = decoder.decode(value, { stream: true });
       res.write(chunk);
-      res.flush?.();                           // <-- flush each chunk
+      res.flush?.();      // flush each chunk
     }
   } catch {
   } finally {
@@ -159,7 +174,7 @@ async function handleStreaming(res, userMessage) {
   }
 }
 
-/* ---------- Main handler ---------- */
+// ---------- Main handler ----------
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return endPreflight(res);
