@@ -4,27 +4,16 @@
 //
 //  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
 //  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
-//
-// Why Responses API?
-// - Clean SSE (events: response.output_text.delta, response.completed, etc.).
-// - Avoids threads/runs race conditions and 404/invalid run_id problems.
-// - Faster first token than polling runs.
-//
-// Notes
-// - We accept JSON and text/plain (Squarespace sometimes posts text/plain).
-// - CORS tuned for Squarespace/Firefox.
-// - You can keep your Squarespace widget code unchanged; it already expects
-//   "response.output_text.delta" which this emits.
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL   = process.env.OPENAI_MODEL || "gpt-4o-mini"; // pick what you want
+const OPENAI_MODEL   = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const CORS_ALLOW_ORIGIN = process.env.CORS_ALLOW_ORIGIN || "https://www.talkingcare.uk";
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY");
 }
 
-// ---------- CORS ----------
+/* ---------- CORS ---------- */
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN);
   res.setHeader("Vary", "Origin");
@@ -37,10 +26,8 @@ function endPreflight(res) {
   res.end();
 }
 
-// ---------- Body parsing ----------
+/* ---------- Body parsing ---------- */
 async function readBody(req) {
-  if (req.body && typeof req.body === "object") return req.body;
-
   return await new Promise((resolve, reject) => {
     let data = "";
     req.setEncoding("utf8");
@@ -48,7 +35,6 @@ async function readBody(req) {
     req.on("end", () => {
       const t = (data || "").trim();
       if (!t) return resolve({});
-      // If JSON, parse; else treat as raw text as the user message
       if (t.startsWith("{") || t.startsWith("[")) {
         try { resolve(JSON.parse(t)); } catch { resolve({}); }
       } else {
@@ -59,7 +45,7 @@ async function readBody(req) {
   });
 }
 
-// ---------- OpenAI helpers ----------
+/* ---------- OpenAI helper ---------- */
 async function oaJson(path, method, body) {
   const r = await fetch(`https://api.openai.com/v1${path}`, {
     method,
@@ -78,7 +64,7 @@ async function oaJson(path, method, body) {
   return r.json();
 }
 
-// Build a Responses API request payload
+/* ---------- Build Responses API request ---------- */
 function buildResponsesRequest(userMessage, opts = {}) {
   const systemPreamble =
     "You are Talking Care Navigator. Be concise, practical, and cite official UK guidance at the end.";
@@ -93,7 +79,7 @@ function buildResponsesRequest(userMessage, opts = {}) {
   };
 }
 
-// ---------- Non-streaming path ----------
+/* ---------- Non-streaming ---------- */
 async function handleNonStreaming(userMessage) {
   const payload = buildResponsesRequest(userMessage, { stream: false });
 
@@ -109,12 +95,11 @@ async function handleNonStreaming(userMessage) {
       }
     }
   }
-
   const usage = resp?.usage || null;
   return { ok: true, text, usage };
 }
 
-// ---------- Streaming path ----------
+/* ---------- Streaming ---------- */
 async function handleStreaming(res, userMessage) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -173,7 +158,7 @@ async function handleStreaming(res, userMessage) {
   }
 }
 
-// ---------- Main handler ----------
+/* ---------- Main handler ---------- */
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === "OPTIONS") return endPreflight(res);
