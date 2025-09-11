@@ -32,6 +32,7 @@
 
   <script>
   (function () {
+    // IMPORTANT: no automatic request on load.
     const API_BASE = location.origin.replace(/\/$/, "");
     const $in   = document.getElementById("tc-input");
     const $out  = document.getElementById("out");
@@ -113,6 +114,7 @@
           return;
         }
 
+        // Generic attempt to extract text from any delta
         try {
           const d = JSON.parse(raw);
           if (d?.delta?.text) append(d.delta.text);
