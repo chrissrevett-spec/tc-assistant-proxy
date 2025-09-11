@@ -66,11 +66,9 @@ async function oaJson(path, method, body) {
     headers: {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
-      "OpenAI-Beta": "responses=v1"
     },
     body: body ? JSON.stringify(body) : undefined,
   });
-
   if (!r.ok) {
     const errTxt = await r.text().catch(() => "");
     throw new Error(`${method} ${path} failed: ${r.status} ${errTxt}`);
@@ -80,40 +78,48 @@ async function oaJson(path, method, body) {
 
 // Build a Responses API request payload
 function buildResponsesRequest(userMessage, opts = {}) {
+  // You can enrich instructions/system role here if you want
   const systemPreamble =
     "You are Talking Care Navigator. Be concise, practical, and cite official UK guidance at the end.";
 
   return {
     model: OPENAI_MODEL,
+    // Responses API accepts a single "input" which can be text or array of content parts.
     input: [
       { role: "system", content: systemPreamble },
       { role: "user",   content: userMessage }
     ],
+    // If you later want JSON mode: add  response_format: { type: "json_object" }
+    // temperature, max_output_tokens etc. can go here too.
     ...opts,
   };
 }
 
-// ---------- Non-streaming path ----------
+// ---------- Non-streaming path (Responses API without SSE) ----------
 async function handleNonStreaming(userMessage) {
   const payload = buildResponsesRequest(userMessage, { stream: false });
 
-  const resp = await oaJson("/responses", "POST", payload)
-    .catch(e => { console.error("OpenAI error", e); return null; });
-  if (!resp) return { ok: false, text: "", usage: null };
+  const resp = await oaJson("/responses", "POST", payload);
 
+  // Extract plain text
   let text = "";
+  // The Responses API returns output in resp.output (array of content parts)
   if (resp && Array.isArray(resp.output)) {
     for (const item of resp.output) {
+      // items can be { type: "output_text", text: "..." } etc.
       if (item.type === "output_text" && typeof item.text === "string") {
         text += item.text;
       }
     }
   }
+
+  // Usage info (tokens) if present
   const usage = resp?.usage || null;
+
   return { ok: true, text, usage };
 }
 
-// ---------- Streaming path ----------
+// ---------- Streaming path (Responses API SSE) ----------
 async function handleStreaming(res, userMessage) {
   // Tell the browser we’ll stream SSE
   res.writeHead(200, {
@@ -121,30 +127,32 @@ async function handleStreaming(res, userMessage) {
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
+    // CORS (mirrored on stream too)
     "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN,
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Accept",
   });
-  res.flushHeaders?.();  // push headers immediately
 
+  // Small helper to write an SSE block safely
   const forward = (event, data) => {
     try {
       if (event) res.write(`event: ${event}\n`);
       if (data !== undefined) res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
-      res.flush?.();      // flush each block
-    } catch {}
+    } catch {
+      // ignore broken pipe
+    }
   };
 
+  // Optional “start” marker for your client
   forward("start", { ok: true });
 
-  // Request streaming from OpenAI
+  // Fire the upstream streaming request
   const upstream = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
       "Accept": "text/event-stream",
-      "OpenAI-Beta": "responses=v1"
     },
     body: JSON.stringify(buildResponsesRequest(userMessage, { stream: true })),
   });
@@ -156,6 +164,7 @@ async function handleStreaming(res, userMessage) {
     return;
   }
 
+  // Pipe bytes through unmodified so event names remain intact
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
 
@@ -164,10 +173,12 @@ async function handleStreaming(res, userMessage) {
       const { value, done } = await reader.read();
       if (done) break;
       const chunk = decoder.decode(value, { stream: true });
+      // Forward raw SSE bytes: keep the original OpenAI event names:
+      // response.output_text.delta, response.completed, etc.
       res.write(chunk);
-      res.flush?.();      // flush each chunk
     }
   } catch {
+    // client aborted / network hiccup
   } finally {
     forward("done", "[DONE]");
     try { res.end(); } catch {}
@@ -186,7 +197,7 @@ export default async function handler(req, res) {
   try {
     const body = await readBody(req);
     const userMessage = (body.userMessage || "").toString().trim();
-    const mode = (req.query.stream || "off").toString();
+    const mode = (req.query.stream || "off").toString(); // "on" | "off"
 
     if (!userMessage) {
       return res.status(400).json({ ok: false, error: "Missing userMessage" });
@@ -200,8 +211,11 @@ export default async function handler(req, res) {
     }
   } catch (err) {
     console.error("assistant handler error:", err);
+    // If we weren’t streaming yet, return JSON error
     try {
       return res.status(500).json({ ok: false, error: "Internal Server Error" });
-    } catch {}
+    } catch {
+      // If already streaming, the client will just see the stream end.
+    }
   }
 }
