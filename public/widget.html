@@ -2,26 +2,24 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Talking Care Navigator (debug)</title>
+  <title>Talking Care Navigator</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { color-scheme: light dark; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 16px; }
-    .wrap { max-width: 860px; margin: 0 auto; }
+    .wrap { max-width: 840px; margin: 0 auto; }
     .row { display: flex; gap: 8px; margin-bottom: 8px; }
-    textarea { flex: 1; min-height: 120px; padding: 10px; }
+    textarea { flex: 1; min-height: 112px; padding: 10px; }
     button { padding: 10px 14px; cursor: pointer; }
     #status { font-size: 12px; opacity: .8; margin-bottom: 8px; }
-    #out { white-space: pre-wrap; border: 1px solid #9993; border-radius: 8px; padding: 12px; min-height: 180px; }
-    #log { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; opacity: .85; 
-           border: 1px dashed #9994; padding: 8px; margin-top: 8px; max-height: 200px; overflow:auto; }
-    .muted { opacity:.7 }
+    #out { white-space: pre-wrap; border: 1px solid #9993; border-radius: 8px; padding: 12px; min-height: 160px; }
+    #log { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; opacity:.85; margin-top:12px; }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1 style="margin:0 0 8px">Talking Care Navigator <span class="muted">(debug)</span></h1>
-    <div id="status" class="muted">idle</div>
+    <h1 style="margin:0 0 8px">Talking Care Navigator</h1>
+    <div id="status"></div>
     <div class="row">
       <textarea id="tc-input" placeholder="Type your question…"></textarea>
       <div style="display:flex; flex-direction:column; gap:8px;">
@@ -31,16 +29,12 @@
       </div>
     </div>
     <div id="out"></div>
-    <div id="log" aria-live="polite" aria-atomic="false"></div>
+    <div id="log"></div>
   </div>
 
   <script>
-  (function () {
-    // ====== CONFIG ======
-    // IMPORTANT: this page is served from Vercel, so location.origin is your proxy origin.
-    const API_BASE = location.origin.replace(/\/$/, ""); // e.g. https://tc-assistant-proxy.vercel.app
-
-    // ====== ELEMENTS ======
+  document.addEventListener("DOMContentLoaded", () => {
+    const API_BASE = location.origin.replace(/\/$/, "");
     const $in   = document.getElementById("tc-input");
     const $out  = document.getElementById("out");
     const $stat = document.getElementById("status");
@@ -49,67 +43,58 @@
     const $btnC = document.getElementById("tc-clear");
     const $log  = document.getElementById("log");
 
-    // ====== UTIL ======
-    let threadId = null;
-
-    function setStatus(t){ if ($stat) $stat.textContent = t || ""; }
-    function append(t){ if ($out) $out.textContent += t; }
+    function log(...a){ $log.textContent += a.map(v => typeof v === "string" ? v : JSON.stringify(v)).join(" ") + "\n"; }
+    function setStatus(t){ $stat.textContent = t || ""; }
+    function append(t){ $out.textContent += t; $out.scrollTop = $out.scrollHeight; }
     function nl(){ append("\n"); }
-    function clearOut(){ if ($out) $out.textContent = ""; }
-    function logLine(...args){
-      const msg = args.map(a => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
-      if ($log) {
-        const div = document.createElement("div");
-        div.textContent = msg;
-        $log.appendChild(div);
-        $log.scrollTop = $log.scrollHeight;
-      }
-      // Also to console of the iframe:
-      try { console.log("[widget]", ...args); } catch {}
+    function clearOut(){ $out.textContent = ""; }
+
+    log(`✅ widget ready. API_BASE = ${API_BASE}`);
+
+    function getPrompt() {
+      const p = ($in.value || "").trim();
+      return p || null;
     }
 
-    // Surface ALL errors visibly
-    window.addEventListener("error", (e) => {
-      logLine("❌ window.error:", e.message || e);
-      setStatus("error");
-    });
-    window.addEventListener("unhandledrejection", (e) => {
-      logLine("❌ unhandledrejection:", (e.reason && (e.reason.message || e.reason)) || e);
-      setStatus("error");
-    });
-
-    // ====== NON-STREAMING ======
     async function askJson(prompt) {
       setStatus("Thinking…");
-      logLine("→ POST", `${API_BASE}/api/assistant?stream=off`);
+      log("→ POST", `${API_BASE}/api/assistant?stream=off`);
       const r = await fetch(`${API_BASE}/api/assistant?stream=off`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify({ userMessage: prompt, threadId })
+        body: JSON.stringify({ userMessage: prompt }),
       });
-      logLine("← HTTP", r.status);
       setStatus("");
-      if (!r.ok) { append(`⚠️ HTTP ${r.status}`); nl(); return; }
-      const data = await r.json().catch(() => null);
-      logLine("← JSON", data);
-      if (!data || !data.ok) { append("⚠️ Request failed."); nl(); return; }
-      if (data.thread_id) threadId = data.thread_id;
-      if (data.text) append(data.text + "\n");
+      log("← HTTP", r.status);
+      let data = null;
+      try { data = await r.json(); } catch {}
+      log("← JSON", data);
+      if (!r.ok || !data?.ok) {
+        append(`⚠️ Request failed (${r.status}).`);
+        nl();
+        return;
+      }
+      if (data.text) { append(data.text); nl(); }
+      else { append("⚠️ No text in response."); nl(); }
     }
 
-    // ====== STREAMING (SSE) ======
     async function askStream(prompt) {
       setStatus("Typing…");
-      logLine("→ POST (SSE)", `${API_BASE}/api/assistant?stream=on`);
       const r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
-        body: JSON.stringify({ userMessage: prompt, threadId })
+        body: JSON.stringify({ userMessage: prompt }),
       });
-      logLine("← HTTP", r.status, r.ok ? "(ok)" : "(fail)");
-      if (!r.ok || !r.body) { setStatus(""); append(`⚠️ Stream HTTP ${r.status}`); nl(); return; }
+      log("→ POST (SSE)", `${API_BASE}/api/assistant?stream=on`);
+      if (!r.ok || !r.body) {
+        setStatus("");
+        log("← HTTP", r.status, "(no body)");
+        append(`⚠️ Stream failed (${r.status}).`); nl();
+        return;
+      }
+      log("← HTTP 200 (ok)");
 
-      const reader = r.body.getReader();
+      const reader  = r.body.getReader();
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
 
@@ -118,13 +103,14 @@
         const blocks = buffer.split(/\n\n/);
         buffer = blocks.pop();
         for (const block of blocks) {
+          const lines = block.split(/\n/);
           let event = "message";
           const dataLines = [];
-          for (const line of block.split(/\n/)) {
+          for (const line of lines) {
             if (!line) continue;
-            if (line.startsWith(":")) continue;             // comment/keep-alive
+            if (line.startsWith(":")) continue;           // comment/keepalive
             if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
-            if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim());   continue; }
+            if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
           }
           const raw = dataLines.join("\n");
           handleEvent(event, raw);
@@ -132,104 +118,60 @@
       };
 
       function handleEvent(event, raw) {
-        logLine("SSE", event, raw);
+        if (event === "start") { log("SSE start", raw); return; }
+        if (event === "error") { setStatus(""); log("SSE error", raw); append(`⚠️ ${raw}`); nl(); return; }
+        if (event === "done" || event === "response.completed") { setStatus(""); log("SSE", event, raw); return; }
 
-        if (event === "start") {
-          // (Responses API may or may not send 'start'—we send one from the proxy in some builds)
-          try { const d = JSON.parse(raw); if (d?.thread_id) threadId = d.thread_id; } catch {}
-          return;
-        }
+        // Log the key Responses events for debugging
+        if (/^response\./.test(event)) { log("SSE", event, raw); }
 
-        if (event === "error") {
-          setStatus("");
-          try {
-            const d = JSON.parse(raw);
-            append(`⚠️ ${JSON.stringify(d)}`); nl();
-          } catch {
-            append(`⚠️ ${raw}`); nl();
-          }
-          return;
-        }
-
-        if (event === "done" || event === "response.completed" || event === "thread.message.completed") {
-          setStatus("");
-          nl();
-          return;
-        }
-
-        // Responses API happy path: 'response.output_text.delta'
+        // Primary text stream:
+        //   event: response.output_text.delta
+        //   data : {"type":"response.output_text.delta","delta":"..."}
         if (event === "response.output_text.delta") {
           try {
             const d = JSON.parse(raw);
-            const t = d?.delta?.text || "";
-            if (t) append(t);
+            if (typeof d?.delta === "string") append(d.delta);
           } catch {}
           return;
         }
 
-        // Assistants v2 family (if proxy ever swaps back): 'thread.message.delta'
-        if (event === "thread.message.delta") {
-          try {
-            const d = JSON.parse(raw);
-            const chunks = d?.delta?.content || [];
-            for (const c of chunks) {
-              if (c?.type === "output_text_delta" && typeof c.text === "string") {
-                append(c.text);
-              }
-            }
-          } catch {}
-          return;
+        // Some SDKs emit these lifecycle events we can ignore/display as needed:
+        if (event === "response.output_text.done" || event === "response.content_part.added" ||
+            event === "response.content_part.done" || event === "response.output_item.added" ||
+            event === "response.output_item.done" || event === "response.in_progress" ||
+            event === "response.created") {
+          return; // ignore for UI; we already log above
         }
-
-        // Other deltas we just print for visibility
-        try {
-          const obj = JSON.parse(raw);
-          if (obj?.delta?.text) append(obj.delta.text);
-        } catch {/* ignore */}
       }
 
       try {
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          flushBlocks(chunk);
+          flushBlocks(decoder.decode(value, { stream: true }));
         }
-      } catch (e) {
-        logLine("stream read error:", e?.message || e);
+      } catch {
+        // network hiccup / navigation — ignore
       } finally {
         setStatus("");
       }
     }
 
-    // ====== WIRE UP after DOM is ready ======
-    document.addEventListener("DOMContentLoaded", () => {
-      if (!$btnS || !$btnJ || !$btnC || !$in || !$out) {
-        logLine("❌ Missing one or more elements; check IDs.");
-        setStatus("error: missing elements");
-        return;
-      }
-
-      $btnS.addEventListener("click", async () => {
-        const p = ($in.value || "").trim();
-        if (!p) return;
-        clearOut();
-        await askStream(p);
-      });
-
-      $btnJ.addEventListener("click", async () => {
-        const p = ($in.value || "").trim();
-        if (!p) return;
-        clearOut();
-        await askJson(p);
-      });
-
-      $btnC.addEventListener("click", () => { clearOut(); setStatus("idle"); });
-
-      logLine("✅ widget ready. API_BASE =", API_BASE);
-      setStatus("ready");
+    $btnJ.addEventListener("click", async () => {
+      const p = getPrompt(); if (!p) return;
+      clearOut();
+      await askJson(p);
     });
-  })();
+
+    $btnS.addEventListener("click", async () => {
+      const p = getPrompt(); if (!p) return;
+      clearOut();
+      await askStream(p);
+    });
+
+    $btnC.addEventListener("click", () => { clearOut(); setStatus(""); });
+  });
   </script>
 </body>
 </html>
