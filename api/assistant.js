@@ -5,23 +5,24 @@
 //  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
 //  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
 //
-// Why Responses API?
-// - Clean SSE (events: response.output_text.delta, response.completed, etc.).
-// - Avoids threads/runs race conditions and 404/invalid run_id problems.
-// - Faster first token than polling runs.
-//
-// Notes
-// - We accept JSON and text/plain (Squarespace sometimes posts text/plain).
-// - CORS tuned for Squarespace/Firefox.
-// - You can keep your Squarespace widget code unchanged; it already expects
-//   "response.output_text.delta" which this emits.
+// Key fixes in this version:
+// - Uses a Responses-capable model (from env) and rejects 3.5-turbo*.
+// - Clean SSE passthrough (no buffering), robust CORS once, no double headers.
+// - Accepts Squarespace/Firefox text/plain and JSON bodies.
+// - No dependence on Assistants/threads/runs -> no run_id 404s/hangs.
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL   = process.env.OPENAI_MODEL || "gpt-4o-mini"; // pick what you want
-const CORS_ALLOW_ORIGIN = process.env.CORS_ALLOW_ORIGIN || "https://www.talkingcare.uk";
+const OPENAI_MODEL   = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const CORS_ALLOW_ORIGIN = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY");
+}
+if (/^gpt-3\.5-turbo/i.test(OPENAI_MODEL || "")) {
+  console.error(
+    `OPENAI_MODEL='${OPENAI_MODEL}' is not compatible with the Responses API stream events. ` +
+    `Set OPENAI_MODEL=gpt-4o-mini (recommended) or gpt-4o.`
+  );
 }
 
 // ---------- CORS ----------
@@ -48,7 +49,6 @@ async function readBody(req) {
     req.on("end", () => {
       const t = (data || "").trim();
       if (!t) return resolve({});
-      // If JSON, parse; else treat as raw text as the user message
       if (t.startsWith("{") || t.startsWith("[")) {
         try { resolve(JSON.parse(t)); } catch { resolve({}); }
       } else {
@@ -59,7 +59,7 @@ async function readBody(req) {
   });
 }
 
-// ---------- OpenAI helpers ----------
+// ---------- OpenAI helper ----------
 async function oaJson(path, method, body) {
   const r = await fetch(`https://api.openai.com/v1${path}`, {
     method,
@@ -76,77 +76,61 @@ async function oaJson(path, method, body) {
   return r.json();
 }
 
-// Build a Responses API request payload
 function buildResponsesRequest(userMessage, opts = {}) {
-  // You can enrich instructions/system role here if you want
   const systemPreamble =
-    "You are Talking Care Navigator. Be concise, practical, and cite official UK guidance at the end.";
+    "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end.";
 
   return {
     model: OPENAI_MODEL,
-    // Responses API accepts a single "input" which can be text or array of content parts.
     input: [
       { role: "system", content: systemPreamble },
       { role: "user",   content: userMessage }
     ],
-    // If you later want JSON mode: add  response_format: { type: "json_object" }
-    // temperature, max_output_tokens etc. can go here too.
+    // You can add: temperature, max_output_tokens, response_format, etc.
     ...opts,
   };
 }
 
-// ---------- Non-streaming path (Responses API without SSE) ----------
+// ---------- Non-streaming ----------
 async function handleNonStreaming(userMessage) {
   const payload = buildResponsesRequest(userMessage, { stream: false });
-
   const resp = await oaJson("/responses", "POST", payload);
 
-  // Extract plain text
   let text = "";
-  // The Responses API returns output in resp.output (array of content parts)
   if (resp && Array.isArray(resp.output)) {
-    for (const item of resp.output) {
-      // items can be { type: "output_text", text: "..." } etc.
-      if (item.type === "output_text" && typeof item.text === "string") {
-        text += item.text;
+    for (const part of resp.output) {
+      if (part?.type === "output_text" && typeof part.text === "string") {
+        text += part.text;
       }
     }
   }
-
-  // Usage info (tokens) if present
   const usage = resp?.usage || null;
-
   return { ok: true, text, usage };
 }
 
-// ---------- Streaming path (Responses API SSE) ----------
+// ---------- Streaming ----------
 async function handleStreaming(res, userMessage) {
-  // Tell the browser we’ll stream SSE
+  // Start SSE immediately (avoid buffering)
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
-    // CORS (mirrored on stream too)
     "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN,
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Accept",
   });
 
-  // Small helper to write an SSE block safely
-  const forward = (event, data) => {
+  const forwardRaw = (chunk) => { try { res.write(chunk); } catch {} };
+  const emit = (event, data) => {
     try {
       if (event) res.write(`event: ${event}\n`);
       if (data !== undefined) res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
-    } catch {
-      // ignore broken pipe
-    }
+    } catch {}
   };
 
-  // Optional “start” marker for your client
-  forward("start", { ok: true });
+  emit("start", { ok: true });
 
-  // Fire the upstream streaming request
   const upstream = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -159,12 +143,11 @@ async function handleStreaming(res, userMessage) {
 
   if (!upstream.ok || !upstream.body) {
     const errTxt = await upstream.text().catch(() => "");
-    forward("error", { ok: false, step: "responses_stream", error: errTxt || upstream.status });
+    emit("error", { ok: false, step: "responses_stream", error: errTxt || upstream.status });
     try { res.end(); } catch {}
     return;
   }
 
-  // Pipe bytes through unmodified so event names remain intact
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
 
@@ -172,15 +155,14 @@ async function handleStreaming(res, userMessage) {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      // Forward raw SSE bytes: keep the original OpenAI event names:
-      // response.output_text.delta, response.completed, etc.
-      res.write(chunk);
+      // Forward OpenAI SSE bytes unmodified. The client expects
+      // events like `response.output_text.delta`, `response.completed`, etc.
+      forwardRaw(decoder.decode(value, { stream: true }));
     }
   } catch {
-    // client aborted / network hiccup
+    // client aborted / network blip
   } finally {
-    forward("done", "[DONE]");
+    emit("done", "[DONE]");
     try { res.end(); } catch {}
   }
 }
@@ -203,6 +185,13 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: "Missing userMessage" });
     }
 
+    if (/^gpt-3\.5-turbo/i.test(OPENAI_MODEL || "")) {
+      return res.status(400).json({
+        ok: false,
+        error: `Model '${OPENAI_MODEL}' is not compatible with Responses streaming. Use gpt-4o-mini or gpt-4o.`,
+      });
+    }
+
     if (mode === "on") {
       return await handleStreaming(res, userMessage);
     } else {
@@ -211,11 +200,8 @@ export default async function handler(req, res) {
     }
   } catch (err) {
     console.error("assistant handler error:", err);
-    // If we weren’t streaming yet, return JSON error
     try {
       return res.status(500).json({ ok: false, error: "Internal Server Error" });
-    } catch {
-      // If already streaming, the client will just see the stream end.
-    }
+    } catch {}
   }
 }
