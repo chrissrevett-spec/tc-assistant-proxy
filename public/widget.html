@@ -7,13 +7,13 @@
   <style>
     :root { color-scheme: light dark; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 16px; }
-    .wrap { max-width: 860px; margin: 0 auto; }
-    .row { display: flex; gap: 8px; margin-bottom: 8px; align-items: stretch; }
+    .wrap { max-width: 820px; margin: 0 auto; }
+    .row { display: flex; gap: 8px; margin-bottom: 8px; }
     textarea { flex: 1; min-height: 112px; padding: 10px; }
     button { padding: 10px 14px; cursor: pointer; }
-    #status { font-size: 12px; opacity: .8; margin-bottom: 8px; }
+    #status { font-size: 12px; opacity: .8; margin: 6px 0 10px; }
     #out { white-space: pre-wrap; border: 1px solid #9993; border-radius: 8px; padding: 12px; min-height: 160px; }
-    #err { color: #b00020; font-size: 12px; white-space: pre-wrap; margin-top: 6px; }
+    .row > div { display:flex; flex-direction:column; gap:8px; }
   </style>
 </head>
 <body>
@@ -22,170 +22,225 @@
     <div id="status"></div>
     <div class="row">
       <textarea id="tc-input" placeholder="Type your question…"></textarea>
-      <div style="display:flex; flex-direction:column; gap:8px;">
+      <div>
         <button id="tc-ask-stream" type="button">Ask (stream)</button>
         <button id="tc-ask-json"   type="button">Ask (non-stream)</button>
         <button id="tc-clear"      type="button">Clear</button>
       </div>
     </div>
     <div id="out"></div>
-    <div id="err" aria-live="polite"></div>
   </div>
 
   <script>
   (function () {
-    // ------- CONFIG -------
-    // When opened directly at tc-assistant-proxy.vercel.app, this will be same-origin.
-    // When embedded from Squarespace, the iframe src *is* the same origin too, so CORS is not needed.
-    const API_BASE = location.origin.replace(/\/$/, "");
+    // If hosted on tc-assistant-proxy.vercel.app this will naturally be that origin.
+    // If embedded in Squarespace (iframe), it still points to the proxy origin.
+    const API_BASE = (function () {
+      // If this HTML is served from the proxy (recommended), use same-origin:
+      if (/tc-assistant-proxy\.vercel\.app$/i.test(location.host)) return location.origin;
+      // Fallback: hard-code your proxy
+      return "https://tc-assistant-proxy.vercel.app";
+    })();
 
-    // ------- ELEMENTS -------
     const $in   = document.getElementById("tc-input");
     const $out  = document.getElementById("out");
     const $stat = document.getElementById("status");
-    const $err  = document.getElementById("err");
     const $btnS = document.getElementById("tc-ask-stream");
     const $btnJ = document.getElementById("tc-ask-json");
     const $btnC = document.getElementById("tc-clear");
 
+    let currentThreadId = null;
+
+    const log = (...a) => console.log("[TC widget]", ...a);
+    const err = (...a) => console.error("[TC widget]", ...a);
+
     function setStatus(t){ $stat.textContent = t || ""; }
     function append(t){ $out.textContent += t; }
+    function nl(){ append("\n"); }
     function clearOut(){ $out.textContent = ""; }
-    function showErr(e){ $err.textContent = (typeof e === "string" ? e : (e?.message || String(e))); console.error(e); }
-    function clearErr(){ $err.textContent = ""; }
 
-    console.log("[widget] loaded. API_BASE =", API_BASE);
-
-    // ------- NON-STREAM -------
-    async function askJson(prompt) {
-      setStatus("Thinking…"); clearErr();
-      console.log("[widget] POST JSON ->", `${API_BASE}/api/assistant?stream=off`);
-      const r = await fetch(`${API_BASE}/api/assistant?stream=off`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify({ userMessage: prompt })
-      }).catch(err => { showErr(err); return null; });
-      setStatus("");
-      if (!r) return;
-      if (!r.ok) { const t = await r.text().catch(()=> ""); showErr(`HTTP ${r.status} ${t}`); return; }
-      const data = await r.json().catch(()=> null);
-      console.log("[widget] JSON response:", data);
-      if (!data?.ok) { showErr("Request failed."); return; }
-      append((data.text || "").trim() + "\n");
+    function getPromptOrNull() {
+      const p = ($in?.value || "").trim();
+      return p || null;
     }
 
-    // ------- STREAM (Responses API SSE passthrough) -------
-    async function askStream(prompt) {
-      setStatus("Typing…"); clearErr();
-      console.log("[widget] POST SSE ->", `${API_BASE}/api/assistant?stream=on`);
-      const r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          // Accept header is optional; server will reply with text/event-stream anyway.
-          "Accept": "text/event-stream"
-        },
-        body: JSON.stringify({ userMessage: prompt })
-      }).catch(err => { showErr(err); return null; });
+    // -------------------- Non-streaming (JSON) --------------------
+    async function askJson(prompt) {
+      setStatus("Thinking…");
+      log("JSON → POST /api/assistant?stream=off", { prompt, currentThreadId });
 
-      if (!r) { setStatus(""); return; }
-      if (!r.ok || !r.body) {
+      let r;
+      try {
+        r = await fetch(`${API_BASE}/api/assistant?stream=off`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+          },
+          body: JSON.stringify({ userMessage: prompt, threadId: currentThreadId })
+        });
+      } catch (e) {
         setStatus("");
-        const t = r ? await r.text().catch(()=> "") : "";
-        showErr(`Stream start failed: HTTP ${r?.status || "?"} ${t}`);
+        err("JSON fetch error", e);
+        append("⚠️ Network error (JSON)"); nl();
         return;
       }
 
-      const reader = r.body.getReader();
+      setStatus("");
+      if (!r.ok) {
+        const txt = await r.text().catch(() => "");
+        err("JSON HTTP error", r.status, txt);
+        append(`⚠️ HTTP ${r.status}`); nl();
+        return;
+      }
+
+      const data = await r.json().catch(() => null);
+      log("JSON response", data);
+      if (!data || !data.ok) {
+        append("⚠️ Request failed"); nl();
+        return;
+      }
+      if (data.thread_id) currentThreadId = data.thread_id;
+      if (data.text) append(data.text);
+      nl();
+    }
+
+    // -------------------- Streaming (SSE) --------------------
+    async function askStream(prompt) {
+      setStatus("Typing…");
+      log("SSE → POST /api/assistant?stream=on", { prompt, currentThreadId });
+
+      let r;
+      try {
+        r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream"
+          },
+          body: JSON.stringify({ userMessage: prompt, threadId: currentThreadId })
+        });
+      } catch (e) {
+        setStatus("");
+        err("SSE fetch error", e);
+        append("⚠️ Network error (stream)"); nl();
+        return;
+      }
+
+      if (!r.ok || !r.body) {
+        setStatus("");
+        const txt = await r.text().catch(() => "");
+        err("SSE HTTP error", r.status, txt);
+        append(`⚠️ Stream HTTP ${r.status}`); nl();
+        return;
+      }
+
+      // Parse SSE by hand (Firefox/Chrome) and append deltas immediately.
+      const reader  = r.body.getReader();
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
 
-      const flush = (chunk) => {
+      const flushBlocks = (chunk) => {
         buffer += chunk;
         const blocks = buffer.split(/\n\n/);
         buffer = blocks.pop();
         for (const block of blocks) {
+          // Each block may include one "event:" and one or more "data:" lines
           let event = "message";
           const datas = [];
           for (const line of block.split(/\n/)) {
             if (!line) continue;
-            if (line.startsWith(":")) continue;                  // comment/keepalive
-            if (line.startsWith("event:")) event = line.slice(6).trim();
-            else if (line.startsWith("data:")) datas.push(line.slice(5).trim());
+            if (line.startsWith(":")) continue;
+            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
+            if (line.startsWith("data:"))  { datas.push(line.slice(5).trim()); continue; }
           }
           const raw = datas.join("\n");
-          handle(event, raw);
+          handleSseEvent(event, raw);
         }
       };
 
-      function handle(event, raw) {
-        // Expect OpenAI Responses events: response.output_text.delta, response.completed, error, etc.
-        if (event === "error") { showErr(raw); setStatus(""); return; }
-        if (event === "done" || event === "response.completed") { setStatus(""); return; }
+      function handleSseEvent(event, raw) {
+        // Debug every event for now (visible in DevTools)
+        log("SSE event", event, raw);
 
-        // Try to extract text from deltas
-        try {
-          const d = JSON.parse(raw);
-
-          // Responses delta style
-          if (d?.type === "response.output_text.delta" || d?.delta?.type === "output_text_delta") {
-            const t = d?.delta?.text ?? d?.text ?? "";
-            if (typeof t === "string") append(t);
-            return;
-          }
-
-          // Assistants v2 "thread.message.delta" style (just in case server ever forwards those)
-          if (Array.isArray(d?.delta?.content)) {
-            for (const c of d.delta.content) {
-              if (c?.type === "output_text_delta" && typeof c.text === "string") append(c.text);
-            }
-            return;
-          }
-
-          // Last resort: if we see "text" directly, append it
-          if (typeof d?.text === "string") append(d.text);
-        } catch {
-          // If it's plain text, append as-is (useful for debugging)
-          if (raw && raw !== "[DONE]") append(raw);
+        if (event === "start") {
+          // Our server adds this sometimes; Responses API doesn't send thread IDs.
+          try { const d = JSON.parse(raw); if (d?.thread_id) currentThreadId = d.thread_id; } catch {}
+          return;
         }
+
+        if (event === "done" || event === "response.completed") {
+          setStatus("");
+          nl();
+          return;
+        }
+
+        if (event === "error") {
+          setStatus("");
+          append(`⚠️ ${raw}`); nl();
+          return;
+        }
+
+        // Responses API deltas look like:
+        //   event: response.output_text.delta
+        //   data: {"type":"response.output_text.delta","delta":{"type":"output_text_delta","text":"..."}}
+        if (event === "response.output_text.delta") {
+          try {
+            const d = JSON.parse(raw);
+            const t = d?.delta?.text;
+            if (typeof t === "string") append(t);
+          } catch (e) {
+            // Raw might not be JSON (should be, but safe to ignore)
+          }
+          return;
+        }
+
+        // Some models may emit refusal/safety deltas:
+        //   event: response.refusal.delta
+        if (event === "response.refusal.delta") {
+          try {
+            const d = JSON.parse(raw);
+            const t = d?.delta?.text || "";
+            if (t) append(t);
+          } catch {}
+          return;
+        }
+
+        // Ignore other events (tool calls, logs, etc.)
       }
 
       try {
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          flush(chunk);
+          flushBlocks(decoder.decode(value, { stream: true }));
         }
       } catch (e) {
-        showErr(e);
+        err("SSE read loop error", e);
       } finally {
         setStatus("");
       }
     }
 
-    function getPrompt() {
-      const p = ($in.value || "").trim();
-      if (!p) { showErr("Please type something first."); }
-      return p || null;
-    }
-
-    // ------- BINDINGS -------
-    $btnS.addEventListener("click", async () => {
-      clearOut(); clearErr();
-      const p = getPrompt(); if (!p) return;
+    // -------------------- Wire buttons --------------------
+    $btnS?.addEventListener("click", async () => {
+      const p = getPromptOrNull();
+      if (!p) return;
+      clearOut();
       await askStream(p);
     });
 
-    $btnJ.addEventListener("click", async () => {
-      clearOut(); clearErr();
-      const p = getPrompt(); if (!p) return;
+    $btnJ?.addEventListener("click", async () => {
+      const p = getPromptOrNull();
+      if (!p) return;
+      clearOut();
       await askJson(p);
     });
 
-    $btnC.addEventListener("click", () => { clearOut(); clearErr(); setStatus(""); });
+    $btnC?.addEventListener("click", () => { clearOut(); setStatus(""); });
 
-    console.log("[widget] ready. Click a button to send.");
+    // Sanity log
+    log("Widget ready", { API_BASE });
   })();
   </script>
 </body>
