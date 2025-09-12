@@ -11,9 +11,8 @@
     .row { display: flex; gap: 8px; margin-bottom: 8px; }
     textarea { flex: 1; min-height: 112px; padding: 10px; }
     button { padding: 10px 14px; cursor: pointer; }
-    #status { font-size: 12px; opacity: .8; margin: 6px 0 10px; }
-    #out { white-space: pre-wrap; border: 1px solid #9993; border-radius: 8px; padding: 12px; min-height: 160px; }
-    .row > div { display:flex; flex-direction:column; gap:8px; }
+    #status { font-size: 12px; opacity: .8; margin-bottom: 8px; }
+    #out { white-space: pre-wrap; border: 1px solid #9993; border-radius: 8px; padding: 12px; min-height: 160px; max-height: 480px; overflow: auto; }
   </style>
 </head>
 <body>
@@ -22,10 +21,10 @@
     <div id="status"></div>
     <div class="row">
       <textarea id="tc-input" placeholder="Type your question…"></textarea>
-      <div>
-        <button id="tc-ask-stream" type="button">Ask (stream)</button>
-        <button id="tc-ask-json"   type="button">Ask (non-stream)</button>
-        <button id="tc-clear"      type="button">Clear</button>
+      <div style="display:flex; flex-direction:column; gap:8px;">
+        <button id="tc-ask-stream">Ask (stream)</button>
+        <button id="tc-ask-json">Ask (non-stream)</button>
+        <button id="tc-clear">Clear</button>
       </div>
     </div>
     <div id="out"></div>
@@ -33,15 +32,8 @@
 
   <script>
   (function () {
-    // If hosted on tc-assistant-proxy.vercel.app this will naturally be that origin.
-    // If embedded in Squarespace (iframe), it still points to the proxy origin.
-    const API_BASE = (function () {
-      // If this HTML is served from the proxy (recommended), use same-origin:
-      if (/tc-assistant-proxy\.vercel\.app$/i.test(location.host)) return location.origin;
-      // Fallback: hard-code your proxy
-      return "https://tc-assistant-proxy.vercel.app";
-    })();
-
+    // Use same-origin when hosted on tc-assistant-proxy; works inside Squarespace iframe.
+    const API_BASE = location.origin.replace(/\/$/, "");
     const $in   = document.getElementById("tc-input");
     const $out  = document.getElementById("out");
     const $stat = document.getElementById("status");
@@ -49,198 +41,183 @@
     const $btnJ = document.getElementById("tc-ask-json");
     const $btnC = document.getElementById("tc-clear");
 
-    let currentThreadId = null;
+    function setStatus(t){ if ($stat) $stat.textContent = t || ""; }
+    function append(t){
+      if (!$out) return;
+      $out.textContent += t;
+      // keep view pinned to bottom during typing
+      $out.scrollTop = $out.scrollHeight;
+    }
+    function clearOut(){ if ($out) $out.textContent = ""; }
 
-    const log = (...a) => console.log("[TC widget]", ...a);
-    const err = (...a) => console.error("[TC widget]", ...a);
-
-    function setStatus(t){ $stat.textContent = t || ""; }
-    function append(t){ $out.textContent += t; }
-    function nl(){ append("\n"); }
-    function clearOut(){ $out.textContent = ""; }
-
-    function getPromptOrNull() {
+    function getPrompt(){
       const p = ($in?.value || "").trim();
       return p || null;
     }
 
-    // -------------------- Non-streaming (JSON) --------------------
+    // -------- Non-streaming ----------
     async function askJson(prompt) {
       setStatus("Thinking…");
-      log("JSON → POST /api/assistant?stream=off", { prompt, currentThreadId });
-
-      let r;
       try {
-        r = await fetch(`${API_BASE}/api/assistant?stream=off`, {
+        const r = await fetch(`${API_BASE}/api/assistant?stream=off`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-          },
-          body: JSON.stringify({ userMessage: prompt, threadId: currentThreadId })
+          headers: { "Content-Type": "application/json", "Accept": "application/json" },
+          body: JSON.stringify({ userMessage: prompt })
         });
+        if (!r.ok) {
+          append(`⚠️ HTTP ${r.status}\n`);
+          return;
+        }
+        const data = await r.json().catch(() => null);
+        if (!data?.ok) {
+          append(`⚠️ Request failed\n`);
+          return;
+        }
+        if (data.text) append(data.text + "\n");
       } catch (e) {
-        setStatus("");
-        err("JSON fetch error", e);
-        append("⚠️ Network error (JSON)"); nl();
-        return;
-      }
-
-      setStatus("");
-      if (!r.ok) {
-        const txt = await r.text().catch(() => "");
-        err("JSON HTTP error", r.status, txt);
-        append(`⚠️ HTTP ${r.status}`); nl();
-        return;
-      }
-
-      const data = await r.json().catch(() => null);
-      log("JSON response", data);
-      if (!data || !data.ok) {
-        append("⚠️ Request failed"); nl();
-        return;
-      }
-      if (data.thread_id) currentThreadId = data.thread_id;
-      if (data.text) append(data.text);
-      nl();
-    }
-
-    // -------------------- Streaming (SSE) --------------------
-    async function askStream(prompt) {
-      setStatus("Typing…");
-      log("SSE → POST /api/assistant?stream=on", { prompt, currentThreadId });
-
-      let r;
-      try {
-        r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream"
-          },
-          body: JSON.stringify({ userMessage: prompt, threadId: currentThreadId })
-        });
-      } catch (e) {
-        setStatus("");
-        err("SSE fetch error", e);
-        append("⚠️ Network error (stream)"); nl();
-        return;
-      }
-
-      if (!r.ok || !r.body) {
-        setStatus("");
-        const txt = await r.text().catch(() => "");
-        err("SSE HTTP error", r.status, txt);
-        append(`⚠️ Stream HTTP ${r.status}`); nl();
-        return;
-      }
-
-      // Parse SSE by hand (Firefox/Chrome) and append deltas immediately.
-      const reader  = r.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let buffer = "";
-
-      const flushBlocks = (chunk) => {
-        buffer += chunk;
-        const blocks = buffer.split(/\n\n/);
-        buffer = blocks.pop();
-        for (const block of blocks) {
-          // Each block may include one "event:" and one or more "data:" lines
-          let event = "message";
-          const datas = [];
-          for (const line of block.split(/\n/)) {
-            if (!line) continue;
-            if (line.startsWith(":")) continue;
-            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
-            if (line.startsWith("data:"))  { datas.push(line.slice(5).trim()); continue; }
-          }
-          const raw = datas.join("\n");
-          handleSseEvent(event, raw);
-        }
-      };
-
-      function handleSseEvent(event, raw) {
-        // Debug every event for now (visible in DevTools)
-        log("SSE event", event, raw);
-
-        if (event === "start") {
-          // Our server adds this sometimes; Responses API doesn't send thread IDs.
-          try { const d = JSON.parse(raw); if (d?.thread_id) currentThreadId = d.thread_id; } catch {}
-          return;
-        }
-
-        if (event === "done" || event === "response.completed") {
-          setStatus("");
-          nl();
-          return;
-        }
-
-        if (event === "error") {
-          setStatus("");
-          append(`⚠️ ${raw}`); nl();
-          return;
-        }
-
-        // Responses API deltas look like:
-        //   event: response.output_text.delta
-        //   data: {"type":"response.output_text.delta","delta":{"type":"output_text_delta","text":"..."}}
-        if (event === "response.output_text.delta") {
-          try {
-            const d = JSON.parse(raw);
-            const t = d?.delta?.text;
-            if (typeof t === "string") append(t);
-          } catch (e) {
-            // Raw might not be JSON (should be, but safe to ignore)
-          }
-          return;
-        }
-
-        // Some models may emit refusal/safety deltas:
-        //   event: response.refusal.delta
-        if (event === "response.refusal.delta") {
-          try {
-            const d = JSON.parse(raw);
-            const t = d?.delta?.text || "";
-            if (t) append(t);
-          } catch {}
-          return;
-        }
-
-        // Ignore other events (tool calls, logs, etc.)
-      }
-
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          flushBlocks(decoder.decode(value, { stream: true }));
-        }
-      } catch (e) {
-        err("SSE read loop error", e);
+        append(`⚠️ ${e?.message || "Request failed"}\n`);
       } finally {
         setStatus("");
       }
     }
 
-    // -------------------- Wire buttons --------------------
-    $btnS?.addEventListener("click", async () => {
-      const p = getPromptOrNull();
-      if (!p) return;
+    // -------- Streaming (Responses API SSE) ----------
+    async function askStream(prompt) {
+      setStatus("Typing…");
+      try {
+        const r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+          body: JSON.stringify({ userMessage: prompt })
+        });
+        if (!r.ok || !r.body) {
+          append(`⚠️ Stream HTTP ${r.status}\n`);
+          return;
+        }
+
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+
+        // Handle one full SSE block (separated by blank line)
+        function handleBlock(block) {
+          // split into lines, capture "event:" and "data:" lines
+          const lines = block.split(/\r?\n/);
+          let event = "message";
+          const datas = [];
+          for (const line of lines) {
+            if (!line) continue;
+            if (line.startsWith(":")) continue; // comment/keep-alive
+            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
+            if (line.startsWith("data:"))  { datas.push(line.slice(5).trim()); continue; }
+          }
+          const raw = datas.join("\n");
+          // Debug to verify we’re parsing what the server sends
+          console.debug("[SSE]", event, raw);
+
+          // Start marker not strictly needed here
+          if (event === "start") return;
+
+          // Unified delta handling:
+          // - OpenAI Responses stream:   event= response.output_text.delta  data= {delta:{type:"output_text_delta",text:"..."}}
+          // - Assistants delta (if proxied): event= thread.message.delta    data= {delta:{content:[{type:"output_text_delta",text:"..."}]}}
+          if (event === "response.output_text.delta") {
+            try {
+              const d = JSON.parse(raw);
+              const t = d?.delta?.text || "";
+              if (t) append(t);
+            } catch {}
+            return;
+          }
+          if (event === "thread.message.delta") {
+            try {
+              const d = JSON.parse(raw);
+              const parts = d?.delta?.content || [];
+              for (const p of parts) {
+                if (p?.type === "output_text_delta" && typeof p.text === "string") append(p.text);
+              }
+            } catch {}
+            return;
+          }
+
+          // Some models emit refusal deltas (optional)
+          if (event === "response.refusal.delta") {
+            try {
+              const d = JSON.parse(raw);
+              const t = d?.delta?.text || "";
+              if (t) append(t);
+            } catch {}
+            return;
+          }
+
+          // Finalization events — append any final text bundled in response.completed
+          if (event === "response.completed") {
+            try {
+              const d = JSON.parse(raw);
+              // Prefer compact field if present
+              const final = d?.response?.output_text?.text;
+              if (typeof final === "string" && final.length) {
+                append(final);
+              } else if (Array.isArray(d?.response?.output)) {
+                for (const item of d.response.output) {
+                  if (item.type === "output_text" && typeof item.text === "string") append(item.text);
+                }
+              }
+            } catch {}
+            append("\n");
+            setStatus("");
+            return;
+          }
+
+          if (event === "thread.message.completed" || event === "done") {
+            append("\n");
+            setStatus("");
+            return;
+          }
+
+          if (event === "error") {
+            setStatus("");
+            append(`⚠️ ${raw}\n`);
+            return;
+          }
+        }
+
+        // Read chunks; split into SSE blocks on blank line
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const parts = buffer.split(/\n\n/);
+          buffer = parts.pop() || "";
+          for (const block of parts) {
+            if (block.trim()) handleBlock(block);
+          }
+        }
+
+        // Flush trailing block if it ended without a blank line
+        if (buffer.trim()) handleBlock(buffer);
+      } catch (e) {
+        append(`⚠️ ${e?.message || "Stream failed"}\n`);
+      } finally {
+        setStatus("");
+      }
+    }
+
+    // ---------- Wire up buttons ----------
+    $btnS.addEventListener("click", async () => {
+      const p = getPrompt(); if (!p) return;
       clearOut();
       await askStream(p);
     });
 
-    $btnJ?.addEventListener("click", async () => {
-      const p = getPromptOrNull();
-      if (!p) return;
+    $btnJ.addEventListener("click", async () => {
+      const p = getPrompt(); if (!p) return;
       clearOut();
       await askJson(p);
     });
 
-    $btnC?.addEventListener("click", () => { clearOut(); setStatus(""); });
-
-    // Sanity log
-    log("Widget ready", { API_BASE });
+    $btnC.addEventListener("click", () => { clearOut(); setStatus(""); });
   })();
   </script>
 </body>
