@@ -7,6 +7,31 @@
   <style>
     :root { color-scheme: light dark; }
 
+    /* NEW: Global (page) scrollbar theme */
+    :root {
+      /* Firefox (thumb, track) */
+      scrollbar-color: #ccc #FAFAFA;
+      scrollbar-width: thin;
+    }
+    /* WebKit global scrollbars (Chromium/Safari/Edge) */
+    html::-webkit-scrollbar,
+    body::-webkit-scrollbar {
+      width: 10px;
+    }
+    html::-webkit-scrollbar-track,
+    body::-webkit-scrollbar-track {
+      background: #FAFAFA;
+    }
+    html::-webkit-scrollbar-thumb,
+    body::-webkit-scrollbar-thumb {
+      background: #ccc;
+      border-radius: 8px;
+    }
+    html:hover::-webkit-scrollbar-thumb,
+    body:hover::-webkit-scrollbar-thumb {
+      background: #b3b3b3;
+    }
+
     /* Make the canvas full-viewport */
     html, body { height: 100%; }
     body {
@@ -108,13 +133,12 @@
       scrollbar-width: thin;                  /* Firefox */
       scrollbar-color: #ccc #FAFAFA;         /* Firefox (thumb, track) */
       box-sizing: border-box;
-      /* Optional: let #out grow but keep the page from overflowing past footer */
       flex: 1 1 auto;
     }
     #out:hover { background: #f7f7f7; border-color: #ccc; }
     #out:empty::before { content: "I'll respond to your question here"; color: #777; }
 
-    /* WebKit scrollbars */
+    /* WebKit scrollbars for the inner scrollable elements */
     #out::-webkit-scrollbar, textarea::-webkit-scrollbar { width: 10px; }
     #out::-webkit-scrollbar-track, textarea::-webkit-scrollbar-track {
       background: #FAFAFA; border-radius: 8px;
