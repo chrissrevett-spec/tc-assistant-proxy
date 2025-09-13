@@ -7,140 +7,137 @@
   <style>
     :root { color-scheme: light dark; }
 
-    /* Page */
+    /* Page background fades to #F7F7F7 at the edges */
     body {
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
       margin: 0;
-      background: canvas;
-      color: canvastext;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background:
+        radial-gradient(1200px 600px at 50% 0%,
+          #ffffff 60%, #F7F7F7 100%);
+      padding: 24px;
     }
 
-    /* Card wrapper */
+    /* Outer widget “card” with rounded corners */
     .wrap {
       max-width: 840px;
-      margin: 24px auto;
+      margin: 0 auto;
+      background: #fff;
+      border-radius: 16px;          /* (7) round the outer edges */
+      box-shadow: 0 10px 30px rgba(0,0,0,.06);
       padding: 20px;
-      border: 1px solid color-mix(in oklab, canvastext 12%, transparent);
-      border-radius: 16px;
-      background: color-mix(in oklab, canvas 90%, canvastext 2%);
-      box-shadow: 0 8px 24px color-mix(in oklab, canvastext 8%, transparent);
+      overflow: hidden;             /* keep inner corners neat */
     }
 
-    /* Header */
-    .title {
-      margin: 0 0 4px;
+    h1 {
+      margin: 0 0 6px;
+      font-weight: 650;
       font-size: 22px;
-      font-weight: 700;
       letter-spacing: .2px;
     }
-    .subtitle {
-      margin: 0 0 16px;
-      font-size: 13px;
-      opacity: .75;
+
+    .sub {
+      margin: 0 0 10px;
+      font-size: 14px;
+      color: #4a4a4a;
     }
 
-    /* Status line */
     #status {
       font-size: 12px;
       opacity: .8;
-      margin: 6px 0 12px;
-      min-height: 1.2em;
+      margin: 6px 0 10px;
+      min-height: 1em;
     }
 
-    /* Input row */
     .row {
       display: flex;
       gap: 10px;
+      margin-bottom: 10px;
       align-items: stretch;
-      margin-bottom: 12px;
     }
 
-    textarea#tc-input {
+    textarea {
       flex: 1;
       min-height: 120px;
       padding: 12px 14px;
+      border: 1px solid #e2e2e2;
       border-radius: 12px;
-      border: 1px solid color-mix(in oklab, canvastext 14%, transparent);
-      background: canvas;
-      color: canvastext;
-      outline: none;
       resize: vertical;
-      box-shadow: inset 0 1px 0 color-mix(in oklab, canvastext 8%, transparent);
+      font-family: inherit;        /* (2) match font to rest of UI */
+      font-size: 15px;
+      line-height: 1.4;
+      outline: none;
+      background: #fafafa;
     }
-    textarea#tc-input:focus {
-      border-color: color-mix(in oklab, accentcolor 50%, canvastext 20%);
-      box-shadow: 0 0 0 3px color-mix(in oklab, accentcolor 22%, transparent);
+    textarea:focus {
+      border-color: #c8c8c8;
+      background: #ffffff;
+      box-shadow: 0 0 0 3px rgba(0,0,0,.03) inset;
     }
+    /* (2) change placeholder text */
+    textarea::placeholder { color: #8a8a8a; }
 
-    /* Buttons column */
-    .btns {
+    .col {
       display: flex;
       flex-direction: column;
       gap: 8px;
-      min-width: 160px;
+      width: 160px;
     }
 
     button {
-      padding: 10px 14px;
+      padding: 12px 14px;
       cursor: pointer;
-      border: 1px solid color-mix(in oklab, canvastext 14%, transparent);
       border-radius: 12px;
-      background: color-mix(in oklab, canvas 85%, canvastext 3%);
-      color: canvastext;
+      border: 1px solid #e2e2e2;
+      background: #111;
+      color: #fff;
       font-weight: 600;
-      transition: background .15s ease, transform .04s ease, border-color .15s ease;
+      letter-spacing: .2px;
     }
-    button:hover {
-      background: color-mix(in oklab, canvas 80%, canvastext 5%);
+    button.secondary {
+      background: #f7f7f7;
+      color: #333;
+      border-color: #e2e2e2;
     }
-    button:active {
-      transform: translateY(1px);
-    }
-
-    /* Primary & subtle variants */
-    .btn-primary {
-      background: color-mix(in oklab, accentcolor 35%, canvas);
-      border-color: color-mix(in oklab, accentcolor 50%, canvastext 10%);
-      color: CanvasText;
-    }
-    .btn-primary:hover {
-      background: color-mix(in oklab, accentcolor 45%, canvas);
-    }
-    .btn-ghost {
-      background: transparent;
+    button:disabled {
+      opacity: .6;
+      cursor: not-allowed;
     }
 
-    /* Output */
     #out {
       white-space: pre-wrap;
-      border: 1px solid color-mix(in oklab, canvastext 12%, transparent);
+      border: 1px solid #eaeaea;
       border-radius: 12px;
       padding: 14px;
-      min-height: 180px;
-      background: canvas;
-      color: canvastext;
-      line-height: 1.45;
+      min-height: 170px;
+      background: #fff;
     }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1 class="title">Talking Care Navigator</h1>
-    <p class="subtitle">Ask practical questions about adult social care, the CQC framework, and related UK guidance.</p>
+    <h1>Talking Care Navigator</h1>
+    <!-- (1) revised welcome/description -->
+    <p class="sub">
+      Ask me anything about adult social care in England, including CQC Registrations, Regulations and Guidance, Mental Capacity Act and DoLS queries, best practice advice, case management and more.
+    </p>
 
     <div id="status"></div>
 
     <div class="row">
-      <textarea id="tc-input" placeholder="Type your question…"></textarea>
-      <div class="btns">
-        <button id="tc-ask-stream" class="btn-primary">Ask (stream)</button>
-        <button id="tc-ask-json">Ask (non-stream)</button>
-        <button id="tc-clear" class="btn-ghost">Clear</button>
+      <!-- (2) placeholder text updated -->
+      <textarea id="tc-input" placeholder="How can I help?"></textarea>
+
+      <div class="col">
+        <!-- (4) stream button label changed to “Submit”; (3) non-stream button removed -->
+        <button id="tc-ask-stream">Submit</button>
+        <!-- (8) clear button label changed -->
+        <button id="tc-clear" class="secondary">Clear chat</button>
       </div>
     </div>
 
     <div id="out"></div>
-    <!-- Debug console removed intentionally -->
+    <!-- (3) debug console removed from UI -->
   </div>
 
   <script>
@@ -150,21 +147,7 @@
     const $out  = document.getElementById("out");
     const $stat = document.getElementById("status");
     const $btnS = document.getElementById("tc-ask-stream");
-    const $btnJ = document.getElementById("tc-ask-json");
     const $btnC = document.getElementById("tc-clear");
-
-    // --- Welcome message (appears in the output on load) ---
-    const WELCOME = [
-      "👋 Welcome to the Talking Care Navigator.",
-      "",
-      "• Use “Ask (stream)” for live typing, or “Ask (non-stream)” for a single full reply.",
-      "• I’ll cite official UK sources where relevant.",
-      ""
-    ].join("\n");
-    $out.textContent = WELCOME;
-
-    // --- No-op debug function (keeps logic identical without rendering logs) ---
-    function log(){ /* debug disabled */ }
 
     function setStatus(t){ $stat.textContent = t || ""; }
     function append(t){ $out.textContent += t; $out.scrollTop = $out.scrollHeight; }
@@ -176,42 +159,23 @@
       return p || null;
     }
 
-    async function askJson(prompt) {
-      setStatus("Thinking…");
-      log("→ POST", `${API_BASE}/api/assistant?stream=off`);
-      const r = await fetch(`${API_BASE}/api/assistant?stream=off`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify({ userMessage: prompt }),
-      });
-      setStatus("");
-      log("← HTTP", r.status);
-      let data = null;
-      try { data = await r.json(); } catch {}
-      log("← JSON", data);
-      if (!r.ok || !data?.ok) {
-        append(`⚠️ Request failed (${r.status}).`); nl();
-        return;
-      }
-      if (data.text) { append(data.text); nl(); }
-      else { append("⚠️ No text in response."); nl(); }
-    }
-
+    // --- Streaming (unchanged logic) ---
     async function askStream(prompt) {
       setStatus("Typing…");
+      $btnS.disabled = true;
+
       const r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
         body: JSON.stringify({ userMessage: prompt }),
       });
-      log("→ POST (SSE)", `${API_BASE}/api/assistant?stream=on`);
+
       if (!r.ok || !r.body) {
         setStatus("");
-        log("← HTTP", r.status, "(no body)");
         append(`⚠️ Stream failed (${r.status}).`); nl();
+        $btnS.disabled = false;
         return;
       }
-      log("← HTTP 200 (ok)");
 
       const reader  = r.body.getReader();
       const decoder = new TextDecoder("utf-8");
@@ -227,7 +191,7 @@
           const dataLines = [];
           for (const line of lines) {
             if (!line) continue;
-            if (line.startsWith(":")) continue;
+            if (line.startsWith(":")) continue;           // keepalive
             if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
             if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
           }
@@ -237,11 +201,11 @@
       };
 
       function handleEvent(event, raw) {
-        if (event === "start") { log("SSE start", raw); return; }
-        if (event === "error") { setStatus(""); log("SSE error", raw); append(`⚠️ ${raw}`); nl(); return; }
-        if (event === "done" || event === "response.completed") { setStatus(""); log("SSE", event, raw); return; }
+        if (event === "start") { return; }
+        if (event === "error") { setStatus(""); append(`⚠️ ${raw}`); nl(); return; }
+        if (event === "done" || event === "response.completed") { setStatus(""); return; }
 
-        // primary text stream
+        // Primary text stream:
         if (event === "response.output_text.delta") {
           try {
             const d = JSON.parse(raw);
@@ -249,9 +213,7 @@
           } catch {}
           return;
         }
-
-        // ignore SDK lifecycle spam
-        if (event.startsWith("response.")) return;
+        // Ignore other lifecycle events; logic unchanged.
       }
 
       try {
@@ -261,16 +223,19 @@
           flushBlocks(decoder.decode(value, { stream: true }));
         }
       } catch {
-        // network hiccup / navigation — ignore
+        // ignore
       } finally {
         setStatus("");
+        $btnS.disabled = false;
       }
     }
 
-    $btnJ.addEventListener("click", async () => {
-      const p = getPrompt(); if (!p) return;
-      clearOut();
-      await askJson(p);
+    // (5) Enter submits (Shift+Enter makes a newline)
+    $in.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        $btnS.click();
+      }
     });
 
     $btnS.addEventListener("click", async () => {
@@ -279,7 +244,7 @@
       await askStream(p);
     });
 
-    $btnC.addEventListener("click", () => { clearOut(); setStatus(""); });
+    $btnC.addEventListener("click", () => { clearOut(); setStatus(""); $in.value = ""; });
   });
   </script>
 </body>
