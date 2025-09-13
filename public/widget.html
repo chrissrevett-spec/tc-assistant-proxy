@@ -15,13 +15,37 @@
       background: #fff;
     }
 
+    /* >>> NEW: theme the PAGE scrollbar too (for long pages) */
+    html, body {
+      scrollbar-width: thin;                 /* Firefox */
+      scrollbar-color: #ccc #FAFAFA;        /* Firefox (thumb, track) */
+    }
+    html::-webkit-scrollbar,
+    body::-webkit-scrollbar {
+      width: 10px;
+    }
+    html::-webkit-scrollbar-track,
+    body::-webkit-scrollbar-track {
+      background: #FAFAFA;
+      border-radius: 8px;
+    }
+    html::-webkit-scrollbar-thumb,
+    body::-webkit-scrollbar-thumb {
+      background: #ccc;
+      border-radius: 8px;
+    }
+    html:hover::-webkit-scrollbar-thumb,
+    body:hover::-webkit-scrollbar-thumb {
+      background: #b3b3b3;                  /* hover effect */
+    }
+    /* <<< NEW */
+
     /* Outer shell: rounded with a soft edge fade to #F5F5F5 (outside) */
     .shell {
       max-width: 860px;
       margin: 0 auto;
       border-radius: 16px;
       background: #fff;
-      /* soft halo to #F5F5F5 without changing inner bg */
       box-shadow:
         0 0 0 1px rgba(0,0,0,.06),
         0 12px 24px rgba(0,0,0,.06),
@@ -31,19 +55,19 @@
     .wrap { border-radius: 16px; padding: 16px; background: #fff; }
 
     /* Header text + subtext */
-    h1 { margin: 0 0 4px; font-size: 22px; color: #000; } /* ensure visible on all bg */
+    h1 { margin: 0 0 4px; font-size: 22px; color: #000; }
     .sub { margin: 0 0 12px; font-size: 14px; color: #000; } /* black subheading */
 
     .row { display: flex; gap: 8px; margin-bottom: 8px; }
 
-    /* Input matches app font and placeholder; light theme + hover/focus effects */
+    /* Input: light theme + hover/focus effects */
     textarea {
       flex: 1;
       min-height: 112px;
       padding: 10px;
-      font: inherit;               /* same font as the rest of the UI */
-      background: #FAFAFA;         /* requested input bg */
-      color: #000;                 /* input text black */
+      font: inherit;
+      background: #FAFAFA;
+      color: #000;
       border: 1px solid #ddd;
       border-radius: 8px;
       transition: background .2s ease, border-color .2s ease, box-shadow .2s ease;
@@ -81,13 +105,11 @@
       border-color: #c9c9c9;
       box-shadow: inset 0 1px 2px rgba(0,0,0,0.06);
     }
-    button.secondary { /* class kept for markup parity; same neutral style */
-      background: #FAFAFA; color: #333; border-color: #ddd;
-    }
+    button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
 
     #status { font-size: 12px; opacity: .8; margin-bottom: 8px; }
 
-    /* Output panel with placeholder when empty; match input bg + themed scrollbar */
+    /* Output panel with placeholder; match input bg + themed scrollbar */
     #out {
       position: relative;
       white-space: pre-wrap;
@@ -95,9 +117,9 @@
       border-radius: 8px;
       padding: 12px;
       min-height: 160px;
-      background: #FAFAFA;         /* match input area */
+      background: #FAFAFA;
       overflow-y: auto;
-      color: #000;                  /* output text black */
+      color: #000;
       transition: background .2s ease, border-color .2s ease, box-shadow .2s ease;
       scrollbar-width: thin;                      /* Firefox */
       scrollbar-color: #ccc #FAFAFA;             /* Firefox (thumb, track) */
@@ -106,30 +128,29 @@
       background: #f7f7f7;
       border-color: #ccc;
     }
-    /* Placeholder when #out is empty */
     #out:empty::before {
       content: "I'll respond to your question here";
       color: #777;
     }
 
-    /* WebKit scrollbars (Chromium/Safari/Edge) */
+    /* WebKit scrollbars (Chromium/Safari/Edge) for the SCROLLABLE AREAS in the widget */
     #out::-webkit-scrollbar,
     textarea::-webkit-scrollbar {
       width: 10px;
     }
     #out::-webkit-scrollbar-track,
     textarea::-webkit-scrollbar-track {
-      background: #FAFAFA;   /* track to #FAFAFA */
+      background: #FAFAFA;
       border-radius: 8px;
     }
     #out::-webkit-scrollbar-thumb,
     textarea::-webkit-scrollbar-thumb {
-      background: #ccc;       /* thumb */
+      background: #ccc;
       border-radius: 8px;
     }
     #out:hover::-webkit-scrollbar-thumb,
     textarea:hover::-webkit-scrollbar-thumb {
-      background: #b3b3b3;    /* hover effect */
+      background: #b3b3b3;
     }
 
     /* Hidden debug log stays present but invisible */
@@ -149,7 +170,6 @@
       <div class="row">
         <textarea id="tc-input" placeholder="How can I help?"></textarea>
         <div style="display:flex; flex-direction:column; gap:8px;">
-          <!-- Renamed label only; id unchanged so logic stays intact -->
           <button id="tc-ask-stream">Submit</button>
           <button id="tc-clear" class="secondary">Clear chat</button>
         </div>
@@ -294,14 +314,14 @@
       }
     });
 
-    // Clear chat: now also clears input and cancels any in-flight stream
+    // Clear chat: also clears input and cancels any in-flight stream
     $btnC.addEventListener("click", () => {
       if (currentAbort) {
         try { currentAbort.abort(); } catch {}
         currentAbort = null;
       }
       clearOut();
-      $in.value = "";     /* also clear the input text */
+      $in.value = "";
       setStatus("");
     });
   });
