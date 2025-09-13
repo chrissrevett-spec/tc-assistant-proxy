@@ -7,137 +7,87 @@
   <style>
     :root { color-scheme: light dark; }
 
-    /* Page background fades to #F7F7F7 at the edges */
-    body {
-      margin: 0;
-      min-height: 100vh;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      background:
-        radial-gradient(1200px 600px at 50% 0%,
-          #ffffff 60%, #F7F7F7 100%);
-      padding: 24px;
-    }
+    /* Page stays neutral; the widget itself gets the edge fade */
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 16px; background: #fff; }
 
-    /* Outer widget “card” with rounded corners */
-    .wrap {
-      max-width: 840px;
+    /* Outer shell: rounded with a soft edge fade to #F5F5F5 (outside) */
+    .shell {
+      max-width: 860px;
       margin: 0 auto;
+      border-radius: 16px;
       background: #fff;
-      border-radius: 16px;          /* (7) round the outer edges */
-      box-shadow: 0 10px 30px rgba(0,0,0,.06);
-      padding: 20px;
-      overflow: hidden;             /* keep inner corners neat */
+      /* soft “fade” halo to #F5F5F5 without changing the inner bg */
+      box-shadow:
+        0 0 0 1px rgba(0,0,0,.06),           /* subtle border */
+        0 12px 24px rgba(0,0,0,.06),        /* drop shadow */
+        0 0 0 20px #F5F5F5;                 /* outer glow acts as edge fade */
     }
 
-    h1 {
-      margin: 0 0 6px;
-      font-weight: 650;
-      font-size: 22px;
-      letter-spacing: .2px;
-    }
+    .wrap { border-radius: 16px; padding: 16px; background: #fff; }
 
-    .sub {
-      margin: 0 0 10px;
-      font-size: 14px;
-      color: #4a4a4a;
-    }
+    /* Header text + subtext */
+    h1 { margin: 0 0 4px; font-size: 22px; }
+    .sub { margin: 0 0 12px; font-size: 14px; color: #555; }
 
-    #status {
-      font-size: 12px;
-      opacity: .8;
-      margin: 6px 0 10px;
-      min-height: 1em;
-    }
+    .row { display: flex; gap: 8px; margin-bottom: 8px; }
 
-    .row {
-      display: flex;
-      gap: 10px;
-      margin-bottom: 10px;
-      align-items: stretch;
-    }
-
+    /* Input matches app font and new placeholder */
     textarea {
       flex: 1;
-      min-height: 120px;
-      padding: 12px 14px;
-      border: 1px solid #e2e2e2;
-      border-radius: 12px;
-      resize: vertical;
-      font-family: inherit;        /* (2) match font to rest of UI */
-      font-size: 15px;
-      line-height: 1.4;
-      outline: none;
-      background: #fafafa;
+      min-height: 112px;
+      padding: 10px;
+      font: inherit;                       /* same font as the rest of the UI */
     }
-    textarea:focus {
-      border-color: #c8c8c8;
-      background: #ffffff;
-      box-shadow: 0 0 0 3px rgba(0,0,0,.03) inset;
-    }
-    /* (2) change placeholder text */
-    textarea::placeholder { color: #8a8a8a; }
+    textarea::placeholder { color: #777; }
 
-    .col {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      width: 160px;
-    }
+    button { padding: 10px 14px; cursor: pointer; border-radius: 8px; border: 1px solid #ddd; background: #0a7cff; color: #fff; }
+    button.secondary { background: #fafafa; color: #333; border-color: #ddd; }
 
-    button {
-      padding: 12px 14px;
-      cursor: pointer;
-      border-radius: 12px;
-      border: 1px solid #e2e2e2;
-      background: #111;
-      color: #fff;
-      font-weight: 600;
-      letter-spacing: .2px;
-    }
-    button.secondary {
-      background: #f7f7f7;
-      color: #333;
-      border-color: #e2e2e2;
-    }
-    button:disabled {
-      opacity: .6;
-      cursor: not-allowed;
-    }
+    #status { font-size: 12px; opacity: .8; margin-bottom: 8px; }
 
+    /* Output panel with placeholder when empty */
     #out {
+      position: relative;
       white-space: pre-wrap;
-      border: 1px solid #eaeaea;
-      border-radius: 12px;
-      padding: 14px;
-      min-height: 170px;
+      border: 1px solid #9993;
+      border-radius: 8px;
+      padding: 12px;
+      min-height: 160px;
       background: #fff;
+      overflow-y: auto;
     }
+    /* Placeholder shown only when #out has no text */
+    #out:empty::before {
+      content: "I'll respond to your question here";
+      color: #777;
+    }
+
+    /* Hidden debug log stays present but invisible as requested earlier */
+    #log { display: none; }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>Talking Care Navigator</h1>
-    <!-- (1) revised welcome/description -->
-    <p class="sub">
-      Ask me anything about adult social care in England, including CQC Registrations, Regulations and Guidance, Mental Capacity Act and DoLS queries, best practice advice, case management and more.
-    </p>
+  <div class="shell">
+    <div class="wrap">
+      <h1>Talking Care Navigator</h1>
+      <p class="sub">
+        Ask me anything about adult social care in England, including CQC Registrations, Regulations and Guidance, Mental Capacity Act and DoLS queries, best practice advice, case management and more.
+      </p>
 
-    <div id="status"></div>
+      <div id="status"></div>
 
-    <div class="row">
-      <!-- (2) placeholder text updated -->
-      <textarea id="tc-input" placeholder="How can I help?"></textarea>
-
-      <div class="col">
-        <!-- (4) stream button label changed to “Submit”; (3) non-stream button removed -->
-        <button id="tc-ask-stream">Submit</button>
-        <!-- (8) clear button label changed -->
-        <button id="tc-clear" class="secondary">Clear chat</button>
+      <div class="row">
+        <textarea id="tc-input" placeholder="How can I help?"></textarea>
+        <div style="display:flex; flex-direction:column; gap:8px;">
+          <!-- Renamed label only; id unchanged so logic stays intact -->
+          <button id="tc-ask-stream">Submit</button>
+          <button id="tc-clear" class="secondary">Clear chat</button>
+        </div>
       </div>
-    </div>
 
-    <div id="out"></div>
-    <!-- (3) debug console removed from UI -->
+      <div id="out"></div>
+      <div id="log"></div>
+    </div>
   </div>
 
   <script>
@@ -148,34 +98,48 @@
     const $stat = document.getElementById("status");
     const $btnS = document.getElementById("tc-ask-stream");
     const $btnC = document.getElementById("tc-clear");
+    const $log  = document.getElementById("log");
 
+    function log(...a){ $log.textContent += a.map(v => typeof v === "string" ? v : JSON.stringify(v)).join(" ") + "\n"; }
     function setStatus(t){ $stat.textContent = t || ""; }
     function append(t){ $out.textContent += t; $out.scrollTop = $out.scrollHeight; }
     function nl(){ append("\n"); }
     function clearOut(){ $out.textContent = ""; }
+
+    log(`✅ widget ready. API_BASE = ${API_BASE}`);
 
     function getPrompt() {
       const p = ($in.value || "").trim();
       return p || null;
     }
 
-    // --- Streaming (unchanged logic) ---
+    async function askJson(prompt) {
+      setStatus("Thinking…");
+      log("→ POST", `${API_BASE}/api/assistant?stream=off`);
+      const r = await fetch(`${API_BASE}/api/assistant?stream=off`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({ userMessage: prompt }),
+      });
+      setStatus("");
+      log("← HTTP", r.status);
+      let data = null;
+      try { data = await r.json(); } catch {}
+      log("← JSON", data);
+      if (!r.ok || !data?.ok) { append(`⚠️ Request failed (${r.status}).`); nl(); return; }
+      if (data.text) { append(data.text); nl(); } else { append("⚠️ No text in response."); nl(); }
+    }
+
     async function askStream(prompt) {
       setStatus("Typing…");
-      $btnS.disabled = true;
-
       const r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
         body: JSON.stringify({ userMessage: prompt }),
       });
-
-      if (!r.ok || !r.body) {
-        setStatus("");
-        append(`⚠️ Stream failed (${r.status}).`); nl();
-        $btnS.disabled = false;
-        return;
-      }
+      log("→ POST (SSE)", `${API_BASE}/api/assistant?stream=on`);
+      if (!r.ok || !r.body) { setStatus(""); log("← HTTP", r.status, "(no body)"); append(`⚠️ Stream failed (${r.status}).`); nl(); return; }
+      log("← HTTP 200 (ok)");
 
       const reader  = r.body.getReader();
       const decoder = new TextDecoder("utf-8");
@@ -191,7 +155,7 @@
           const dataLines = [];
           for (const line of lines) {
             if (!line) continue;
-            if (line.startsWith(":")) continue;           // keepalive
+            if (line.startsWith(":")) continue;
             if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
             if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
           }
@@ -201,11 +165,12 @@
       };
 
       function handleEvent(event, raw) {
-        if (event === "start") { return; }
-        if (event === "error") { setStatus(""); append(`⚠️ ${raw}`); nl(); return; }
-        if (event === "done" || event === "response.completed") { setStatus(""); return; }
+        if (event === "start") { log("SSE start", raw); return; }
+        if (event === "error") { setStatus(""); log("SSE error", raw); append(`⚠️ ${raw}`); nl(); return; }
+        if (event === "done" || event === "response.completed") { setStatus(""); log("SSE", event, raw); return; }
 
-        // Primary text stream:
+        if (/^response\./.test(event)) { log("SSE", event, raw); }
+
         if (event === "response.output_text.delta") {
           try {
             const d = JSON.parse(raw);
@@ -213,7 +178,13 @@
           } catch {}
           return;
         }
-        // Ignore other lifecycle events; logic unchanged.
+
+        if (event === "response.output_text.done" || event === "response.content_part.added" ||
+            event === "response.content_part.done" || event === "response.output_item.added" ||
+            event === "response.output_item.done" || event === "response.in_progress" ||
+            event === "response.created") {
+          return;
+        }
       }
 
       try {
@@ -223,14 +194,19 @@
           flushBlocks(decoder.decode(value, { stream: true }));
         }
       } catch {
-        // ignore
       } finally {
         setStatus("");
-        $btnS.disabled = false;
       }
     }
 
-    // (5) Enter submits (Shift+Enter makes a newline)
+    // Submit button (streaming)
+    $btnS.addEventListener("click", async () => {
+      const p = getPrompt(); if (!p) return;
+      clearOut();
+      await askStream(p);
+    });
+
+    // Desktop: Enter submits (Shift+Enter = newline)
     $in.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
@@ -238,13 +214,8 @@
       }
     });
 
-    $btnS.addEventListener("click", async () => {
-      const p = getPrompt(); if (!p) return;
-      clearOut();
-      await askStream(p);
-    });
-
-    $btnC.addEventListener("click", () => { clearOut(); setStatus(""); $in.value = ""; });
+    // Clear chat
+    $btnC.addEventListener("click", () => { clearOut(); setStatus(""); });
   });
   </script>
 </body>
