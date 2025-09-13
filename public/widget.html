@@ -7,62 +7,59 @@
   <style>
     :root { color-scheme: light dark; }
 
-    /* Page stays neutral; the widget itself gets the edge fade */
+    /* Make the canvas full-viewport */
+    html, body { height: 100%; }
     body {
       font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
       margin: 0;
-      padding: 16px;
+      padding: 0;                 /* was 16px — remove so it truly fills */
       background: #fff;
     }
 
-    /* >>> NEW: theme the PAGE scrollbar too (for long pages) */
-    html, body {
-      scrollbar-width: thin;                 /* Firefox */
-      scrollbar-color: #ccc #FAFAFA;        /* Firefox (thumb, track) */
-    }
-    html::-webkit-scrollbar,
-    body::-webkit-scrollbar {
-      width: 10px;
-    }
-    html::-webkit-scrollbar-track,
-    body::-webkit-scrollbar-track {
-      background: #FAFAFA;
-      border-radius: 8px;
-    }
-    html::-webkit-scrollbar-thumb,
-    body::-webkit-scrollbar-thumb {
-      background: #ccc;
-      border-radius: 8px;
-    }
-    html:hover::-webkit-scrollbar-thumb,
-    body:hover::-webkit-scrollbar-thumb {
-      background: #b3b3b3;                  /* hover effect */
-    }
-    /* <<< NEW */
-
-    /* Outer shell: rounded with a soft edge fade to #F5F5F5 (outside) */
+    /* Shell now spans the page and fills the viewport height */
     .shell {
-      max-width: 860px;
-      margin: 0 auto;
+      width: 100%;
+      max-width: none;            /* remove fixed max width */
+      min-height: 100dvh;         /* fill device viewport height */
+      margin: 0;                  /* no horizontal centering gap */
       border-radius: 16px;
       background: #fff;
       box-shadow:
         0 0 0 1px rgba(0,0,0,.06),
         0 12px 24px rgba(0,0,0,.06),
-        0 0 0 20px #F5F5F5;
+        0 0 0 20px #F5F5F5;       /* soft outer fade */
+      box-sizing: border-box;
+      display: flex;              /* allow inner to stretch full height */
+      flex-direction: column;
     }
 
-    .wrap { border-radius: 16px; padding: 16px; background: #fff; }
+    .wrap {
+      border-radius: 16px;
+      padding: 16px;              /* keep internal padding */
+      background: #fff;
+      flex: 1;                    /* fill remaining height */
+      display: flex;
+      flex-direction: column;
+    }
 
-    /* Header text + subtext */
+    /* Header + subtext */
     h1 { margin: 0 0 4px; font-size: 22px; color: #000; }
-    .sub { margin: 0 0 12px; font-size: 14px; color: #000; } /* black subheading */
+    .sub { margin: 0 0 12px; font-size: 14px; color: #000; }
 
-    .row { display: flex; gap: 8px; margin-bottom: 8px; }
+    #status { font-size: 12px; opacity: .8; margin-bottom: 8px; }
 
-    /* Input: light theme + hover/focus effects */
+    /* Layout row: let it wrap nicely on narrow screens */
+    .row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    .row > textarea { flex: 1 1 420px; }  /* grows, but wraps on small widths */
+    .row > .btns   { display:flex; flex-direction:column; gap:8px; }
+
+    /* Input area */
     textarea {
-      flex: 1;
       min-height: 112px;
       padding: 10px;
       font: inherit;
@@ -71,45 +68,32 @@
       border: 1px solid #ddd;
       border-radius: 8px;
       transition: background .2s ease, border-color .2s ease, box-shadow .2s ease;
-      scrollbar-width: thin;                      /* Firefox */
-      scrollbar-color: #ccc #FAFAFA;             /* Firefox (thumb, track) */
+      scrollbar-width: thin;                  /* Firefox */
+      scrollbar-color: #ccc #FAFAFA;         /* Firefox (thumb, track) */
+      box-sizing: border-box;
     }
     textarea::placeholder { color: #777; }
-    textarea:hover {
-      background: #f7f7f7;
-      border-color: #ccc;
-    }
+    textarea:hover { background: #f7f7f7; border-color: #ccc; }
     textarea:focus {
-      background: #f7f7f7;
-      border-color: #ccc;
-      outline: none;
+      background: #f7f7f7; border-color: #ccc; outline: none;
       box-shadow: 0 0 0 2px rgba(0,0,0,0.04);
     }
 
-    /* Neutral buttons for Submit + Clear chat */
+    /* Neutral buttons */
     button {
-      padding: 10px 14px;
-      cursor: pointer;
-      border-radius: 8px;
-      border: 1px solid #ddd;
-      background: #FAFAFA;
-      color: #333;
+      padding: 10px 14px; cursor: pointer;
+      border-radius: 8px; border: 1px solid #ddd;
+      background: #FAFAFA; color: #333;
       transition: background .2s ease, color .2s ease, border-color .2s ease, box-shadow .2s ease;
     }
-    button:hover {
-      background: #f0f0f0;
-      border-color: #ccc;
-    }
+    button:hover { background: #f0f0f0; border-color: #ccc; }
     button:active {
-      background: #e9e9e9;
-      border-color: #c9c9c9;
+      background: #e9e9e9; border-color: #c9c9c9;
       box-shadow: inset 0 1px 2px rgba(0,0,0,0.06);
     }
     button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
 
-    #status { font-size: 12px; opacity: .8; margin-bottom: 8px; }
-
-    /* Output panel with placeholder; match input bg + themed scrollbar */
+    /* Output panel fills available space below inputs if content grows */
     #out {
       position: relative;
       white-space: pre-wrap;
@@ -118,42 +102,31 @@
       padding: 12px;
       min-height: 160px;
       background: #FAFAFA;
-      overflow-y: auto;
       color: #000;
+      overflow-y: auto;
       transition: background .2s ease, border-color .2s ease, box-shadow .2s ease;
-      scrollbar-width: thin;                      /* Firefox */
-      scrollbar-color: #ccc #FAFAFA;             /* Firefox (thumb, track) */
+      scrollbar-width: thin;                  /* Firefox */
+      scrollbar-color: #ccc #FAFAFA;         /* Firefox (thumb, track) */
+      box-sizing: border-box;
+      /* Optional: let #out grow but keep the page from overflowing past footer */
+      flex: 1 1 auto;
     }
-    #out:hover {
-      background: #f7f7f7;
-      border-color: #ccc;
-    }
-    #out:empty::before {
-      content: "I'll respond to your question here";
-      color: #777;
-    }
+    #out:hover { background: #f7f7f7; border-color: #ccc; }
+    #out:empty::before { content: "I'll respond to your question here"; color: #777; }
 
-    /* WebKit scrollbars (Chromium/Safari/Edge) for the SCROLLABLE AREAS in the widget */
-    #out::-webkit-scrollbar,
-    textarea::-webkit-scrollbar {
-      width: 10px;
+    /* WebKit scrollbars */
+    #out::-webkit-scrollbar, textarea::-webkit-scrollbar { width: 10px; }
+    #out::-webkit-scrollbar-track, textarea::-webkit-scrollbar-track {
+      background: #FAFAFA; border-radius: 8px;
     }
-    #out::-webkit-scrollbar-track,
-    textarea::-webkit-scrollbar-track {
-      background: #FAFAFA;
-      border-radius: 8px;
+    #out::-webkit-scrollbar-thumb, textarea::-webkit-scrollbar-thumb {
+      background: #ccc; border-radius: 8px;
     }
-    #out::-webkit-scrollbar-thumb,
-    textarea::-webkit-scrollbar-thumb {
-      background: #ccc;
-      border-radius: 8px;
-    }
-    #out:hover::-webkit-scrollbar-thumb,
-    textarea:hover::-webkit-scrollbar-thumb {
+    #out:hover::-webkit-scrollbar-thumb, textarea:hover::-webkit-scrollbar-thumb {
       background: #b3b3b3;
     }
 
-    /* Hidden debug log stays present but invisible */
+    /* Hidden debug log remains */
     #log { display: none; }
   </style>
 </head>
@@ -169,7 +142,7 @@
 
       <div class="row">
         <textarea id="tc-input" placeholder="How can I help?"></textarea>
-        <div style="display:flex; flex-direction:column; gap:8px;">
+        <div class="btns">
           <button id="tc-ask-stream">Submit</button>
           <button id="tc-clear" class="secondary">Clear chat</button>
         </div>
@@ -181,6 +154,7 @@
   </div>
 
   <script>
+  /* JS logic unchanged */
   document.addEventListener("DOMContentLoaded", () => {
     const API_BASE = location.origin.replace(/\/$/, "");
     const $in   = document.getElementById("tc-input");
@@ -201,23 +175,6 @@
     function getPrompt() {
       const p = ($in.value || "").trim();
       return p || null;
-    }
-
-    async function askJson(prompt) {
-      setStatus("Thinking…");
-      log("→ POST", `${API_BASE}/api/assistant?stream=off`);
-      const r = await fetch(`${API_BASE}/api/assistant?stream=off`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify({ userMessage: prompt }),
-      });
-      setStatus("");
-      log("← HTTP", r.status);
-      let data = null;
-      try { data = await r.json(); } catch {}
-      log("← JSON", data);
-      if (!r.ok || !data?.ok) { append(`⚠️ Request failed (${r.status}).`); nl(); return; }
-      if (data.text) { append(data.text); nl(); } else { append("⚠️ No text in response."); nl(); }
     }
 
     /* Abort support for streaming so Clear chat can cancel mid-stream */
@@ -292,36 +249,32 @@
           flushBlocks(decoder.decode(value, { stream: true }));
         }
       } catch {
-        /* aborted or network hiccup */
       } finally {
         currentAbort = null;
         setStatus("");
       }
     }
 
-    // Submit button (streaming)
-    $btnS.addEventListener("click", async () => {
+    // Submit
+    document.getElementById("tc-ask-stream").addEventListener("click", async () => {
       const p = getPrompt(); if (!p) return;
       clearOut();
       await askStream(p);
     });
 
-    // Desktop: Enter submits (Shift+Enter = newline)
-    $in.addEventListener("keydown", (e) => {
+    // Enter to submit (Shift+Enter newline)
+    document.getElementById("tc-input").addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        $btnS.click();
+        document.getElementById("tc-ask-stream").click();
       }
     });
 
-    // Clear chat: also clears input and cancels any in-flight stream
-    $btnC.addEventListener("click", () => {
-      if (currentAbort) {
-        try { currentAbort.abort(); } catch {}
-        currentAbort = null;
-      }
+    // Clear chat (also cancels in-flight stream and clears input)
+    document.getElementById("tc-clear").addEventListener("click", () => {
+      if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
       clearOut();
-      $in.value = "";
+      document.getElementById("tc-input").value = "";
       setStatus("");
     });
   });
