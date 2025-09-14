@@ -8,26 +8,33 @@
 // Notes
 // - Uses Responses API for replies, but dynamically fetches system instructions
 //   from your Assistant via the Assistants API (v2).
-// - Requires env var: OPENAI_ASSISTANT_ID
+// - Requires env var: OPENAI_ASSISTANT_ID (for instructions fetch only)
 // - Adds proper 'OpenAI-Beta: assistants=v2' header to the Assistants GET.
 // - Caches instructions in-memory briefly to avoid rate/latency.
 // - Falls back to a safe system string if fetch fails.
-// - IMPORTANT: For vector-store/tools usage, we pass `assistant_id` **in the body**
-//   of POST /v1/responses (do NOT call /assistants/{id}/responses).
+// - NEW: If OPENAI_VECTOR_STORE_IDS (or OPENAI_VECTOR_STORE_ID) is set, attach
+//   file_search tool + vector_store_ids to the Responses request (no assistant_id used).
 
-const OPENAI_API_KEY      = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL        = process.env.OPENAI_MODEL || "gpt-4o-mini"; // must support Responses streaming
-const OPENAI_ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID || "";     // <- set this in Vercel
-const CORS_ALLOW_ORIGIN   = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
-const CORS_ALLOW_METHODS  = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
-const CORS_ALLOW_HEADERS  = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
-const CORS_MAX_AGE        = "86400";
+const OPENAI_API_KEY       = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL         = process.env.OPENAI_MODEL || "gpt-4o-mini"; // must support Responses streaming
+const OPENAI_ASSISTANT_ID  = process.env.OPENAI_ASSISTANT_ID || "";     // for instructions fetch
+const CORS_ALLOW_ORIGIN    = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
+const CORS_ALLOW_METHODS   = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
+const CORS_ALLOW_HEADERS   = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
+const CORS_MAX_AGE         = "86400";
+
+// Accept either a single id or a comma-separated list
+const OPENAI_VECTOR_STORE_IDS = (
+  process.env.OPENAI_VECTOR_STORE_IDS ||
+  process.env.OPENAI_VECTOR_STORE_ID ||
+  ""
+).split(",").map(s => s.trim()).filter(Boolean);
 
 if (!OPENAI_API_KEY) {
   console.error("[assistant] Missing OPENAI_API_KEY");
 }
 if (!OPENAI_ASSISTANT_ID) {
-  console.warn("[assistant] OPENAI_ASSISTANT_ID not set — will use fallback system instructions (no assistant tools).");
+  console.warn("[assistant] OPENAI_ASSISTANT_ID not set — will use fallback system instructions.");
 }
 
 // ---------- CORS ----------
@@ -87,18 +94,15 @@ const INSTR_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 let instrCache = { text: "", at: 0 };
 
 async function fetchAssistantInstructions() {
-  // If no Assistant ID, skip to fallback
   if (!OPENAI_ASSISTANT_ID) {
     return "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
   }
 
-  // Use cache if fresh
   const now = Date.now();
   if (instrCache.text && now - instrCache.at < INSTR_CACHE_TTL_MS) {
     return instrCache.text;
   }
 
-  // Fetch from Assistants API (v2) — requires OpenAI-Beta header
   try {
     const r = await fetch(`https://api.openai.com/v1/assistants/${OPENAI_ASSISTANT_ID}`, {
       method: "GET",
@@ -113,7 +117,6 @@ async function fetchAssistantInstructions() {
     if (!r.ok) {
       const errTxt = await r.text().catch(() => "");
       console.warn(`[assistant] Failed to fetch assistant instructions: ${r.status} ${errTxt}`);
-      // fallback
       return "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
     }
 
@@ -123,7 +126,6 @@ async function fetchAssistantInstructions() {
       : "";
 
     const finalSys = sys || "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
-
     instrCache = { text: finalSys, at: now };
     return finalSys;
   } catch (e) {
@@ -133,24 +135,28 @@ async function fetchAssistantInstructions() {
 }
 
 // ---------- Build Responses request ----------
-// We keep your dynamic system instructions AND include the assistant_id so the
-// Assistant’s tools (vector stores, file_search, etc.) are active.
 function buildResponsesRequest(userMessage, sysInstructions, extra = {}) {
-  const input = [];
-  if (sysInstructions) input.push({ role: "system", content: sysInstructions });
-  input.push({ role: "user", content: userMessage });
+  // Optionally add file_search tool + vector_store_ids when env is set
+  const tools = [];
+  const tool_resources = {};
 
-  const payload = {
-    model: OPENAI_MODEL,
-    input,
-    ...extra,
-  };
-
-  if (OPENAI_ASSISTANT_ID) {
-    payload.assistant_id = OPENAI_ASSISTANT_ID;
+  if (OPENAI_VECTOR_STORE_IDS.length) {
+    tools.push({ type: "file_search" });
+    tool_resources.file_search = { vector_store_ids: OPENAI_VECTOR_STORE_IDS };
   }
 
-  return payload;
+  const base = {
+    model: OPENAI_MODEL,
+    input: [
+      { role: "system", content: sysInstructions },
+      { role: "user",   content: userMessage }
+    ],
+  };
+
+  if (tools.length) base.tools = tools;
+  if (Object.keys(tool_resources).length) base.tool_resources = tool_resources;
+
+  return { ...base, ...extra };
 }
 
 // Extract text from Responses JSON
@@ -178,7 +184,7 @@ function extractTextFromResponse(resp) {
 async function handleNonStreaming(userMessage) {
   const sys = await fetchAssistantInstructions();
   const payload = buildResponsesRequest(userMessage, sys, { stream: false });
-  const resp = await oaJson("/responses", "POST", payload); // keep /responses (not /assistants/{id}/responses)
+  const resp = await oaJson("/responses", "POST", payload);
   const text = extractTextFromResponse(resp);
   const usage = resp?.usage || null;
   return { ok: true, text, usage };
@@ -186,13 +192,11 @@ async function handleNonStreaming(userMessage) {
 
 // ---------- Streaming (SSE passthrough) ----------
 async function handleStreaming(res, userMessage) {
-  // Tell the browser we’ll stream SSE
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
-    // mirror CORS on stream
     "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN,
     "Access-Control-Allow-Methods": CORS_ALLOW_METHODS,
     "Access-Control-Allow-Headers": CORS_ALLOW_HEADERS,
@@ -205,13 +209,10 @@ async function handleStreaming(res, userMessage) {
     } catch {}
   };
 
-  // Signal start
   send("start", { ok: true });
 
-  // Fetch system instructions (cached) before opening upstream stream
   const sys = await fetchAssistantInstructions();
 
-  // Kick off upstream streaming to Responses API (NOTE: still /v1/responses)
   const upstream = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -229,8 +230,7 @@ async function handleStreaming(res, userMessage) {
     return;
   }
 
-  // Pass bytes through unmodified so event names remain intact
-  const reader = upstream.body.getReader();
+  const reader  = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
 
   try {
