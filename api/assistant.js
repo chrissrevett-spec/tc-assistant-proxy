@@ -1,20 +1,26 @@
-// api/assistant.js
+// /api/assistant.js
 //
-// One endpoint, two modes using the OpenAI "Responses" API:
+// One endpoint, two modes using OpenAI "Responses" API:
 //
 //  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
 //  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
 //
-// Now with dynamic system instructions fetched from an OpenAI Assistant:
-// - Set OPENAI_ASSISTANT_ID in your env (already present).
-// - We fetch /v1/assistants/{id} and inject assistant.instructions into the
-//   Responses "system" role. Cached in memory for a short TTL.
+// Notes
+// - Uses Responses API so we avoid threads/runs race conditions entirely.
+// - Robust body parsing (handles Squarespace/Firefox text/plain).
+// - CORS is configurable via env; default is the widget's own origin.
+// - Non-streaming extracts text from *all* possible places to avoid blank outputs.
+// - NEW: system instructions are fetched dynamically from your Assistant (if OPENAI_ASSISTANT_ID is set)
+//        and cached in-memory for a short period. Falls back to a safe default if not set/available.
 
-const OPENAI_API_KEY        = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL          = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const CORS_ALLOW_ORIGIN     = process.env.CORS_ALLOW_ORIGIN || "https://www.talkingcare.uk";
-const OPENAI_ASSISTANT_ID   = process.env.OPENAI_ASSISTANT_ID || ""; // dynamic source of instructions
-const ASSISTANT_CACHE_TTLMS = 5 * 60 * 1000; // 5 minutes
+const OPENAI_API_KEY     = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL       = process.env.OPENAI_MODEL || "gpt-4o-mini"; // must support Responses streaming
+const OPENAI_ASSISTANT_ID= process.env.OPENAI_ASSISTANT_ID || "";     // optional; enables dynamic instructions
+
+const CORS_ALLOW_ORIGIN  = process.env.CORS_ALLOW_ORIGIN  || "https://tc-assistant-proxy.vercel.app";
+const CORS_ALLOW_METHODS = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
+const CORS_ALLOW_HEADERS = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
+const CORS_MAX_AGE       = "86400";
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY");
@@ -24,9 +30,9 @@ if (!OPENAI_API_KEY) {
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN);
   res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
-  res.setHeader("Access-Control-Max-Age", "86400");
+  res.setHeader("Access-Control-Allow-Methods", CORS_ALLOW_METHODS);
+  res.setHeader("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS);
+  res.setHeader("Access-Control-Max-Age", CORS_MAX_AGE);
 }
 function endPreflight(res) {
   res.statusCode = 204;
@@ -55,12 +61,13 @@ async function readBody(req) {
 }
 
 // ---------- OpenAI helpers ----------
-async function oaJson(path, method, body) {
+async function oaJson(path, method, body, headers = {}) {
   const r = await fetch(`https://api.openai.com/v1${path}`, {
     method,
     headers: {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
+      ...headers,
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -71,117 +78,124 @@ async function oaJson(path, method, body) {
   return r.json();
 }
 
-// ---------- Assistant instructions cache ----------
-let _assistantCache = {
-  id: null,
-  instructions: "",
-  fetchedAt: 0,
-};
+// ---------- Assistant instructions (dynamic) ----------
+const FALLBACK_INSTRUCTIONS =
+  "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
 
-async function fetchAssistantInstructions() {
+let cachedInstr = null;
+let cachedAt = 0;
+const INSTR_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+async function getAssistantInstructions() {
+  // If no Assistant ID, use fallback
   if (!OPENAI_ASSISTANT_ID) {
-    return ""; // no assistant configured; use empty/default system later
+    return FALLBACK_INSTRUCTIONS;
   }
 
   const now = Date.now();
-  if (
-    _assistantCache.id === OPENAI_ASSISTANT_ID &&
-    now - _assistantCache.fetchedAt < ASSISTANT_CACHE_TTLMS
-  ) {
-    return _assistantCache.instructions || "";
+  if (cachedInstr && (now - cachedAt) < INSTR_TTL_MS) {
+    return cachedInstr;
   }
 
-  // Fetch latest assistant
-  const r = await fetch(`https://api.openai.com/v1/assistants/${OPENAI_ASSISTANT_ID}`, {
-    method: "GET",
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-  });
+  try {
+    const resp = await fetch(`https://api.openai.com/v1/assistants/${OPENAI_ASSISTANT_ID}`, {
+      method: "GET",
+      headers: { "Authorization": `Bearer ${OPENAI_API_KEY}` }
+    });
+    if (!resp.ok) {
+      const t = await resp.text().catch(() => "");
+      console.warn("Failed to fetch assistant instructions:", resp.status, t);
+      return FALLBACK_INSTRUCTIONS;
+    }
+    const data = await resp.json();
+    const instructions = (data && typeof data.instructions === "string" && data.instructions.trim())
+      ? data.instructions
+      : FALLBACK_INSTRUCTIONS;
 
-  if (!r.ok) {
-    const errTxt = await r.text().catch(() => "");
-    console.warn(`GET /assistants/${OPENAI_ASSISTANT_ID} failed: ${r.status} ${errTxt}`);
-    // Keep old cache if present; otherwise return empty
-    return _assistantCache.instructions || "";
+    cachedInstr = instructions;
+    cachedAt = now;
+    return instructions;
+  } catch (e) {
+    console.warn("Error fetching assistant instructions:", e?.message || e);
+    return FALLBACK_INSTRUCTIONS;
   }
-
-  const data = await r.json().catch(() => null);
-  const instr = (data && data.instructions) ? String(data.instructions) : "";
-
-  _assistantCache = {
-    id: OPENAI_ASSISTANT_ID,
-    instructions: instr,
-    fetchedAt: now,
-  };
-
-  return instr;
 }
 
-// Build a Responses API request payload
-function buildResponsesRequest(userMessage, systemInstructions, opts = {}) {
-  // Final system content: prefer Assistant instructions; fallback to a tiny default
-  const systemPreamble =
-    (systemInstructions && systemInstructions.trim()) ||
-    "You are Talking Care Navigator. Be concise, practical, and cite official UK guidance at the end.";
-
+// Build a Responses API request payload (uses dynamic instructions if available)
+async function buildResponsesRequest(userMessage, extra = {}) {
+  const systemPreamble = await getAssistantInstructions();
   return {
     model: OPENAI_MODEL,
     input: [
       { role: "system", content: systemPreamble },
       { role: "user",   content: userMessage }
     ],
-    ...opts,
+    ...extra,
   };
 }
 
-// ---------- Non-streaming path (Responses API without SSE) ----------
-async function handleNonStreaming(userMessage, systemInstructions) {
-  const payload = buildResponsesRequest(userMessage, systemInstructions, { stream: false });
-  const resp = await oaJson("/responses", "POST", payload);
+// Extracts text from a Responses API JSON object (works for stream==false reply)
+function extractTextFromResponse(resp) {
+  let out = "";
 
-  // Extract plain text from resp.output
-  let text = "";
-  if (resp && Array.isArray(resp.output)) {
+  // 1) Standard Responses output format
+  if (Array.isArray(resp?.output)) {
     for (const item of resp.output) {
-      if (item.type === "output_text" && typeof item.text === "string") {
-        text += item.text;
+      if (item?.type === "message" && Array.isArray(item.content)) {
+        for (const part of item.content) {
+          if (part?.type === "output_text" && typeof part.text === "string") {
+            out += part.text;
+          }
+        }
       }
     }
   }
 
+  // 2) Convenience `text` field if present
+  if (!out && typeof resp?.text === "string") out = resp.text;
+
+  // 3) Older nesting variants
+  if (!out && typeof resp?.response?.output_text === "string") out = resp.response.output_text;
+
+  return out || "";
+}
+
+// ---------- Non-streaming ----------
+async function handleNonStreaming(userMessage) {
+  const payload = await buildResponsesRequest(userMessage, { stream: false });
+  const resp = await oaJson("/responses", "POST", payload);
+
+  const text = extractTextFromResponse(resp);
   const usage = resp?.usage || null;
   return { ok: true, text, usage };
 }
 
-// ---------- Streaming path (Responses API SSE) ----------
-async function handleStreaming(res, userMessage, systemInstructions) {
-  // SSE headers
+// ---------- Streaming (SSE passthrough) ----------
+async function handleStreaming(res, userMessage) {
+  // Tell the browser we’ll stream SSE
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
-    // CORS mirrored for stream
+    // mirror CORS on stream
     "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN,
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Accept",
+    "Access-Control-Allow-Methods": CORS_ALLOW_METHODS,
+    "Access-Control-Allow-Headers": CORS_ALLOW_HEADERS,
   });
 
-  const forward = (event, data) => {
+  const send = (event, data) => {
     try {
       if (event) res.write(`event: ${event}\n`);
-      if (data !== undefined) {
-        res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
-      }
-    } catch { /* broken pipe */ }
+      if (data !== undefined) res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
+    } catch {}
   };
 
-  // Optional “start” event
-  forward("start", { ok: true });
+  // Optional: let the client know the stream has started
+  send("start", { ok: true, using_system_instructions: !!OPENAI_ASSISTANT_ID });
 
-  // Fire upstream SSE
+  // Kick off upstream streaming
+  const body = await buildResponsesRequest(userMessage, { stream: true });
   const upstream = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -189,16 +203,17 @@ async function handleStreaming(res, userMessage, systemInstructions) {
       "Content-Type": "application/json",
       "Accept": "text/event-stream",
     },
-    body: JSON.stringify(buildResponsesRequest(userMessage, systemInstructions, { stream: true })),
+    body: JSON.stringify(body),
   });
 
   if (!upstream.ok || !upstream.body) {
     const errTxt = await upstream.text().catch(() => "");
-    forward("error", { ok: false, step: "responses_stream", error: errTxt || upstream.status });
+    send("error", { ok:false, step:"responses_stream", error: errTxt || upstream.status });
     try { res.end(); } catch {}
     return;
   }
 
+  // Pass bytes through unmodified so events (`response.output_text.delta`, etc.) remain intact
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
 
@@ -206,13 +221,12 @@ async function handleStreaming(res, userMessage, systemInstructions) {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      res.write(chunk); // forward raw SSE
+      try { res.write(decoder.decode(value, { stream: true })); } catch {}
     }
   } catch {
-    // client aborted / network hiccup
+    // client aborted / network error — ignore
   } finally {
-    forward("done", "[DONE]");
+    send("done", "[DONE]");
     try { res.end(); } catch {}
   }
 }
@@ -223,7 +237,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return endPreflight(res);
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST, OPTIONS");
-    return res.status(405).json({ ok: false, error: "Method Not Allowed" });
+    return res.status(405).json({ ok:false, error: "Method Not Allowed" });
   }
 
   try {
@@ -232,25 +246,19 @@ export default async function handler(req, res) {
     const mode = (req.query.stream || "off").toString(); // "on" | "off"
 
     if (!userMessage) {
-      return res.status(400).json({ ok: false, error: "Missing userMessage" });
+      return res.status(400).json({ ok:false, error: "Missing userMessage" });
     }
 
-    // Fetch dynamic system instructions (cached)
-    const systemInstructions = await fetchAssistantInstructions();
-    // Short log so you can verify which instructions are used
-    const preview = (systemInstructions || "").slice(0, 120).replace(/\s+/g, " ");
-    console.log(`Using system instructions (preview): "${preview}${systemInstructions.length > 120 ? '…' : ''}"`);
-
     if (mode === "on") {
-      return await handleStreaming(res, userMessage, systemInstructions);
+      return await handleStreaming(res, userMessage);
     } else {
-      const out = await handleNonStreaming(userMessage, systemInstructions);
+      const out = await handleNonStreaming(userMessage);
       return res.status(200).json(out);
     }
   } catch (err) {
     console.error("assistant handler error:", err);
     try {
-      return res.status(500).json({ ok: false, error: "Internal Server Error" });
+      return res.status(500).json({ ok:false, error: "Internal Server Error" });
     } catch {}
   }
 }
