@@ -5,21 +5,24 @@
 //  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
 //  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
 //
-// Updates in this version:
-// - (1) Logs Assistants/Vector-Store retrieval tool calls seen in SSE
-//       (events: response.tool_call.*) without changing the forwarded stream.
-// - (2) Sets response_format: "verbose_json" for both streaming and non-streaming
-//       to expose richer metadata (does not affect your UI streaming).
-//
-// Existing behavior, stability, and client-side logic remain unchanged.
+// Notes
+// - Uses Responses API for replies, but dynamically fetches system instructions
+//   from your Assistant via the Assistants API (v2).
+// - Requires env var: OPENAI_ASSISTANT_ID
+// - Adds proper 'OpenAI-Beta: assistants=v2' header to the Assistants GET.
+// - Caches instructions in-memory briefly to avoid rate/latency.
+// - No unsupported params (no response_format, no assistant_id in /responses).
+// - Optional DEBUG_SSE_LOG=1 env var to log SSE events on the server without
+//   altering the client stream.
 
 const OPENAI_API_KEY      = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL        = process.env.OPENAI_MODEL || "gpt-4o-mini"; // must support Responses streaming
-const OPENAI_ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID || "";     // used only to fetch system instructions
+const OPENAI_ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID || "";
 const CORS_ALLOW_ORIGIN   = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
 const CORS_ALLOW_METHODS  = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
 const CORS_ALLOW_HEADERS  = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
 const CORS_MAX_AGE        = "86400";
+const DEBUG_SSE_LOG       = process.env.DEBUG_SSE_LOG === "1";
 
 if (!OPENAI_API_KEY) {
   console.error("[assistant] Missing OPENAI_API_KEY");
@@ -85,18 +88,15 @@ const INSTR_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 let instrCache = { text: "", at: 0 };
 
 async function fetchAssistantInstructions() {
-  // If no Assistant ID, skip to fallback
   if (!OPENAI_ASSISTANT_ID) {
     return "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
   }
 
-  // Use cache if fresh
   const now = Date.now();
   if (instrCache.text && now - instrCache.at < INSTR_CACHE_TTL_MS) {
     return instrCache.text;
   }
 
-  // Fetch from Assistants API (v2)
   try {
     const r = await fetch(`https://api.openai.com/v1/assistants/${OPENAI_ASSISTANT_ID}`, {
       method: "GET",
@@ -111,7 +111,6 @@ async function fetchAssistantInstructions() {
     if (!r.ok) {
       const errTxt = await r.text().catch(() => "");
       console.warn(`[assistant] Failed to fetch assistant instructions: ${r.status} ${errTxt}`);
-      // fallback
       return "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
     }
 
@@ -124,7 +123,8 @@ async function fetchAssistantInstructions() {
 
     instrCache = { text: finalSys, at: now };
     console.info("[assistant] Using system instructions from Assistant:", {
-      id: data?.id, hasInstructions: !!sys
+      id: OPENAI_ASSISTANT_ID,
+      hasInstructions: !!sys,
     });
     return finalSys;
   } catch (e) {
@@ -134,15 +134,15 @@ async function fetchAssistantInstructions() {
 }
 
 // ---------- Build Responses request ----------
-// IMPORTANT: response_format: "verbose_json" for richer metadata.
 function buildResponsesRequest(userMessage, sysInstructions, extra = {}) {
   return {
     model: OPENAI_MODEL,
-    response_format: "verbose_json",
     input: [
       { role: "system", content: sysInstructions },
       { role: "user",   content: userMessage }
     ],
+    // (Optional) keep explicit text format to avoid future API drift
+    text: { format: { type: "text" }, verbosity: "medium" },
     ...extra,
   };
 }
@@ -168,76 +168,23 @@ function extractTextFromResponse(resp) {
   return out || "";
 }
 
-// ---------- Utility: compact log for tool events ----------
-function logToolEvent(eventName, raw) {
-  try {
-    const d = typeof raw === "string" ? JSON.parse(raw) : raw;
-    // The SSE "data" for tool events typically contains:
-    // { type, tool_call_id, tool_name, status, ... } with optional input/output
-    const type = d?.type || eventName;
-    const toolName = d?.tool_name || d?.name || d?.tool || "unknown_tool";
-    const callId = d?.tool_call_id || d?.id || "unknown_call";
-    const status  = d?.status || d?.state || undefined;
-
-    // Try to surface any retrieved file ids / quotes if present
-    let fileIds = [];
-    let quotes  = [];
-
-    // Common shapes:
-    // - d.output: [ { file_id, quote, ... }, ... ]
-    // - d.result?.items or d.items
-    const outputs = Array.isArray(d?.output) ? d.output : (Array.isArray(d?.items) ? d.items : []);
-    for (const it of outputs) {
-      if (it?.file_id) fileIds.push(it.file_id);
-      if (it?.quote) quotes.push(it.quote.slice(0, 140)); // trim for logs
-    }
-    if (!fileIds.length && d?.file_id) fileIds = [d.file_id];
-
-    console.info("[assistant][tool]", {
-      event: eventName,
-      type,
-      toolName,
-      callId,
-      status,
-      fileIds: fileIds.length ? fileIds : undefined,
-      quotes: quotes.length ? quotes : undefined,
-    });
-  } catch (e) {
-    console.info("[assistant][tool]", eventName, "(unparsed)", (typeof raw === "string" ? raw.slice(0, 500) : raw));
-  }
-}
-
 // ---------- Non-streaming ----------
 async function handleNonStreaming(userMessage) {
   const sys = await fetchAssistantInstructions();
   const payload = buildResponsesRequest(userMessage, sys, { stream: false });
   const resp = await oaJson("/responses", "POST", payload);
-
-  // Optional: log any tool-ish artifacts found in non-stream response
-  try {
-    if (Array.isArray(resp?.output)) {
-      for (const item of resp.output) {
-        if (item?.type && String(item.type).includes("tool")) {
-          console.info("[assistant][tool][nonstream]", item.type);
-        }
-      }
-    }
-  } catch {}
-
   const text = extractTextFromResponse(resp);
   const usage = resp?.usage || null;
   return { ok: true, text, usage };
 }
 
-// ---------- Streaming (SSE passthrough + server-side tee for logs) ----------
+// ---------- Streaming (SSE passthrough with optional server logging) ----------
 async function handleStreaming(res, userMessage) {
-  // Tell the browser we’ll stream SSE
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
-    // mirror CORS on stream
     "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN,
     "Access-Control-Allow-Methods": CORS_ALLOW_METHODS,
     "Access-Control-Allow-Headers": CORS_ALLOW_HEADERS,
@@ -250,13 +197,10 @@ async function handleStreaming(res, userMessage) {
     } catch {}
   };
 
-  // Signal start
   send("start", { ok: true });
 
-  // Fetch system instructions (cached) before opening upstream stream
   const sys = await fetchAssistantInstructions();
 
-  // Kick off upstream streaming to Responses API
   const upstream = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -274,46 +218,38 @@ async function handleStreaming(res, userMessage) {
     return;
   }
 
-  // ----- Tee the SSE stream: forward bytes unchanged, but also parse & log tool events -----
   const reader  = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
-  let buffer = "";
 
-  const flushBlocksForLogs = (chunk) => {
-    buffer += chunk;
-    const blocks = buffer.split(/\n\n/);
-    buffer = blocks.pop();
+  // Optional: light parser to mirror key SSE events into server logs without changing client stream
+  let buffer = "";
+  const maybeLogChunk = (chunkStr) => {
+    if (!DEBUG_SSE_LOG) return;
+    buffer += chunkStr;
+    const blocks = buffer.split("\n\n");
+    buffer = blocks.pop() || "";
     for (const block of blocks) {
-      const lines = block.split(/\n/);
+      const lines = block.split("\n");
       let event = "message";
       const dataLines = [];
       for (const line of lines) {
-        if (!line) continue;
-        if (line.startsWith(":")) continue; // comment/keepalive
+        if (!line || line.startsWith(":")) continue;
         if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
         if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
       }
       const raw = dataLines.join("\n");
-
-      // Log tool events only (prove retrieval beyond doubt)
-      if (event.startsWith("response.tool_call")) {
-        logToolEvent(event, raw);
-      }
-      // On completion, log a compact summary (usage tokens etc.)
-      if (event === "response.completed") {
+      // Only log compact, useful stuff (delta, completed, errors)
+      if (event === "response.output_text.delta") {
         try {
           const d = JSON.parse(raw);
-          const u = d?.response?.usage || d?.usage || null;
-          console.info("[assistant][completed]", {
-            tokens: u ? {
-              input: u.input_tokens,
-              output: u.output_tokens,
-              total: u.total_tokens
-            } : undefined
-          });
-        } catch {
-          console.info("[assistant][completed] (raw)", raw?.slice(0, 800));
-        }
+          if (typeof d?.delta === "string" && d.delta.trim()) {
+            console.log("[assistant][SSE][delta]", d.delta.slice(0, 200)); // truncate for logs
+          }
+        } catch {}
+      } else if (event === "response.completed") {
+        console.log("[assistant][SSE] completed");
+      } else if (event === "error") {
+        console.warn("[assistant][SSE] error", raw);
       }
     }
   };
@@ -322,12 +258,11 @@ async function handleStreaming(res, userMessage) {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-
-      // Forward to client exactly as-is
-      try { res.write(decoder.decode(value, { stream: true })); } catch {}
-
-      // ALSO parse for server logs (does not affect client)
-      try { flushBlocksForLogs(decoder.decode(value, { stream: true })); } catch {}
+      const chunkStr = decoder.decode(value, { stream: true });
+      // 1) write through untouched (so the widget keeps working)
+      try { res.write(chunkStr); } catch {}
+      // 2) optionally mirror to logs
+      maybeLogChunk(chunkStr);
     }
   } catch {
     // client aborted / network glitch
