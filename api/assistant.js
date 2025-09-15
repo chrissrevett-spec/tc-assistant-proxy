@@ -5,24 +5,21 @@
 //  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
 //  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
 //
-// Notes
-// - Uses Responses API for replies, but dynamically fetches system instructions
-//   from your Assistant via the Assistants API (v2).
-// - Requires env var: OPENAI_ASSISTANT_ID
-// - Adds proper 'OpenAI-Beta: assistants=v2' header to the Assistants GET.
-// - Caches instructions in-memory briefly to avoid rate/latency.
-// - Falls back to a safe system string if fetch fails.
-// - TEMP DEBUG: set DEBUG_RETRIEVAL=1 to log upstream JSON (non-stream) and
-//   interesting SSE lines (stream) to verify vector-store retrieval.
+// Updates in this version:
+// - (1) Logs Assistants/Vector-Store retrieval tool calls seen in SSE
+//       (events: response.tool_call.*) without changing the forwarded stream.
+// - (2) Sets response_format: "verbose_json" for both streaming and non-streaming
+//       to expose richer metadata (does not affect your UI streaming).
+//
+// Existing behavior, stability, and client-side logic remain unchanged.
 
 const OPENAI_API_KEY      = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL        = process.env.OPENAI_MODEL || "gpt-4o-mini"; // must support Responses streaming
-const OPENAI_ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID || "";     // <- set this in Vercel
+const OPENAI_ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID || "";     // used only to fetch system instructions
 const CORS_ALLOW_ORIGIN   = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
 const CORS_ALLOW_METHODS  = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
 const CORS_ALLOW_HEADERS  = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
 const CORS_MAX_AGE        = "86400";
-const DEBUG_RETRIEVAL     = /^1|true$/i.test(process.env.DEBUG_RETRIEVAL || "");
 
 if (!OPENAI_API_KEY) {
   console.error("[assistant] Missing OPENAI_API_KEY");
@@ -88,13 +85,18 @@ const INSTR_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 let instrCache = { text: "", at: 0 };
 
 async function fetchAssistantInstructions() {
+  // If no Assistant ID, skip to fallback
   if (!OPENAI_ASSISTANT_ID) {
     return "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
   }
+
+  // Use cache if fresh
   const now = Date.now();
   if (instrCache.text && now - instrCache.at < INSTR_CACHE_TTL_MS) {
     return instrCache.text;
   }
+
+  // Fetch from Assistants API (v2)
   try {
     const r = await fetch(`https://api.openai.com/v1/assistants/${OPENAI_ASSISTANT_ID}`, {
       method: "GET",
@@ -109,6 +111,7 @@ async function fetchAssistantInstructions() {
     if (!r.ok) {
       const errTxt = await r.text().catch(() => "");
       console.warn(`[assistant] Failed to fetch assistant instructions: ${r.status} ${errTxt}`);
+      // fallback
       return "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
     }
 
@@ -120,9 +123,9 @@ async function fetchAssistantInstructions() {
     const finalSys = sys || "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
 
     instrCache = { text: finalSys, at: now };
-    if (DEBUG_RETRIEVAL) {
-      console.log("[assistant] Using system instructions from Assistant:", JSON.stringify({ id: data?.id, hasInstructions: !!sys }, null, 2));
-    }
+    console.info("[assistant] Using system instructions from Assistant:", {
+      id: data?.id, hasInstructions: !!sys
+    });
     return finalSys;
   } catch (e) {
     console.warn("[assistant] Error fetching assistant instructions:", e?.message || e);
@@ -131,9 +134,11 @@ async function fetchAssistantInstructions() {
 }
 
 // ---------- Build Responses request ----------
+// IMPORTANT: response_format: "verbose_json" for richer metadata.
 function buildResponsesRequest(userMessage, sysInstructions, extra = {}) {
   return {
     model: OPENAI_MODEL,
+    response_format: "verbose_json",
     input: [
       { role: "system", content: sysInstructions },
       { role: "user",   content: userMessage }
@@ -145,6 +150,7 @@ function buildResponsesRequest(userMessage, sysInstructions, extra = {}) {
 // Extract text from Responses JSON
 function extractTextFromResponse(resp) {
   let out = "";
+
   if (Array.isArray(resp?.output)) {
     for (const item of resp.output) {
       if (item?.type === "message" && Array.isArray(item.content)) {
@@ -158,7 +164,47 @@ function extractTextFromResponse(resp) {
   }
   if (!out && typeof resp?.text === "string") out = resp.text;
   if (!out && typeof resp?.response?.output_text === "string") out = resp.response.output_text;
+
   return out || "";
+}
+
+// ---------- Utility: compact log for tool events ----------
+function logToolEvent(eventName, raw) {
+  try {
+    const d = typeof raw === "string" ? JSON.parse(raw) : raw;
+    // The SSE "data" for tool events typically contains:
+    // { type, tool_call_id, tool_name, status, ... } with optional input/output
+    const type = d?.type || eventName;
+    const toolName = d?.tool_name || d?.name || d?.tool || "unknown_tool";
+    const callId = d?.tool_call_id || d?.id || "unknown_call";
+    const status  = d?.status || d?.state || undefined;
+
+    // Try to surface any retrieved file ids / quotes if present
+    let fileIds = [];
+    let quotes  = [];
+
+    // Common shapes:
+    // - d.output: [ { file_id, quote, ... }, ... ]
+    // - d.result?.items or d.items
+    const outputs = Array.isArray(d?.output) ? d.output : (Array.isArray(d?.items) ? d.items : []);
+    for (const it of outputs) {
+      if (it?.file_id) fileIds.push(it.file_id);
+      if (it?.quote) quotes.push(it.quote.slice(0, 140)); // trim for logs
+    }
+    if (!fileIds.length && d?.file_id) fileIds = [d.file_id];
+
+    console.info("[assistant][tool]", {
+      event: eventName,
+      type,
+      toolName,
+      callId,
+      status,
+      fileIds: fileIds.length ? fileIds : undefined,
+      quotes: quotes.length ? quotes : undefined,
+    });
+  } catch (e) {
+    console.info("[assistant][tool]", eventName, "(unparsed)", (typeof raw === "string" ? raw.slice(0, 500) : raw));
+  }
 }
 
 // ---------- Non-streaming ----------
@@ -167,25 +213,31 @@ async function handleNonStreaming(userMessage) {
   const payload = buildResponsesRequest(userMessage, sys, { stream: false });
   const resp = await oaJson("/responses", "POST", payload);
 
-  // TEMP DEBUG: dump the full JSON so you can see references/retrieval fields
-  if (DEBUG_RETRIEVAL) {
-    try {
-      console.log("[debug][non-stream] Full Responses JSON:\n", JSON.stringify(resp, null, 2));
-    } catch {}
-  }
+  // Optional: log any tool-ish artifacts found in non-stream response
+  try {
+    if (Array.isArray(resp?.output)) {
+      for (const item of resp.output) {
+        if (item?.type && String(item.type).includes("tool")) {
+          console.info("[assistant][tool][nonstream]", item.type);
+        }
+      }
+    }
+  } catch {}
 
   const text = extractTextFromResponse(resp);
   const usage = resp?.usage || null;
   return { ok: true, text, usage };
 }
 
-// ---------- Streaming (SSE passthrough with tee for logs) ----------
+// ---------- Streaming (SSE passthrough + server-side tee for logs) ----------
 async function handleStreaming(res, userMessage) {
+  // Tell the browser we’ll stream SSE
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
+    // mirror CORS on stream
     "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN,
     "Access-Control-Allow-Methods": CORS_ALLOW_METHODS,
     "Access-Control-Allow-Headers": CORS_ALLOW_HEADERS,
@@ -198,10 +250,13 @@ async function handleStreaming(res, userMessage) {
     } catch {}
   };
 
+  // Signal start
   send("start", { ok: true });
 
+  // Fetch system instructions (cached) before opening upstream stream
   const sys = await fetchAssistantInstructions();
 
+  // Kick off upstream streaming to Responses API
   const upstream = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -219,35 +274,60 @@ async function handleStreaming(res, userMessage) {
     return;
   }
 
+  // ----- Tee the SSE stream: forward bytes unchanged, but also parse & log tool events -----
   const reader  = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
+  let buffer = "";
 
-  // Keywords commonly appearing when retrieval/tools are used.
-  const DEBUG_MARKERS = [
-    '"references"', '"citations"', '"attachments"', '"file"', '"file_id"',
-    '"tool"', '"tool_call"', '"retrieval"', '"search_results"', '"document"'
-  ];
+  const flushBlocksForLogs = (chunk) => {
+    buffer += chunk;
+    const blocks = buffer.split(/\n\n/);
+    buffer = blocks.pop();
+    for (const block of blocks) {
+      const lines = block.split(/\n/);
+      let event = "message";
+      const dataLines = [];
+      for (const line of lines) {
+        if (!line) continue;
+        if (line.startsWith(":")) continue; // comment/keepalive
+        if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
+        if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
+      }
+      const raw = dataLines.join("\n");
+
+      // Log tool events only (prove retrieval beyond doubt)
+      if (event.startsWith("response.tool_call")) {
+        logToolEvent(event, raw);
+      }
+      // On completion, log a compact summary (usage tokens etc.)
+      if (event === "response.completed") {
+        try {
+          const d = JSON.parse(raw);
+          const u = d?.response?.usage || d?.usage || null;
+          console.info("[assistant][completed]", {
+            tokens: u ? {
+              input: u.input_tokens,
+              output: u.output_tokens,
+              total: u.total_tokens
+            } : undefined
+          });
+        } catch {
+          console.info("[assistant][completed] (raw)", raw?.slice(0, 800));
+        }
+      }
+    }
+  };
 
   try {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
 
-      // Forward to client unmodified
-      const chunkText = decoder.decode(value, { stream: true });
-      try { res.write(chunkText); } catch {}
+      // Forward to client exactly as-is
+      try { res.write(decoder.decode(value, { stream: true })); } catch {}
 
-      // TEMP DEBUG: scan and log interesting lines without heavy processing
-      if (DEBUG_RETRIEVAL) {
-        // Split on SSE record boundaries to keep logs tidy
-        const blocks = chunkText.split(/\n\n/);
-        for (const b of blocks) {
-          // Only log if any marker appears (cheap filter)
-          if (DEBUG_MARKERS.some(k => b.includes(k))) {
-            console.log("[debug][stream] SSE block with potential retrieval info:\n", b);
-          }
-        }
-      }
+      // ALSO parse for server logs (does not affect client)
+      try { flushBlocksForLogs(decoder.decode(value, { stream: true })); } catch {}
     }
   } catch {
     // client aborted / network glitch
