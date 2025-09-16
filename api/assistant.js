@@ -8,27 +8,31 @@
 // Notes
 // - Uses Responses API for replies, but dynamically fetches system instructions
 //   from your Assistant via the Assistants API (v2).
-// - Requires env var: OPENAI_ASSISTANT_ID
+// - Requires env vars: OPENAI_API_KEY, OPENAI_ASSISTANT_ID, OPENAI_VECTOR_STORE_ID
 // - Adds proper 'OpenAI-Beta: assistants=v2' header to the Assistants GET.
-// - Caches instructions in-memory briefly to avoid rate/latency.
+// - Caches instructions briefly to avoid rate/latency.
 // - No unsupported params (no response_format, no assistant_id in /responses).
-// - Optional DEBUG_SSE_LOG=1 env var to log SSE events on the server without
+// - Optional DEBUG_SSE_LOG=1 env var logs SSE events server-side without
 //   altering the client stream.
 
-const OPENAI_API_KEY      = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL        = process.env.OPENAI_MODEL || "gpt-4o-mini"; // must support Responses streaming
-const OPENAI_ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID || "";
-const CORS_ALLOW_ORIGIN   = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
-const CORS_ALLOW_METHODS  = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
-const CORS_ALLOW_HEADERS  = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
-const CORS_MAX_AGE        = "86400";
-const DEBUG_SSE_LOG       = process.env.DEBUG_SSE_LOG === "1";
+const OPENAI_API_KEY        = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL          = process.env.OPENAI_MODEL || "gpt-4o-mini"; // must support Responses streaming
+const OPENAI_ASSISTANT_ID   = process.env.OPENAI_ASSISTANT_ID || "";
+const OPENAI_VECTOR_STORE_ID= process.env.OPENAI_VECTOR_STORE_ID || "";
+const CORS_ALLOW_ORIGIN     = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
+const CORS_ALLOW_METHODS    = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
+const CORS_ALLOW_HEADERS    = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
+const CORS_MAX_AGE          = "86400";
+const DEBUG_SSE_LOG         = process.env.DEBUG_SSE_LOG === "1";
 
 if (!OPENAI_API_KEY) {
   console.error("[assistant] Missing OPENAI_API_KEY");
 }
 if (!OPENAI_ASSISTANT_ID) {
   console.warn("[assistant] OPENAI_ASSISTANT_ID not set — will use fallback system instructions.");
+}
+if (!OPENAI_VECTOR_STORE_ID) {
+  console.warn("[assistant] OPENAI_VECTOR_STORE_ID not set — file_search will be disabled and retrieval won't run.");
 }
 
 // ---------- CORS ----------
@@ -47,7 +51,6 @@ function endPreflight(res) {
 // ---------- Body parsing ----------
 async function readBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
-
   return await new Promise((resolve, reject) => {
     let data = "";
     req.setEncoding("utf8");
@@ -134,6 +137,20 @@ async function fetchAssistantInstructions() {
 }
 
 // ---------- Build Responses request ----------
+function getRetrievalTooling() {
+  if (!OPENAI_VECTOR_STORE_ID) return {};
+  return {
+    tools: [{ type: "file_search" }],
+    tool_resources: {
+      file_search: {
+        vector_store_ids: [OPENAI_VECTOR_STORE_ID],
+        // Optional: add filters here if you tag files with metadata
+        // filters: { document_type: ["CQC","DHSC","NICE"] }
+      }
+    }
+  };
+}
+
 function buildResponsesRequest(userMessage, sysInstructions, extra = {}) {
   return {
     model: OPENAI_MODEL,
@@ -141,7 +158,9 @@ function buildResponsesRequest(userMessage, sysInstructions, extra = {}) {
       { role: "system", content: sysInstructions },
       { role: "user",   content: userMessage }
     ],
-    // (Optional) keep explicit text format to avoid future API drift
+    // Enable hosted retrieval when a vector store id is configured
+    ...getRetrievalTooling(),
+    // Keep explicit text format to avoid API drift
     text: { format: { type: "text" }, verbosity: "medium" },
     ...extra,
   };
@@ -212,8 +231,9 @@ async function handleStreaming(res, userMessage) {
   });
 
   if (!upstream.ok || !upstream.body) {
-    const errTxt = await upstream.text().catch(() => "");
-    send("error", { ok:false, step:"responses_stream", error: errTxt || upstream.status });
+    let errTxt = "";
+    try { errTxt = await upstream.text(); } catch {}
+    send("error", { ok:false, step:"responses_stream", status: upstream.status, error: errTxt || "no-body" });
     try { res.end(); } catch {}
     return;
   }
@@ -221,7 +241,7 @@ async function handleStreaming(res, userMessage) {
   const reader  = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
 
-  // Optional: light parser to mirror key SSE events into server logs without changing client stream
+  // Optional: mirror key SSE events into server logs without changing client stream
   let buffer = "";
   const maybeLogChunk = (chunkStr) => {
     if (!DEBUG_SSE_LOG) return;
@@ -238,12 +258,11 @@ async function handleStreaming(res, userMessage) {
         if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
       }
       const raw = dataLines.join("\n");
-      // Only log compact, useful stuff (delta, completed, errors)
       if (event === "response.output_text.delta") {
         try {
           const d = JSON.parse(raw);
           if (typeof d?.delta === "string" && d.delta.trim()) {
-            console.log("[assistant][SSE][delta]", d.delta.slice(0, 200)); // truncate for logs
+            console.log("[assistant][SSE][delta]", d.delta.slice(0, 200));
           }
         } catch {}
       } else if (event === "response.completed") {
