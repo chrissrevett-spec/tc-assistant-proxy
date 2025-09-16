@@ -5,152 +5,62 @@
   <title>Talking Care Navigator</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root { color-scheme: light dark; }
+    :root { color-scheme: light dark; scrollbar-color: #ccc #FAFAFA; scrollbar-width: thin; }
+    html::-webkit-scrollbar, body::-webkit-scrollbar { width: 10px; }
+    html::-webkit-scrollbar-track, body::-webkit-scrollbar-track { background: #FAFAFA; }
+    html::-webkit-scrollbar-thumb, body::-webkit-scrollbar-thumb { background: #ccc; border-radius: 8px; }
+    html:hover::-webkit-scrollbar-thumb, body:hover::-webkit-scrollbar-thumb { background: #b3b3b3; }
 
-    /* NEW: Global (page) scrollbar theme */
-    :root {
-      /* Firefox (thumb, track) */
-      scrollbar-color: #ccc #FAFAFA;
-      scrollbar-width: thin;
-    }
-    /* WebKit global scrollbars (Chromium/Safari/Edge) */
-    html::-webkit-scrollbar,
-    body::-webkit-scrollbar {
-      width: 10px;
-    }
-    html::-webkit-scrollbar-track,
-    body::-webkit-scrollbar-track {
-      background: #FAFAFA;
-    }
-    html::-webkit-scrollbar-thumb,
-    body::-webkit-scrollbar-thumb {
-      background: #ccc;
-      border-radius: 8px;
-    }
-    html:hover::-webkit-scrollbar-thumb,
-    body:hover::-webkit-scrollbar-thumb {
-      background: #b3b3b3;
-    }
-
-    /* Make the canvas full-viewport */
     html, body { height: 100%; }
-    body {
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      margin: 0;
-      padding: 0;                 /* was 16px — remove so it truly fills */
-      background: #fff;
-    }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 0; background: #fff; }
 
-    /* Shell now spans the page and fills the viewport height */
     .shell {
-      width: 100%;
-      max-width: none;            /* remove fixed max width */
-      min-height: 100dvh;         /* fill device viewport height */
-      margin: 0;                  /* no horizontal centering gap */
-      border-radius: 16px;
-      background: #fff;
-      box-shadow:
-        0 0 0 1px rgba(0,0,0,.06),
-        0 12px 24px rgba(0,0,0,.06),
-        0 0 0 20px #F5F5F5;       /* soft outer fade */
-      box-sizing: border-box;
-      display: flex;              /* allow inner to stretch full height */
-      flex-direction: column;
+      width: 100%; max-width: none; min-height: 100dvh; margin: 0;
+      border-radius: 16px; background: #fff;
+      box-shadow: 0 0 0 1px rgba(0,0,0,.06), 0 12px 24px rgba(0,0,0,.06), 0 0 0 20px #F5F5F5;
+      box-sizing: border-box; display: flex; flex-direction: column;
     }
+    .wrap { border-radius: 16px; padding: 16px; background: #fff; flex: 1; display: flex; flex-direction: column; }
 
-    .wrap {
-      border-radius: 16px;
-      padding: 16px;              /* keep internal padding */
-      background: #fff;
-      flex: 1;                    /* fill remaining height */
-      display: flex;
-      flex-direction: column;
-    }
-
-    /* Header + subtext */
     h1 { margin: 0 0 4px; font-size: 22px; color: #000; }
     .sub { margin: 0 0 12px; font-size: 14px; color: #000; }
-
     #status { font-size: 12px; opacity: .8; margin-bottom: 8px; }
 
-    /* Layout row: let it wrap nicely on narrow screens */
-    .row {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 8px;
-      flex-wrap: wrap;
-    }
-    .row > textarea { flex: 1 1 420px; }  /* grows, but wraps on small widths */
-    .row > .btns   { display:flex; flex-direction:column; gap:8px; }
+    .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+    .row > textarea { flex: 1 1 420px; }
+    .row > .btns { display:flex; flex-direction:column; gap:8px; }
 
-    /* Input area */
     textarea {
-      min-height: 112px;
-      padding: 10px;
-      font: inherit;
-      background: #FAFAFA;
-      color: #000;
-      border: 1px solid #ddd;
-      border-radius: 8px;
-      transition: background .2s ease, border-color .2s ease, box-shadow .2s ease;
-      scrollbar-width: thin;                  /* Firefox */
-      scrollbar-color: #ccc #FAFAFA;         /* Firefox (thumb, track) */
-      box-sizing: border-box;
+      min-height: 112px; padding: 10px; font: inherit; background: #FAFAFA; color: #000;
+      border: 1px solid #ddd; border-radius: 8px; transition: background .2s, border-color .2s, box-shadow .2s;
+      scrollbar-width: thin; scrollbar-color: #ccc #FAFAFA; box-sizing: border-box;
     }
     textarea::placeholder { color: #777; }
     textarea:hover { background: #f7f7f7; border-color: #ccc; }
-    textarea:focus {
-      background: #f7f7f7; border-color: #ccc; outline: none;
-      box-shadow: 0 0 0 2px rgba(0,0,0,0.04);
-    }
+    textarea:focus { background: #f7f7f7; border-color: #ccc; outline: none; box-shadow: 0 0 0 2px rgba(0,0,0,0.04); }
 
-    /* Neutral buttons */
     button {
-      padding: 10px 14px; cursor: pointer;
-      border-radius: 8px; border: 1px solid #ddd;
-      background: #FAFAFA; color: #333;
-      transition: background .2s ease, color .2s ease, border-color .2s ease, box-shadow .2s ease;
+      padding: 10px 14px; cursor: pointer; border-radius: 8px; border: 1px solid #ddd;
+      background: #FAFAFA; color: #333; transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
     }
     button:hover { background: #f0f0f0; border-color: #ccc; }
-    button:active {
-      background: #e9e9e9; border-color: #c9c9c9;
-      box-shadow: inset 0 1px 2px rgba(0,0,0,0.06);
-    }
+    button:active { background: #e9e9e9; border-color: #c9c9c9; box-shadow: inset 0 1px 2px rgba(0,0,0,0.06); }
     button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
 
-    /* Output panel fills available space below inputs if content grows */
     #out {
-      position: relative;
-      white-space: pre-wrap;
-      border: 1px solid #FAFAFA;
-      border-radius: 8px;
-      padding: 12px;
-      min-height: 160px;
-      background: #FAFAFA;
-      color: #000;
-      overflow-y: auto;
-      transition: background .2s ease, border-color .2s ease, box-shadow .2s ease;
-      scrollbar-width: thin;                  /* Firefox */
-      scrollbar-color: #ccc #FAFAFA;         /* Firefox (thumb, track) */
-      box-sizing: border-box;
-      flex: 1 1 auto;
+      position: relative; white-space: pre-wrap; border: 1px solid #FAFAFA; border-radius: 8px;
+      padding: 12px; min-height: 160px; background: #FAFAFA; color: #000; overflow-y: auto;
+      transition: background .2s, border-color .2s, box-shadow .2s; scrollbar-width: thin; scrollbar-color: #ccc #FAFAFA;
+      box-sizing: border-box; flex: 1 1 auto;
     }
     #out:hover { background: #f7f7f7; border-color: #ccc; }
     #out:empty::before { content: "I'll respond to your question here"; color: #777; }
 
-    /* WebKit scrollbars for the inner scrollable elements */
     #out::-webkit-scrollbar, textarea::-webkit-scrollbar { width: 10px; }
-    #out::-webkit-scrollbar-track, textarea::-webkit-scrollbar-track {
-      background: #FAFAFA; border-radius: 8px;
-    }
-    #out::-webkit-scrollbar-thumb, textarea::-webkit-scrollbar-thumb {
-      background: #ccc; border-radius: 8px;
-    }
-    #out:hover::-webkit-scrollbar-thumb, textarea:hover::-webkit-scrollbar-thumb {
-      background: #b3b3b3;
-    }
+    #out::-webkit-scrollbar-track, textarea::-webkit-scrollbar-track { background: #FAFAFA; border-radius: 8px; }
+    #out::-webkit-scrollbar-thumb, textarea::-webkit-scrollbar-thumb { background: #ccc; border-radius: 8px; }
+    #out:hover::-webkit-scrollbar-thumb, textarea:hover::-webkit-scrollbar-thumb { background: #b3b3b3; }
 
-    /* Hidden debug log remains */
     #log { display: none; }
   </style>
 </head>
@@ -159,7 +69,7 @@
     <div class="wrap">
       <h1>Talking Care Navigator</h1>
       <p class="sub">
-        Ask me anything about adult social care in England, including CQC Registrations, Regulations and Guidance, Mental Capacity Act and DoLS queries, best practice advice, case management and more.
+        Ask anything about adult social care in England. I search the official document library first and show sources, then broaden to the web only if needed.
       </p>
 
       <div id="status"></div>
@@ -178,7 +88,6 @@
   </div>
 
   <script>
-  /* JS logic unchanged */
   document.addEventListener("DOMContentLoaded", () => {
     const API_BASE = location.origin.replace(/\/$/, "");
     const $in   = document.getElementById("tc-input");
@@ -201,14 +110,17 @@
       return p || null;
     }
 
-    /* Abort support for streaming so Clear chat can cancel mid-stream */
+    // Abort support for streaming so Clear chat can cancel mid-stream
     let currentAbort = null;
 
     async function askStream(prompt) {
-      setStatus("Typing…");
-
+      setStatus("Searching library…");
       const ac = new AbortController();
       currentAbort = ac;
+
+      // Reset output and citations
+      clearOut();
+      citations.length = 0;
 
       const r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
         method: "POST",
@@ -222,49 +134,7 @@
 
       const reader  = r.body.getReader();
       const decoder = new TextDecoder("utf-8");
-      let buffer = "";
-
-      const flushBlocks = (chunk) => {
-        buffer += chunk;
-        const blocks = buffer.split(/\n\n/);
-        buffer = blocks.pop();
-        for (const block of blocks) {
-          const lines = block.split(/\n/);
-          let event = "message";
-          const dataLines = [];
-          for (const line of lines) {
-            if (!line) continue;
-            if (line.startsWith(":")) continue;
-            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
-            if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
-          }
-          const raw = dataLines.join("\n");
-          handleEvent(event, raw);
-        }
-      };
-
-      function handleEvent(event, raw) {
-        if (event === "start") { log("SSE start", raw); return; }
-        if (event === "error") { setStatus(""); log("SSE error", raw); append(`⚠️ ${raw}`); nl(); return; }
-        if (event === "done" || event === "response.completed") { setStatus(""); log("SSE", event, raw); return; }
-
-        if (/^response\./.test(event)) { log("SSE", event, raw); }
-
-        if (event === "response.output_text.delta") {
-          try {
-            const d = JSON.parse(raw);
-            if (typeof d?.delta === "string") append(d.delta);
-          } catch {}
-          return;
-        }
-
-        if (event === "response.output_text.done" || event === "response.content_part.added" ||
-            event === "response.content_part.done" || event === "response.output_item.added" ||
-            event === "response.output_item.done" || event === "response.in_progress" ||
-            event === "response.created") {
-          return;
-        }
-      }
+      buffer = "";
 
       try {
         while (true) {
@@ -273,33 +143,115 @@
           flushBlocks(decoder.decode(value, { stream: true }));
         }
       } catch {
+        // aborted / network
       } finally {
         currentAbort = null;
         setStatus("");
       }
     }
 
+    // SSE parsing
+    let buffer = "";
+    const citations = []; // { kind: "file"|"web", label: string, id?: string, url?: string }
+
+    function flushBlocks(chunk) {
+      buffer += chunk;
+      const blocks = buffer.split(/\n\n/);
+      buffer = blocks.pop();
+      for (const block of blocks) {
+        const lines = block.split(/\n/);
+        let event = "message";
+        const dataLines = [];
+        for (const line of lines) {
+          if (!line) continue;
+          if (line.startsWith(":")) continue;
+          if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
+          if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
+        }
+        const raw = dataLines.join("\n");
+        handleEvent(event, raw);
+      }
+    }
+
+    function handleEvent(event, raw) {
+      if (event === "start") { log("SSE start", raw); return; }
+      if (event === "error") { setStatus(""); log("SSE error", raw); append(`⚠️ ${raw}`); nl(); return; }
+      if (event === "done") { log("SSE done", raw); return; }
+
+      // Text deltas
+      if (event === "response.output_text.delta") {
+        try {
+          const d = JSON.parse(raw);
+          if (typeof d?.delta === "string") {
+            append(d.delta);
+            setStatus("Typing…");
+          }
+        } catch {}
+        return;
+      }
+
+      // Collect citations (file or web). Different accounts may emit slightly different annotation shapes.
+      if (event === "response.output_text.annotation.added") {
+        try {
+          const d = JSON.parse(raw);
+          const a = d?.annotation || d?.data || d; // be liberal
+          if (a?.type === "file_citation" && a.file_id) {
+            citations.push({ kind: "file", id: a.file_id, label: a.filename || a.file_id });
+          } else if ((a?.type === "web_citation" || a?.type === "url_citation" || a?.url) && a.url) {
+            citations.push({ kind: "web", url: a.url, label: a.title || a.url });
+          }
+        } catch {}
+        return;
+      }
+
+      if (event === "response.completed") {
+        setStatus("");
+        // De-dup keeping first occurrence order
+        const seenFile = new Set();
+        const seenURL  = new Set();
+        const files = [];
+        const urls  = [];
+        for (const c of citations) {
+          if (c.kind === "file") {
+            if (seenFile.has(c.id)) continue;
+            seenFile.add(c.id); files.push(c);
+          } else if (c.kind === "web") {
+            if (seenURL.has(c.url)) continue;
+            seenURL.add(c.url); urls.push(c);
+          }
+        }
+        if (files.length || urls.length) {
+          append("\n\nSources:\n");
+          files.forEach(c => append(`• ${c.label}\n`));
+          urls.forEach(c => append(`• ${c.label}\n`));
+        }
+        return;
+      }
+
+      if (event.startsWith("response.")) { log("SSE", event, raw); return; }
+    }
+
     // Submit
-    document.getElementById("tc-ask-stream").addEventListener("click", async () => {
+    $btnS.addEventListener("click", async () => {
       const p = getPrompt(); if (!p) return;
-      clearOut();
       await askStream(p);
     });
 
     // Enter to submit (Shift+Enter newline)
-    document.getElementById("tc-input").addEventListener("keydown", (e) => {
+    $in.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        document.getElementById("tc-ask-stream").click();
+        $btnS.click();
       }
     });
 
-    // Clear chat (also cancels in-flight stream and clears input)
-    document.getElementById("tc-clear").addEventListener("click", () => {
+    // Clear
+    $btnC.addEventListener("click", () => {
       if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
       clearOut();
-      document.getElementById("tc-input").value = "";
+      $in.value = "";
       setStatus("");
+      citations.length = 0;
     });
   });
   </script>
