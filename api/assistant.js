@@ -4,11 +4,11 @@
 //  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
 //  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
 //
-// What this version adds
-// 1) Hosted retrieval ON by default (File Search) using your Vector Store
-// 2) Optional Web Search fallback if OPENAI_ENABLE_WEB_SEARCH=1
-// 3) A strict grounding policy that tells the model to search the store first
-// 4) Clean SSE passthrough plus useful error surfacing
+// What this version does
+// 1) Forces hosted retrieval first via file_search against your Vector Store
+// 2) Optional web search available only if OPENAI_ENABLE_WEB_SEARCH=1
+// 3) Strict grounding policy that disallows general-knowledge answers
+// 4) Clean SSE passthrough with clear error surfacing
 //
 // Required env vars
 //  - OPENAI_API_KEY
@@ -16,9 +16,9 @@
 //  - OPENAI_VECTOR_STORE_ID
 // Optional env vars
 //  - OPENAI_MODEL                (default: gpt-4o-mini)
-//  - OPENAI_ENABLE_WEB_SEARCH    ("1" to enable Responses web_search tool)
-//  - CORS_ALLOW_ORIGIN           (your site origin)
-//  - DEBUG_SSE_LOG               ("1" to mirror key SSE deltas to server logs)
+//  - OPENAI_ENABLE_WEB_SEARCH    ("1" to allow web_search as fallback)
+//  - CORS_ALLOW_ORIGIN
+//  - DEBUG_SSE_LOG               ("1" to mirror deltas to server logs)
 
 const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -33,7 +33,7 @@ const CORS_MAX_AGE            = "86400";
 const DEBUG_SSE_LOG           = process.env.DEBUG_SSE_LOG === "1";
 
 if (!OPENAI_API_KEY) console.error("[assistant] Missing OPENAI_API_KEY");
-if (!OPENAI_ASSISTANT_ID) console.warn("[assistant] OPENAI_ASSISTANT_ID not set — will use fallback system instructions.");
+if (!OPENAI_ASSISTANT_ID) console.warn("[assistant] OPENAI_ASSISTANT_ID not set — using fallback system instructions.");
 if (!OPENAI_VECTOR_STORE_ID) console.warn("[assistant] OPENAI_VECTOR_STORE_ID not set — retrieval will be disabled.");
 
 // ---------- CORS ----------
@@ -126,10 +126,11 @@ async function fetchAssistantInstructions() {
 function withGroundingPolicy(sys) {
   const policy = `
 CRITICAL GROUNDING POLICY:
-Always search the attached document library first using the file_search tool. Use retrieved passages to ground your answer and include short verbatim quotes and paragraph or section numbers when available.
-If the library does not contain sufficient material, you may broaden the search using web_search (if available), but clearly label any web sources.
-If no relevant sources are found, say "No matching sources found in the library" and ask for a more specific question. Do not answer from general knowledge without sources.
-End every answer with a "Sources" list containing the PDF filenames used and any URLs if web_search was required.
+You must search the attached document library first using the file_search tool and base your answer on those documents.
+Do not include inline URLs or footnotes inside the body of the answer. Only list sources at the end under a "Sources" heading.
+If the library contains no relevant passages, reply: "No matching sources found in the library." If web_search is available you may then use it, but clearly separate those web sources in the Sources list.
+Prefer short verbatim quotes for key definitions and include paragraph or section numbers where available.
+Never answer purely from general knowledge without sources.
 `.trim();
   return `${sys}\n\n${policy}`;
 }
@@ -145,7 +146,6 @@ function getToolsAndResources() {
   }
   if (ENABLE_WEB_SEARCH) {
     tools.push({ type: "web_search" });
-    // no extra config required for web_search
   }
   return { tools, tool_resources: Object.keys(tool_resources).length ? tool_resources : undefined };
 }
@@ -161,6 +161,8 @@ function buildResponsesRequest(userMessage, sysInstructions, extra = {}) {
       { role: "system", content: groundedSys },
       { role: "user",   content: userMessage }
     ],
+    // Force the model to begin with file_search. It may use web_search only if enabled and nothing suitable is found.
+    ...(tools.some(t => t.type === "file_search") ? { tool_choice: { type: "tool", name: "file_search" } } : {}),
     ...(tools.length ? { tools } : {}),
     ...(tool_resources ? { tool_resources } : {}),
     text: { format: { type: "text" }, verbosity: "medium" },
@@ -279,7 +281,7 @@ async function handleStreaming(res, userMessage) {
       maybeLogChunk(chunkStr);
     }
   } catch {
-    // client aborted / network glitch
+    // client aborted or network issue
   } finally {
     send("done", "[DONE]");
     try { res.end(); } catch {}
