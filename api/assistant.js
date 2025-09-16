@@ -1,39 +1,40 @@
 // /api/assistant.js
 //
-// One endpoint, two modes using OpenAI "Responses" API:
-//
+// Two modes via OpenAI "Responses" API:
 //  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
 //  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
 //
-// Notes
-// - Uses Responses API for replies, but dynamically fetches system instructions
-//   from your Assistant via the Assistants API (v2).
-// - Requires env vars: OPENAI_API_KEY, OPENAI_ASSISTANT_ID, OPENAI_VECTOR_STORE_ID
-// - Adds proper 'OpenAI-Beta: assistants=v2' header to the Assistants GET.
-// - Caches instructions briefly to avoid rate/latency.
-// - No unsupported params (no response_format, no assistant_id in /responses).
-// - Optional DEBUG_SSE_LOG=1 env var logs SSE events server-side without
-//   altering the client stream.
+// What this version adds
+// 1) Hosted retrieval ON by default (File Search) using your Vector Store
+// 2) Optional Web Search fallback if OPENAI_ENABLE_WEB_SEARCH=1
+// 3) A strict grounding policy that tells the model to search the store first
+// 4) Clean SSE passthrough plus useful error surfacing
+//
+// Required env vars
+//  - OPENAI_API_KEY
+//  - OPENAI_ASSISTANT_ID
+//  - OPENAI_VECTOR_STORE_ID
+// Optional env vars
+//  - OPENAI_MODEL                (default: gpt-4o-mini)
+//  - OPENAI_ENABLE_WEB_SEARCH    ("1" to enable Responses web_search tool)
+//  - CORS_ALLOW_ORIGIN           (your site origin)
+//  - DEBUG_SSE_LOG               ("1" to mirror key SSE deltas to server logs)
 
-const OPENAI_API_KEY        = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL          = process.env.OPENAI_MODEL || "gpt-4o-mini"; // must support Responses streaming
-const OPENAI_ASSISTANT_ID   = process.env.OPENAI_ASSISTANT_ID || "";
-const OPENAI_VECTOR_STORE_ID= process.env.OPENAI_VECTOR_STORE_ID || "";
-const CORS_ALLOW_ORIGIN     = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
-const CORS_ALLOW_METHODS    = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
-const CORS_ALLOW_HEADERS    = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
-const CORS_MAX_AGE          = "86400";
-const DEBUG_SSE_LOG         = process.env.DEBUG_SSE_LOG === "1";
+const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_ASSISTANT_ID     = process.env.OPENAI_ASSISTANT_ID || "";
+const OPENAI_VECTOR_STORE_ID  = process.env.OPENAI_VECTOR_STORE_ID || "";
+const ENABLE_WEB_SEARCH       = process.env.OPENAI_ENABLE_WEB_SEARCH === "1";
 
-if (!OPENAI_API_KEY) {
-  console.error("[assistant] Missing OPENAI_API_KEY");
-}
-if (!OPENAI_ASSISTANT_ID) {
-  console.warn("[assistant] OPENAI_ASSISTANT_ID not set — will use fallback system instructions.");
-}
-if (!OPENAI_VECTOR_STORE_ID) {
-  console.warn("[assistant] OPENAI_VECTOR_STORE_ID not set — file_search will be disabled and retrieval won't run.");
-}
+const CORS_ALLOW_ORIGIN       = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
+const CORS_ALLOW_METHODS      = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
+const CORS_ALLOW_HEADERS      = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
+const CORS_MAX_AGE            = "86400";
+const DEBUG_SSE_LOG           = process.env.DEBUG_SSE_LOG === "1";
+
+if (!OPENAI_API_KEY) console.error("[assistant] Missing OPENAI_API_KEY");
+if (!OPENAI_ASSISTANT_ID) console.warn("[assistant] OPENAI_ASSISTANT_ID not set — will use fallback system instructions.");
+if (!OPENAI_VECTOR_STORE_ID) console.warn("[assistant] OPENAI_VECTOR_STORE_ID not set — retrieval will be disabled.");
 
 // ---------- CORS ----------
 function setCors(res) {
@@ -43,10 +44,7 @@ function setCors(res) {
   res.setHeader("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS);
   res.setHeader("Access-Control-Max-Age", CORS_MAX_AGE);
 }
-function endPreflight(res) {
-  res.statusCode = 204;
-  res.end();
-}
+function endPreflight(res) { res.statusCode = 204; res.end(); }
 
 // ---------- Body parsing ----------
 async function readBody(req) {
@@ -86,19 +84,16 @@ async function oaJson(path, method, body, headers = {}) {
   return r.json();
 }
 
-// ---------- Assistants API: fetch system instructions (with small cache) ----------
-const INSTR_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+// ---------- Assistant instructions (small cache) ----------
+const INSTR_CACHE_TTL_MS = 5 * 60 * 1000;
 let instrCache = { text: "", at: 0 };
 
 async function fetchAssistantInstructions() {
   if (!OPENAI_ASSISTANT_ID) {
     return "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
   }
-
   const now = Date.now();
-  if (instrCache.text && now - instrCache.at < INSTR_CACHE_TTL_MS) {
-    return instrCache.text;
-  }
+  if (instrCache.text && now - instrCache.at < INSTR_CACHE_TTL_MS) return instrCache.text;
 
   try {
     const r = await fetch(`https://api.openai.com/v1/assistants/${OPENAI_ASSISTANT_ID}`, {
@@ -110,25 +105,16 @@ async function fetchAssistantInstructions() {
         "Accept": "application/json",
       },
     });
-
     if (!r.ok) {
       const errTxt = await r.text().catch(() => "");
-      console.warn(`[assistant] Failed to fetch assistant instructions: ${r.status} ${errTxt}`);
+      console.warn(`[assistant] Failed to fetch assistant: ${r.status} ${errTxt}`);
       return "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
     }
-
     const data = await r.json();
-    const sys = (data && typeof data.instructions === "string" && data.instructions.trim())
-      ? data.instructions.trim()
-      : "";
-
+    const sys = (data && typeof data.instructions === "string" && data.instructions.trim()) ? data.instructions.trim() : "";
     const finalSys = sys || "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
-
     instrCache = { text: finalSys, at: now };
-    console.info("[assistant] Using system instructions from Assistant:", {
-      id: OPENAI_ASSISTANT_ID,
-      hasInstructions: !!sys,
-    });
+    console.info("[assistant] Using system instructions from Assistant:", { id: OPENAI_ASSISTANT_ID, hasInstructions: !!sys });
     return finalSys;
   } catch (e) {
     console.warn("[assistant] Error fetching assistant instructions:", e?.message || e);
@@ -136,54 +122,66 @@ async function fetchAssistantInstructions() {
   }
 }
 
-// ---------- Build Responses request ----------
-function getRetrievalTooling() {
-  if (!OPENAI_VECTOR_STORE_ID) return {};
-  return {
-    tools: [{ type: "file_search" }],
-    tool_resources: {
-      file_search: {
-        vector_store_ids: [OPENAI_VECTOR_STORE_ID],
-        // Optional: add filters here if you tag files with metadata
-        // filters: { document_type: ["CQC","DHSC","NICE"] }
-      }
-    }
-  };
+// ---------- Grounding policy ----------
+function withGroundingPolicy(sys) {
+  const policy = `
+CRITICAL GROUNDING POLICY:
+Always search the attached document library first using the file_search tool. Use retrieved passages to ground your answer and include short verbatim quotes and paragraph or section numbers when available.
+If the library does not contain sufficient material, you may broaden the search using web_search (if available), but clearly label any web sources.
+If no relevant sources are found, say "No matching sources found in the library" and ask for a more specific question. Do not answer from general knowledge without sources.
+End every answer with a "Sources" list containing the PDF filenames used and any URLs if web_search was required.
+`.trim();
+  return `${sys}\n\n${policy}`;
 }
 
+// ---------- Tools config ----------
+function getToolsAndResources() {
+  const tools = [];
+  const tool_resources = {};
+
+  if (OPENAI_VECTOR_STORE_ID) {
+    tools.push({ type: "file_search" });
+    tool_resources.file_search = { vector_store_ids: [OPENAI_VECTOR_STORE_ID] };
+  }
+  if (ENABLE_WEB_SEARCH) {
+    tools.push({ type: "web_search" });
+    // no extra config required for web_search
+  }
+  return { tools, tool_resources: Object.keys(tool_resources).length ? tool_resources : undefined };
+}
+
+// ---------- Build Responses request ----------
 function buildResponsesRequest(userMessage, sysInstructions, extra = {}) {
+  const groundedSys = withGroundingPolicy(sysInstructions);
+  const { tools, tool_resources } = getToolsAndResources();
+
   return {
     model: OPENAI_MODEL,
     input: [
-      { role: "system", content: sysInstructions },
+      { role: "system", content: groundedSys },
       { role: "user",   content: userMessage }
     ],
-    // Enable hosted retrieval when a vector store id is configured
-    ...getRetrievalTooling(),
-    // Keep explicit text format to avoid API drift
+    ...(tools.length ? { tools } : {}),
+    ...(tool_resources ? { tool_resources } : {}),
     text: { format: { type: "text" }, verbosity: "medium" },
     ...extra,
   };
 }
 
-// Extract text from Responses JSON
+// ---------- Helpers ----------
 function extractTextFromResponse(resp) {
   let out = "";
-
   if (Array.isArray(resp?.output)) {
     for (const item of resp.output) {
       if (item?.type === "message" && Array.isArray(item.content)) {
         for (const part of item.content) {
-          if (part?.type === "output_text" && typeof part.text === "string") {
-            out += part.text;
-          }
+          if (part?.type === "output_text" && typeof part.text === "string") out += part.text;
         }
       }
     }
   }
   if (!out && typeof resp?.text === "string") out = resp.text;
   if (!out && typeof resp?.response?.output_text === "string") out = resp.response.output_text;
-
   return out || "";
 }
 
@@ -197,7 +195,7 @@ async function handleNonStreaming(userMessage) {
   return { ok: true, text, usage };
 }
 
-// ---------- Streaming (SSE passthrough with optional server logging) ----------
+// ---------- Streaming (SSE passthrough) ----------
 async function handleStreaming(res, userMessage) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -217,7 +215,6 @@ async function handleStreaming(res, userMessage) {
   };
 
   send("start", { ok: true });
-
   const sys = await fetchAssistantInstructions();
 
   const upstream = await fetch("https://api.openai.com/v1/responses", {
@@ -241,13 +238,13 @@ async function handleStreaming(res, userMessage) {
   const reader  = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
 
-  // Optional: mirror key SSE events into server logs without changing client stream
-  let buffer = "";
+  // Optional: mirror key SSE events into server logs
+  let logBuf = "";
   const maybeLogChunk = (chunkStr) => {
     if (!DEBUG_SSE_LOG) return;
-    buffer += chunkStr;
-    const blocks = buffer.split("\n\n");
-    buffer = blocks.pop() || "";
+    logBuf += chunkStr;
+    const blocks = logBuf.split("\n\n");
+    logBuf = blocks.pop() || "";
     for (const block of blocks) {
       const lines = block.split("\n");
       let event = "message";
@@ -278,9 +275,7 @@ async function handleStreaming(res, userMessage) {
       const { value, done } = await reader.read();
       if (done) break;
       const chunkStr = decoder.decode(value, { stream: true });
-      // 1) write through untouched (so the widget keeps working)
       try { res.write(chunkStr); } catch {}
-      // 2) optionally mirror to logs
       maybeLogChunk(chunkStr);
     }
   } catch {
