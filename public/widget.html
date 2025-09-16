@@ -69,7 +69,7 @@
     <div class="wrap">
       <h1>Talking Care Navigator</h1>
       <p class="sub">
-        Ask anything about adult social care in England. I search the official document library first and show sources, then broaden to the web only if needed.
+        Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, case management and more.
       </p>
 
       <div id="status"></div>
@@ -118,9 +118,10 @@
       const ac = new AbortController();
       currentAbort = ac;
 
-      // Reset output and citations
+      // Reset output and per-answer state
       clearOut();
       citations.length = 0;
+      answerBuf = "";
 
       const r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
         method: "POST",
@@ -143,16 +144,24 @@
           flushBlocks(decoder.decode(value, { stream: true }));
         }
       } catch {
-        // aborted / network
+        // aborted or network
       } finally {
         currentAbort = null;
         setStatus("");
       }
     }
 
-    // SSE parsing
+    // SSE parsing state
     let buffer = "";
-    const citations = []; // { kind: "file"|"web", label: string, id?: string, url?: string }
+    const citations = []; // { kind: "file"|"web", label, id?, url? }
+    let answerBuf = "";   // accumulate body text so we can strip inline links
+
+    // Simple sanitizer to keep body text free of inline links
+    function stripInlineLinks(s) {
+      s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1"); // markdown links
+      s = s.replace(/https?:\/\/\S+/g, ""); // bare URLs
+      return s;
+    }
 
     function flushBlocks(chunk) {
       buffer += chunk;
@@ -174,27 +183,29 @@
     }
 
     function handleEvent(event, raw) {
-      if (event === "start") { log("SSE start", raw); return; }
-      if (event === "error") { setStatus(""); log("SSE error", raw); append(`⚠️ ${raw}`); nl(); return; }
-      if (event === "done") { log("SSE done", raw); return; }
+      if (event === "start") { return; }
+      if (event === "error") { setStatus(""); append(`⚠️ ${raw}`); nl(); return; }
+      if (event === "done")  { return; }
 
-      // Text deltas
+      // Accumulate deltas, sanitize links, and render
       if (event === "response.output_text.delta") {
         try {
           const d = JSON.parse(raw);
           if (typeof d?.delta === "string") {
-            append(d.delta);
+            const cleaned = stripInlineLinks(d.delta);
+            answerBuf += cleaned;
+            append(cleaned);
             setStatus("Typing…");
           }
         } catch {}
         return;
       }
 
-      // Collect citations (file or web). Different accounts may emit slightly different annotation shapes.
+      // Collect citations
       if (event === "response.output_text.annotation.added") {
         try {
           const d = JSON.parse(raw);
-          const a = d?.annotation || d?.data || d; // be liberal
+          const a = d?.annotation || d?.data || d;
           if (a?.type === "file_citation" && a.file_id) {
             citations.push({ kind: "file", id: a.file_id, label: a.filename || a.file_id });
           } else if ((a?.type === "web_citation" || a?.type === "url_citation" || a?.url) && a.url) {
@@ -204,22 +215,23 @@
         return;
       }
 
+      // Finalize: print Sources once, at the end
       if (event === "response.completed") {
         setStatus("");
-        // De-dup keeping first occurrence order
+
+        // De-dup while preserving order
         const seenFile = new Set();
         const seenURL  = new Set();
         const files = [];
         const urls  = [];
         for (const c of citations) {
           if (c.kind === "file") {
-            if (seenFile.has(c.id)) continue;
-            seenFile.add(c.id); files.push(c);
+            if (!seenFile.has(c.id)) { seenFile.add(c.id); files.push(c); }
           } else if (c.kind === "web") {
-            if (seenURL.has(c.url)) continue;
-            seenURL.add(c.url); urls.push(c);
+            if (!seenURL.has(c.url)) { seenURL.add(c.url); urls.push(c); }
           }
         }
+
         if (files.length || urls.length) {
           append("\n\nSources:\n");
           files.forEach(c => append(`• ${c.label}\n`));
@@ -228,7 +240,8 @@
         return;
       }
 
-      if (event.startsWith("response.")) { log("SSE", event, raw); return; }
+      // Quietly ignore other response.* events
+      if (event.startsWith("response.")) { return; }
     }
 
     // Submit
@@ -237,7 +250,7 @@
       await askStream(p);
     });
 
-    // Enter to submit (Shift+Enter newline)
+    // Enter to submit
     $in.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
@@ -252,6 +265,7 @@
       $in.value = "";
       setStatus("");
       citations.length = 0;
+      answerBuf = "";
     });
   });
   </script>
