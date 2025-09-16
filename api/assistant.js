@@ -7,7 +7,7 @@
 // What this version does
 // 1) Forces hosted retrieval first via file_search against your Vector Store
 // 2) Optional web search available only if OPENAI_ENABLE_WEB_SEARCH=1
-// 3) Strict grounding policy that disallows general-knowledge answers
+// 3) Strict grounding policy that disallows general-knowledge answers and forbids inline citations
 // 4) Clean SSE passthrough with clear error surfacing
 //
 // Required env vars
@@ -127,7 +127,7 @@ function withGroundingPolicy(sys) {
   const policy = `
 CRITICAL GROUNDING POLICY:
 You must search the attached document library first using the file_search tool and base your answer on those documents.
-Do not include inline URLs or footnotes inside the body of the answer. Only list sources at the end under a "Sources" heading.
+Do not include inline URLs, bracketed numbers like [1], or footnotes inside the body of the answer. Only list sources once at the end under a "Sources" heading.
 If the library contains no relevant passages, reply: "No matching sources found in the library." If web_search is available you may then use it, but clearly separate those web sources in the Sources list.
 Prefer short verbatim quotes for key definitions and include paragraph or section numbers where available.
 Never answer purely from general knowledge without sources.
