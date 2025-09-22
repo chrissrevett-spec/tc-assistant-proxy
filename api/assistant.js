@@ -1,17 +1,27 @@
 // /api/assistant.js
 //
-// Two modes via OpenAI "Responses" API:
-//  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
-//  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
+// Now powered by Assistants API v2 (threads + runs)
+// Modes:
+//  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text }
+//  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE (unified events)
 //
-// Key points
-// 1) Uses assistant_id so your assistant's attached Vector Store + File Search run server-side
-// 2) Explicitly sets `model` (required on your account)
-// 3) Strict grounding policy (no inline links; sources only at end)
-// 4) Adds 'OpenAI-Beta: assistants=v2' to all relevant calls
+// Why this version?
+// - Your account rejected /responses with assistant_id/tool_resources.
+// - Assistants v2 uses the assistant's attached Vector Store & File Search directly.
+// - Unified streaming emits `response.output_text.delta`, which your widget already handles.
+//
+// Required env vars
+//  - OPENAI_API_KEY
+//  - OPENAI_ASSISTANT_ID  (must have File Search enabled + your vector store attached)
+//
+// Optional env vars
+//  - CORS_ALLOW_ORIGIN
+//  - DEBUG_SSE_LOG=("1") for server-side stream mirroring
+//
+// Notes
+// - We append a grounding policy to the assistant's instructions per call.
 
 const OPENAI_API_KEY      = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL        = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const OPENAI_ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID || "";
 
 const CORS_ALLOW_ORIGIN   = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
@@ -20,8 +30,12 @@ const CORS_ALLOW_HEADERS  = process.env.CORS_ALLOW_HEADERS || "Content-Type, Acc
 const CORS_MAX_AGE        = "86400";
 const DEBUG_SSE_LOG       = process.env.DEBUG_SSE_LOG === "1";
 
-if (!OPENAI_API_KEY) console.error("[assistant] Missing OPENAI_API_KEY");
-if (!OPENAI_ASSISTANT_ID) console.error("[assistant] Missing OPENAI_ASSISTANT_ID — ensure your assistant has File Search enabled and your vector store attached.");
+if (!OPENAI_API_KEY) {
+  console.error("[assistant] Missing OPENAI_API_KEY");
+}
+if (!OPENAI_ASSISTANT_ID) {
+  console.error("[assistant] Missing OPENAI_ASSISTANT_ID — ensure your assistant has File Search + the correct Vector Store attached in the dashboard.");
+}
 
 // ---------- CORS ----------
 function setCors(res) {
@@ -36,6 +50,7 @@ function endPreflight(res) { res.statusCode = 204; res.end(); }
 // ---------- Body parsing ----------
 async function readBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
+
   return await new Promise((resolve, reject) => {
     let data = "";
     req.setEncoding("utf8");
@@ -53,7 +68,7 @@ async function readBody(req) {
   });
 }
 
-// ---------- Assistant instructions (small cache) ----------
+// ---------- Helpers: fetch Assistant base instructions (cache) ----------
 const INSTR_CACHE_TTL_MS = 5 * 60 * 1000;
 let instrCache = { text: "", at: 0 };
 
@@ -100,57 +115,96 @@ Never answer purely from general knowledge without sources.
   return `${sys}\n\n${policy}`;
 }
 
-// ---------- Build /responses payload ----------
-function buildResponsesRequest(userMessage, baseInstructions, extra = {}) {
-  const groundedSys = withGroundingPolicy(baseInstructions);
-  return {
-    assistant_id: OPENAI_ASSISTANT_ID,
-    model: OPENAI_MODEL,          // <-- REQUIRED on your account
-    instructions: groundedSys,    // enforce grounding each call
-    input: [{ role: "user", content: userMessage }],
-    text: { format: { type: "text" }, verbosity: "medium" },
-    ...extra,
-  };
-}
-
-// ---------- Extract text helper ----------
-function extractTextFromResponse(resp) {
-  let out = "";
-  if (Array.isArray(resp?.output)) {
-    for (const item of resp.output) {
-      if (item?.type === "message" && Array.isArray(item.content)) {
-        for (const part of item.content) {
-          if (part?.type === "output_text" && typeof part.text === "string") out += part.text;
-        }
-      }
-    }
-  }
-  if (!out && typeof resp?.text === "string") out = resp.text;
-  if (!out && typeof resp?.response?.output_text === "string") out = resp.response.output_text;
-  return out || "";
-}
-
-// ---------- Non-streaming ----------
+// ---------- Assistants v2 (non-streaming) ----------
 async function handleNonStreaming(userMessage) {
-  const sys = await fetchAssistantInstructions();
-  const payload = buildResponsesRequest(userMessage, sys, { stream: false });
-  const resp = await fetch("https://api.openai.com/v1/responses", {
+  const base = await fetchAssistantInstructions();
+  const instructions = withGroundingPolicy(base);
+
+  // 1) Create a thread
+  const thread = await fetch("https://api.openai.com/v1/threads", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
       "OpenAI-Beta": "assistants=v2",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({}),
   }).then(async r => (r.ok ? r.json() : Promise.reject(new Error(await r.text().catch(()=>`${r.status}`)))));
 
-  const text = extractTextFromResponse(resp);
-  const usage = resp?.usage || null;
-  return { ok: true, text, usage };
+  // 2) Add the user message
+  await fetch(`https://api.openai.com/v1/threads/${thread.id}/messages`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+      "OpenAI-Beta": "assistants=v2",
+    },
+    body: JSON.stringify({
+      role: "user",
+      content: userMessage
+    }),
+  }).then(async r => (r.ok ? r.json() : Promise.reject(new Error(await r.text().catch(()=>`${r.status}`)))));
+
+  // 3) Create run (no stream)
+  const run = await fetch(`https://api.openai.com/v1/threads/${thread.id}/runs`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+      "OpenAI-Beta": "assistants=v2",
+    },
+    body: JSON.stringify({
+      assistant_id: OPENAI_ASSISTANT_ID,
+      instructions
+    }),
+  }).then(async r => (r.ok ? r.json() : Promise.reject(new Error(await r.text().catch(()=>`${r.status}`)))));
+
+  // 4) Poll until complete (simple loop with timeout)
+  const started = Date.now();
+  while (true) {
+    const status = await fetch(`https://api.openai.com/v1/threads/${thread.id}/runs/${run.id}`, {
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "OpenAI-Beta": "assistants=v2",
+      },
+    }).then(async r => (r.ok ? r.json() : Promise.reject(new Error(await r.text().catch(()=>`${r.status}`)))));
+
+    if (status.status === "completed") break;
+    if (status.status === "failed" || status.status === "expired" || status.status === "cancelled") {
+      throw new Error(`run status: ${status.status}`);
+    }
+    if (Date.now() - started > 60_000) { // 60s timeout
+      throw new Error("timeout waiting for run to complete");
+    }
+    await new Promise(r => setTimeout(r, 600));
+  }
+
+  // 5) Read latest assistant message
+  const msgs = await fetch(`https://api.openai.com/v1/threads/${thread.id}/messages?order=desc&limit=1`, {
+    method: "GET",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "OpenAI-Beta": "assistants=v2",
+    },
+  }).then(async r => (r.ok ? r.json() : Promise.reject(new Error(await r.text().catch(()=>`${r.status}`)))));
+
+  let text = "";
+  const m = msgs?.data?.[0];
+  if (m && Array.isArray(m.content)) {
+    for (const part of m.content) {
+      if (part?.type === "text" && typeof part?.text?.value === "string") {
+        text += part.text.value;
+      }
+    }
+  }
+
+  return { ok: true, text };
 }
 
-// ---------- Streaming (SSE passthrough) ----------
+// ---------- Assistants v2 (streaming passthrough) ----------
 async function handleStreaming(res, userMessage) {
+  // SSE headers to client
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -169,63 +223,71 @@ async function handleStreaming(res, userMessage) {
   };
 
   send("start", { ok: true });
-  const sys = await fetchAssistantInstructions();
-
-  const upstream = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-      "Accept": "text/event-stream",
-      "OpenAI-Beta": "assistants=v2",
-    },
-    body: JSON.stringify(buildResponsesRequest(userMessage, sys, { stream: true })),
-  });
-
-  if (!upstream.ok || !upstream.body) {
-    let errTxt = "";
-    try { errTxt = await upstream.text(); } catch {}
-    send("error", { ok:false, step:"responses_stream", status: upstream.status, error: errTxt || "no-body" });
-    try { res.end(); } catch {}
-    return;
-  }
-
-  const reader  = upstream.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-
-  // Optional: mirror key SSE events into server logs
-  let logBuf = "";
-  const maybeLogChunk = (chunkStr) => {
-    if (!DEBUG_SSE_LOG) return;
-    logBuf += chunkStr;
-    const blocks = logBuf.split("\n\n");
-    logBuf = blocks.pop() || "";
-    for (const block of blocks) {
-      const lines = block.split("\n");
-      let event = "message";
-      const dataLines = [];
-      for (const line of lines) {
-        if (!line || line.startsWith(":")) continue;
-        if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
-        if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
-      }
-      const raw = dataLines.join("\n");
-      if (event === "response.output_text.delta") {
-        try {
-          const d = JSON.parse(raw);
-          if (typeof d?.delta === "string" && d.delta.trim()) {
-            console.log("[assistant][SSE][delta]", d.delta.slice(0, 200));
-          }
-        } catch {}
-      } else if (event === "response.completed") {
-        console.log("[assistant][SSE] completed");
-      } else if (event === "error") {
-        console.warn("[assistant][SSE] error", raw);
-      }
-    }
-  };
 
   try {
+    const base = await fetchAssistantInstructions();
+    const instructions = withGroundingPolicy(base);
+
+    // Use the unified streaming endpoint for Assistants:
+    // POST /v1/threads/runs with { assistant_id, instructions, additional_messages, stream: true }
+    const upstream = await fetch("https://api.openai.com/v1/threads/runs", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "OpenAI-Beta": "assistants=v2",
+      },
+      body: JSON.stringify({
+        assistant_id: OPENAI_ASSISTANT_ID,
+        instructions,
+        // "additional_messages" lets us avoid a separate thread+message POST
+        additional_messages: [{ role: "user", content: userMessage }],
+        stream: true
+      }),
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      const errTxt = await upstream.text().catch(() => "");
+      send("error", { ok:false, step:"assistants_stream", status: upstream.status, error: errTxt || "no-body" });
+      try { res.end(); } catch {}
+      return;
+    }
+
+    // Pass unified SSE straight through. Your widget already listens for response.output_text.delta etc.
+    const reader  = upstream.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+
+    // Optional server logging (compact)
+    let logBuf = "";
+    const maybeLogChunk = (chunkStr) => {
+      if (!DEBUG_SSE_LOG) return;
+      logBuf += chunkStr;
+      const blocks = logBuf.split("\n\n");
+      logBuf = blocks.pop() || "";
+      for (const block of blocks) {
+        const lines = block.split("\n");
+        let event = "message";
+        for (const line of lines) {
+          if (line.startsWith("event:")) { event = line.slice(6).trim(); break; }
+        }
+        if (event === "response.output_text.delta") {
+          // keep logs terse
+          const dl = lines.find(l => l.startsWith("data:"));
+          if (dl) {
+            try {
+              const d = JSON.parse(dl.slice(5).trim());
+              if (d?.delta) console.log("[assistant][SSE][delta]", String(d.delta).slice(0, 200));
+            } catch {}
+          }
+        } else if (event === "response.completed") {
+          console.log("[assistant][SSE] completed");
+        } else if (event === "error") {
+          console.warn("[assistant][SSE] error", block);
+        }
+      }
+    };
+
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -233,10 +295,12 @@ async function handleStreaming(res, userMessage) {
       try { res.write(chunkStr); } catch {}
       maybeLogChunk(chunkStr);
     }
-  } catch {
-    // client aborted or network issue
-  } finally {
+
     send("done", "[DONE]");
+    try { res.end(); } catch {}
+
+  } catch (e) {
+    send("error", { ok:false, step:"assistants_stream", error: e?.message || String(e) });
     try { res.end(); } catch {}
   }
 }
