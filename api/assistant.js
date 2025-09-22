@@ -1,4 +1,3 @@
-
 // /api/assistant.js
 //
 // Two modes via OpenAI "Responses" API:
@@ -74,6 +73,8 @@ async function oaJson(path, method, body, headers = {}) {
     headers: {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
+      // IMPORTANT: add beta header so /responses accepts tool_resources, tools, etc.
+      "OpenAI-Beta": "assistants=v2",
       ...headers,
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -192,7 +193,7 @@ function extractTextFromResponse(resp) {
 async function handleNonStreaming(userMessage) {
   const sys = await fetchAssistantInstructions();
   const payload = buildResponsesRequest(userMessage, sys, { stream: false });
-  const resp = await oaJson("/responses", "POST", payload);
+  const resp = await oaJson("/responses", "POST", payload); // oaJson now adds OpenAI-Beta header
   const text = extractTextFromResponse(resp);
   const usage = resp?.usage || null;
   return { ok: true, text, usage };
@@ -226,6 +227,8 @@ async function handleStreaming(res, userMessage) {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
       "Accept": "text/event-stream",
+      // IMPORTANT: add beta header on streaming too
+      "OpenAI-Beta": "assistants=v2",
     },
     body: JSON.stringify(buildResponsesRequest(userMessage, sys, { stream: true })),
   });
