@@ -14,12 +14,8 @@
     html, body { height: 100%; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 0; background: #fff; }
 
-    .shell {
-      width: 100%; max-width: none; min-height: 100dvh; margin: 0;
-      border-radius: 16px; background: #fff;
-      box-shadow: 0 0 0 1px rgba(0,0,0,.06), 0 12px 24px rgba(0,0,0,.06), 0 0 0 20px #F5F5F5;
-      box-sizing: border-box; display: flex; flex-direction: column;
-    }
+    .shell { width: 100%; max-width: none; min-height: 100dvh; margin: 0; border-radius: 16px; background: #fff;
+      box-shadow: 0 0 0 1px rgba(0,0,0,.06), 0 12px 24px rgba(0,0,0,.06), 0 0 0 20px #F5F5F5; box-sizing: border-box; display: flex; flex-direction: column; }
     .wrap { border-radius: 16px; padding: 16px; background: #fff; flex: 1; display: flex; flex-direction: column; }
 
     h1 { margin: 0 0 4px; font-size: 22px; color: #000; }
@@ -69,7 +65,7 @@
     <div class="wrap">
       <h1>Talking Care Navigator</h1>
       <p class="sub">
-        Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, case management and more. I can't give clinical or legal advice. Always adhere to your organisations' confidentiality policy.
+        Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, case management and more.
       </p>
 
       <div id="status"></div>
@@ -88,229 +84,214 @@
   </div>
 
   <script>
-document.addEventListener("DOMContentLoaded", () => {
-  const API_BASE = location.origin.replace(/\/$/, "");
-  const $in   = document.getElementById("tc-input");
-  const $out  = document.getElementById("out");
-  const $stat = document.getElementById("status");
-  const $btnS = document.getElementById("tc-ask-stream");
-  const $btnC = document.getElementById("tc-clear");
-  const $log  = document.getElementById("log");
+  document.addEventListener("DOMContentLoaded", () => {
+    const API_BASE = location.origin.replace(/\/$/, "");
+    const $in   = document.getElementById("tc-input");
+    const $out  = document.getElementById("out");
+    const $stat = document.getElementById("status");
+    const $btnS = document.getElementById("tc-ask-stream");
+    const $btnC = document.getElementById("tc-clear");
+    const $log  = document.getElementById("log");
 
-  function log(...a){ $log.textContent += a.map(v => typeof v === "string" ? v : JSON.stringify(v)).join(" ") + "\n"; }
-  function setStatus(t){ $stat.textContent = t || ""; }
-  function append(t){ $out.textContent += t; $out.scrollTop = $out.scrollHeight; }
-  function nl(){ append("\n"); }
-  function clearOut(){ $out.textContent = ""; }
+    function log(...a){ $log.textContent += a.map(v => typeof v === "string" ? v : JSON.stringify(v)).join(" ") + "\n"; }
+    function setStatus(t){ $stat.textContent = t || ""; }
+    function append(t){ $out.textContent += t; $out.scrollTop = $out.scrollHeight; }
+    function nl(){ append("\n"); }
+    function clearOut(){ $out.textContent = ""; }
 
-  log(`✅ widget ready. API_BASE = ${API_BASE}`);
+    log(`✅ widget ready. API_BASE = ${API_BASE}`);
 
-  function getPrompt() {
-    const p = ($in.value || "").trim();
-    return p || null;
-  }
+    function getPrompt() {
+      const p = ($in.value || "").trim();
+      return p || null;
+    }
 
-  // Abort support so Clear can cancel mid-stream
-  let currentAbort = null;
+    let currentAbort = null;
 
-  async function askStream(prompt) {
-    // Pre-stream cue
-    setStatus("Thinking…");
+    async function askStream(prompt) {
+      setStatus("Thinking…");
+      clearOut();
+      citations.length = 0;
+      answerBuf = "";
+      firstDeltaSeen = false;
 
-    const ac = new AbortController();
-    currentAbort = ac;
+      const ac = new AbortController();
+      currentAbort = ac;
 
-    // Reset output and per-answer state
-    clearOut();
-    citations.length = 0;
-    answerBuf = "";
-    firstDeltaSeen = false;
+      let started = false;
+      let watchdog = setTimeout(() => {
+        if (!started) {
+          append("⚠️ No stream started — likely CORS. Check that your page origin is in CORS_ALLOWLIST on the server.\n");
+          setStatus("");
+        }
+      }, 10000);
 
-    const r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
-      body: JSON.stringify({ userMessage: prompt }),
-      signal: ac.signal
+      let r;
+      try {
+        r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+          body: JSON.stringify({ userMessage: prompt }),
+          signal: ac.signal
+        });
+      } catch (e) {
+        clearTimeout(watchdog);
+        setStatus("");
+        append(`⚠️ Request blocked or failed: ${e?.message || e}\n`);
+        log("fetch error", e);
+        currentAbort = null;
+        return;
+      }
+
+      if (!r.ok || !r.body) {
+        clearTimeout(watchdog);
+        setStatus("");
+        let err = `HTTP ${r.status}`;
+        try { err += ` ${await r.text()}`; } catch {}
+        append(`⚠️ Stream failed: ${err}\n`);
+        currentAbort = null;
+        return;
+      }
+
+      const reader  = r.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      buffer = "";
+
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          if (chunk && !started) { started = true; clearTimeout(watchdog); }
+          flushBlocks(chunk);
+        }
+      } catch (e) {
+        append(`\n⚠️ Stream error: ${e?.message || e}\n`);
+      } finally {
+        currentAbort = null;
+        setStatus("");
+      }
+    }
+
+    // ===== SSE parsing state =====
+    let buffer = "";
+    const citations = []; // { kind: "file"|"web", label, id?, url? }
+    let answerBuf = "";
+    let firstDeltaSeen = false;
+
+    function normalizeEvent(eventName, raw) {
+      let obj = null;
+      try { obj = JSON.parse(raw); } catch {}
+      if (eventName === "message" && obj && typeof obj.event === "string") {
+        return { eventName: obj.event, dataObj: obj.data ?? obj };
+      }
+      return { eventName, dataObj: obj ?? { raw } };
+    }
+
+    function extractTextDelta(d) {
+      if (d && typeof d.delta === "string") return d.delta;
+      if (d && d.delta && Array.isArray(d.delta.content)) {
+        let out = "";
+        for (const c of d.delta.content) {
+          if ((c.type && c.type.includes("output_text")) && typeof c.text === "string") out += c.text;
+        }
+        if (out) return out;
+      }
+      if (typeof d?.text_delta === "string") return d.text_delta;
+      return "";
+    }
+
+    function sanitizeBodyDelta(s) {
+      s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
+      s = s.replace(/https?:\/\/\S+/g, "");
+      s = s.replace(/\s?\[\d+\]/g, "");
+      s = s.replace(/\s?\((?:source|Source):\s*[^)]+\)/g, "");
+      s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
+      return s;
+    }
+
+    function flushBlocks(chunk) {
+      buffer += chunk;
+      const blocks = buffer.split(/\n\n/);
+      buffer = blocks.pop();
+      for (const block of blocks) {
+        const lines = block.split(/\n/);
+        let event = "message";
+        const dataLines = [];
+        for (const line of lines) {
+          if (!line) continue;
+          if (line.startsWith(":")) continue;
+          if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
+          if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
+        }
+        const raw = dataLines.join("\n");
+        const { eventName, dataObj } = normalizeEvent(event, raw);
+        handleEvent(eventName, dataObj);
+      }
+    }
+
+    function handleEvent(event, dataObj) {
+      if (event === "start") { return; }
+      if (event === "error") { setStatus(""); append(`⚠️ ${JSON.stringify(dataObj)}\n`); return; }
+
+      if (event === "done" || event === "response.completed") {
+        setStatus("");
+        const seenFile = new Set();
+        const seenURL  = new Set();
+        const files = [];
+        const urls  = [];
+        for (const c of citations) {
+          if (c.kind === "file") { if (!seenFile.has(c.id)) { seenFile.add(c.id); files.push(c); } }
+          else if (c.kind === "web") { if (!seenURL.has(c.url)) { seenURL.add(c.url); urls.push(c); } }
+        }
+        if (files.length || urls.length) {
+          append("\n\nSources:\n");
+          files.forEach(c => append(`• ${c.label}\n`));
+          urls.forEach(c => append(`• ${c.label}\n`));
+        }
+        return;
+      }
+
+      if (event.endsWith(".delta")) {
+        const deltaText = extractTextDelta(dataObj);
+        if (deltaText) {
+          if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); }
+          const cleaned = sanitizeBodyDelta(deltaText);
+          answerBuf += cleaned;
+          append(cleaned);
+        }
+        return;
+      }
+
+      if (event.includes("annotation") || event.includes("citation")) {
+        const a = dataObj?.annotation || dataObj?.data || dataObj;
+        if (a?.type === "file_citation" && a.file_id) {
+          citations.push({ kind: "file", id: a.file_id, label: a.filename || a.file_id });
+        } else if ((a?.type === "web_citation" || a?.type === "url_citation" || a?.url) && a.url) {
+          citations.push({ kind: "web", url: a.url, label: a.title || a.url });
+        }
+        return;
+      }
+    }
+
+    $btnS.addEventListener("click", async () => {
+      const p = getPrompt(); if (!p) return;
+      await askStream(p);
     });
-    log("→ POST (SSE)", `${API_BASE}/api/assistant?stream=on`);
-    if (!r.ok || !r.body) { setStatus(""); log("← HTTP", r.status, "(no body)"); append(`⚠️ Stream failed (${r.status}).`); nl(); currentAbort = null; return; }
-    log("← HTTP 200 (ok)");
 
-    const reader  = r.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-    buffer = "";
-
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        flushBlocks(decoder.decode(value, { stream: true }));
+    $in.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        $btnS.click();
       }
-    } catch {
-      // aborted or network
-    } finally {
-      currentAbort = null;
-      setStatus("");
-    }
-  }
+    });
 
-  // ===== SSE parsing state =====
-  let buffer = "";
-  const citations = []; // { kind: "file"|"web", label, id?, url? }
-  let answerBuf = "";   // accumulate body text so we can sanitize
-  let firstDeltaSeen = false;
-
-  // ---- normalizers & helpers ----
-
-  // Some Assistants streams omit the SSE "event:" header and include the event name inside the JSON.
-  // This normalizer returns { eventName, dataObj } no matter which form arrives.
-  function normalizeEvent(eventName, raw) {
-    let obj = null;
-    try { obj = JSON.parse(raw); } catch {}
-    if (eventName === "message" && obj && typeof obj.event === "string") {
-      // Data-only event: event name is inside the JSON
-      return { eventName: obj.event, dataObj: obj.data ?? obj };
-    }
-    // Regular SSE with explicit event: line
-    return { eventName, dataObj: obj ?? { raw } };
-  }
-
-  // Extract text from *any* delta shape we might see
-  function extractTextDelta(d) {
-    // Unified responses format: { delta: "..." }
-    if (d && typeof d.delta === "string") return d.delta;
-
-    // Older assistants format: { delta: { content: [ {type: "output_text_delta", text: "..."} ] } }
-    if (d && d.delta && Array.isArray(d.delta.content)) {
-      let out = "";
-      for (const c of d.delta.content) {
-        if ((c.type && c.type.includes("output_text")) && typeof c.text === "string") {
-          out += c.text;
-        }
-      }
-      if (out) return out;
-    }
-
-    // Tools sometimes emit { text_delta: "..." }
-    if (typeof d?.text_delta === "string") return d.text_delta;
-
-    // Fallback: nothing we recognize
-    return "";
-  }
-
-  // Sanitizer to keep body free of inline links/citations and any premature "Sources"
-  function sanitizeBodyDelta(s) {
-    // Remove markdown links [text](url)
-    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
-    // Remove bare URLs
-    s = s.replace(/https?:\/\/\S+/g, "");
-    // Remove bracketed numeric citations like [1]
-    s = s.replace(/\s?\[\d+\]/g, "");
-    // Remove simple "(Source: ...)" or "(source: ...)" patterns
-    s = s.replace(/\s?\((?:source|Source):\s*[^)]+\)/g, "");
-    // If a "Sources:" header appears mid-answer, strip it and anything after it in this chunk
-    s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
-    return s;
-  }
-
-  function flushBlocks(chunk) {
-    buffer += chunk;
-    const blocks = buffer.split(/\n\n/);
-    buffer = blocks.pop();
-    for (const block of blocks) {
-      const lines = block.split(/\n/);
-      let event = "message";
-      const dataLines = [];
-      for (const line of lines) {
-        if (!line) continue;
-        if (line.startsWith(":")) continue;
-        if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
-        if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
-      }
-      const raw = dataLines.join("\n");
-      const { eventName, dataObj } = normalizeEvent(event, raw);
-      handleEvent(eventName, dataObj);
-    }
-  }
-
-  function handleEvent(event, dataObj) {
-    if (event === "start") { return; }
-    if (event === "error") { setStatus(""); append(`⚠️ ${JSON.stringify(dataObj)}`); nl(); return; }
-    if (event === "done" || event === "response.completed") { // explicit "done" or unified completed
-      setStatus("");
-      // De-dup while preserving order
-      const seenFile = new Set();
-      const seenURL  = new Set();
-      const files = [];
-      const urls  = [];
-      for (const c of citations) {
-        if (c.kind === "file") {
-          if (!seenFile.has(c.id)) { seenFile.add(c.id); files.push(c); }
-        } else if (c.kind === "web") {
-          if (!seenURL.has(c.url)) { seenURL.add(c.url); urls.push(c); }
-        }
-      }
-      if (files.length || urls.length) {
-        append("\n\nSources:\n");
-        files.forEach(c => append(`• ${c.label}\n`));
-        urls.forEach(c => append(`• ${c.label}\n`));
-      }
-      return;
-    }
-
-    // Any *delta* event — handle both unified ("response.output_text.delta")
-    // and older ("message.delta", "thread.message.delta") shapes.
-    if (event.endsWith(".delta")) {
-      const deltaText = extractTextDelta(dataObj);
-      if (deltaText) {
-        if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); } // hide "Thinking…" on first token
-        const cleaned = sanitizeBodyDelta(deltaText);
-        answerBuf += cleaned;
-        append(cleaned);
-      }
-      return;
-    }
-
-    // Collect citations from any of the unified/older annotation events
-    if (event.includes("annotation") || event.includes("citation")) {
-      const a = dataObj?.annotation || dataObj?.data || dataObj;
-      if (a?.type === "file_citation" && a.file_id) {
-        citations.push({ kind: "file", id: a.file_id, label: a.filename || a.file_id });
-      } else if ((a?.type === "web_citation" || a?.type === "url_citation" || a?.url) && a.url) {
-        citations.push({ kind: "web", url: a.url, label: a.title || a.url });
-      }
-      return;
-    }
-
-    // Ignore everything else quietly
-  }
-
-  // Submit
-  $btnS.addEventListener("click", async () => {
-    const p = getPrompt(); if (!p) return;
-    await askStream(p);
+    $btnC.addEventListener("click", () => {
+      if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
+      clearOut(); $in.value = ""; setStatus("");
+      citations.length = 0; answerBuf = ""; firstDeltaSeen = false;
+    });
   });
-
-  // Enter to submit
-  $in.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      $btnS.click();
-    }
-  });
-
-  // Clear
-  $btnC.addEventListener("click", () => {
-    if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
-    clearOut();
-    $in.value = "";
-    setStatus("");
-    citations.length = 0;
-    answerBuf = "";
-    firstDeltaSeen = false;
-  });
-});
-</script>
-
+  </script>
 </body>
 </html>
