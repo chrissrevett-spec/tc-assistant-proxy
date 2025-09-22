@@ -4,25 +4,16 @@
 //  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
 //  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
 //
-// Key points in this version
-// 1) Uses assistant_id on /v1/responses so your assistant's attached vector store & tools are used
-// 2) No tool_resources sent (avoids 400 Unknown parameter with some accounts)
-// 3) Strict grounding policy (no inline links/cites; sources at the end only) via instructions override
-// 4) Optional web search is controlled by your assistant's tool config in the dashboard
-// 5) Adds 'OpenAI-Beta: assistants=v2' to ALL relevant calls
-//
-// Required env vars
-//  - OPENAI_API_KEY
-//  - OPENAI_ASSISTANT_ID   // must have File Search enabled and your Vector Store attached
-//
-// Optional env vars
-//  - OPENAI_MODEL          // default gpt-4o-mini; only used if you want to override assistant's model
-//  - CORS_ALLOW_ORIGIN
-//  - DEBUG_SSE_LOG ("1" to mirror deltas in server logs)
+// Key points
+// 1) Uses assistant_id so your assistant's attached Vector Store + File Search run server-side
+// 2) Explicitly sets `model` (required on your account)
+// 3) Strict grounding policy (no inline links; sources only at end)
+// 4) Adds 'OpenAI-Beta: assistants=v2' to all relevant calls
 
 const OPENAI_API_KEY      = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL        = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const OPENAI_ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID || "";
+
 const CORS_ALLOW_ORIGIN   = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
 const CORS_ALLOW_METHODS  = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
 const CORS_ALLOW_HEADERS  = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
@@ -30,7 +21,7 @@ const CORS_MAX_AGE        = "86400";
 const DEBUG_SSE_LOG       = process.env.DEBUG_SSE_LOG === "1";
 
 if (!OPENAI_API_KEY) console.error("[assistant] Missing OPENAI_API_KEY");
-if (!OPENAI_ASSISTANT_ID) console.error("[assistant] Missing OPENAI_ASSISTANT_ID — attach your vector store to the assistant in the dashboard.");
+if (!OPENAI_ASSISTANT_ID) console.error("[assistant] Missing OPENAI_ASSISTANT_ID — ensure your assistant has File Search enabled and your vector store attached.");
 
 // ---------- CORS ----------
 function setCors(res) {
@@ -66,8 +57,6 @@ async function readBody(req) {
 const INSTR_CACHE_TTL_MS = 5 * 60 * 1000;
 let instrCache = { text: "", at: 0 };
 
-// We still fetch your assistant to get its base instructions and append our grounding policy.
-// (If this ever failed, the override below still enforces grounding via fallback text.)
 async function fetchAssistantInstructions() {
   const now = Date.now();
   if (instrCache.text && now - instrCache.at < INSTR_CACHE_TTL_MS) return instrCache.text;
@@ -112,22 +101,16 @@ Never answer purely from general knowledge without sources.
 }
 
 // ---------- Build /responses payload ----------
-// We pass assistant_id so its attached tools/vector store are used server-side.
-// We also pass instructions to enforce grounding policy for each call.
 function buildResponsesRequest(userMessage, baseInstructions, extra = {}) {
   const groundedSys = withGroundingPolicy(baseInstructions);
-  const payload = {
+  return {
     assistant_id: OPENAI_ASSISTANT_ID,
-    // Optional model override if you want to force a specific one:
-    // model: OPENAI_MODEL,
-    instructions: groundedSys,
-    input: [
-      { role: "user", content: userMessage }
-    ],
+    model: OPENAI_MODEL,          // <-- REQUIRED on your account
+    instructions: groundedSys,    // enforce grounding each call
+    input: [{ role: "user", content: userMessage }],
     text: { format: { type: "text" }, verbosity: "medium" },
     ...extra,
   };
-  return payload;
 }
 
 // ---------- Extract text helper ----------
@@ -210,7 +193,7 @@ async function handleStreaming(res, userMessage) {
   const reader  = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
 
-  // Optional: mirror key SSE events into server logs (does not affect client stream)
+  // Optional: mirror key SSE events into server logs
   let logBuf = "";
   const maybeLogChunk = (chunkStr) => {
     if (!DEBUG_SSE_LOG) return;
