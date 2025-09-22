@@ -4,30 +4,33 @@
 //  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
 //  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
 //
-// What this version does
-// 1) Forces hosted retrieval first via file_search against your Vector Store
-// 2) Optional web search if OPENAI_ENABLE_WEB_SEARCH=1
-// 3) Strict grounding policy (no general-knowledge answers; sources only at end)
-// 4) Adds the REQUIRED 'OpenAI-Beta: assistants=v2' header to all /responses calls
+// Key points in this version
+// 1) Uses assistant_id on /v1/responses so your assistant's attached vector store & tools are used
+// 2) No tool_resources sent (avoids 400 Unknown parameter with some accounts)
+// 3) Strict grounding policy (no inline links/cites; sources at the end only) via instructions override
+// 4) Optional web search is controlled by your assistant's tool config in the dashboard
+// 5) Adds 'OpenAI-Beta: assistants=v2' to ALL relevant calls
 //
-// Required env vars: OPENAI_API_KEY, OPENAI_ASSISTANT_ID, OPENAI_VECTOR_STORE_ID
-// Optional: OPENAI_MODEL (default gpt-4o-mini), OPENAI_ENABLE_WEB_SEARCH, CORS_ALLOW_ORIGIN, DEBUG_SSE_LOG
+// Required env vars
+//  - OPENAI_API_KEY
+//  - OPENAI_ASSISTANT_ID   // must have File Search enabled and your Vector Store attached
+//
+// Optional env vars
+//  - OPENAI_MODEL          // default gpt-4o-mini; only used if you want to override assistant's model
+//  - CORS_ALLOW_ORIGIN
+//  - DEBUG_SSE_LOG ("1" to mirror deltas in server logs)
 
-const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const OPENAI_ASSISTANT_ID     = process.env.OPENAI_ASSISTANT_ID || "";
-const OPENAI_VECTOR_STORE_ID  = process.env.OPENAI_VECTOR_STORE_ID || "";
-const ENABLE_WEB_SEARCH       = process.env.OPENAI_ENABLE_WEB_SEARCH === "1";
-
-const CORS_ALLOW_ORIGIN       = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
-const CORS_ALLOW_METHODS      = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
-const CORS_ALLOW_HEADERS      = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
-const CORS_MAX_AGE            = "86400";
-const DEBUG_SSE_LOG           = process.env.DEBUG_SSE_LOG === "1";
+const OPENAI_API_KEY      = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL        = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID || "";
+const CORS_ALLOW_ORIGIN   = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
+const CORS_ALLOW_METHODS  = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
+const CORS_ALLOW_HEADERS  = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
+const CORS_MAX_AGE        = "86400";
+const DEBUG_SSE_LOG       = process.env.DEBUG_SSE_LOG === "1";
 
 if (!OPENAI_API_KEY) console.error("[assistant] Missing OPENAI_API_KEY");
-if (!OPENAI_ASSISTANT_ID) console.warn("[assistant] OPENAI_ASSISTANT_ID not set — using fallback system instructions.");
-if (!OPENAI_VECTOR_STORE_ID) console.warn("[assistant] OPENAI_VECTOR_STORE_ID not set — retrieval will be disabled.");
+if (!OPENAI_ASSISTANT_ID) console.error("[assistant] Missing OPENAI_ASSISTANT_ID — attach your vector store to the assistant in the dashboard.");
 
 // ---------- CORS ----------
 function setCors(res) {
@@ -59,33 +62,13 @@ async function readBody(req) {
   });
 }
 
-// ---------- OpenAI helpers ----------
-async function oaJson(path, method, body, headers = {}) {
-  const r = await fetch(`https://api.openai.com/v1${path}`, {
-    method,
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-      "OpenAI-Beta": "assistants=v2", // <-- REQUIRED for tool_resources on /responses
-      ...headers,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!r.ok) {
-    const errTxt = await r.text().catch(() => "");
-    throw new Error(`${method} ${path} failed: ${r.status} ${errTxt}`);
-  }
-  return r.json();
-}
-
 // ---------- Assistant instructions (small cache) ----------
 const INSTR_CACHE_TTL_MS = 5 * 60 * 1000;
 let instrCache = { text: "", at: 0 };
 
+// We still fetch your assistant to get its base instructions and append our grounding policy.
+// (If this ever failed, the override below still enforces grounding via fallback text.)
 async function fetchAssistantInstructions() {
-  if (!OPENAI_ASSISTANT_ID) {
-    return "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
-  }
   const now = Date.now();
   if (instrCache.text && now - instrCache.at < INSTR_CACHE_TTL_MS) return instrCache.text;
 
@@ -108,7 +91,6 @@ async function fetchAssistantInstructions() {
     const sys = (data && typeof data.instructions === "string" && data.instructions.trim()) ? data.instructions.trim() : "";
     const finalSys = sys || "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
     instrCache = { text: finalSys, at: now };
-    console.info("[assistant] Using system instructions from Assistant:", { id: OPENAI_ASSISTANT_ID, hasInstructions: !!sys });
     return finalSys;
   } catch (e) {
     console.warn("[assistant] Error fetching assistant instructions:", e?.message || e);
@@ -120,50 +102,35 @@ async function fetchAssistantInstructions() {
 function withGroundingPolicy(sys) {
   const policy = `
 CRITICAL GROUNDING POLICY:
-You must search the attached document library first using the file_search tool and base your answer on those documents.
+You must search the attached document library first using File Search and base your answer on those documents.
 Do not include inline URLs, bracketed numbers like [1], or footnotes inside the body of the answer. Only list sources once at the end under a "Sources" heading.
-If the library contains no relevant passages, reply: "No matching sources found in the library." If web_search is available you may then use it, but clearly separate those web sources in the Sources list.
+If the library contains no relevant passages, reply: "No matching sources found in the library." You may then use other enabled tools (e.g., web_search) but clearly separate those web sources in the Sources list.
 Prefer short verbatim quotes for key definitions and include paragraph or section numbers where available.
 Never answer purely from general knowledge without sources.
 `.trim();
   return `${sys}\n\n${policy}`;
 }
 
-// ---------- Tools config ----------
-function getToolsAndResources() {
-  const tools = [];
-  const tool_resources = {};
-
-  if (OPENAI_VECTOR_STORE_ID) {
-    tools.push({ type: "file_search" });
-    tool_resources.file_search = { vector_store_ids: [OPENAI_VECTOR_STORE_ID] };
-  }
-  if (ENABLE_WEB_SEARCH) {
-    tools.push({ type: "web_search" });
-  }
-  return { tools, tool_resources: Object.keys(tool_resources).length ? tool_resources : undefined };
-}
-
-// ---------- Build Responses request ----------
-function buildResponsesRequest(userMessage, sysInstructions, extra = {}) {
-  const groundedSys = withGroundingPolicy(sysInstructions);
-  const { tools, tool_resources } = getToolsAndResources();
-
-  return {
-    model: OPENAI_MODEL,
+// ---------- Build /responses payload ----------
+// We pass assistant_id so its attached tools/vector store are used server-side.
+// We also pass instructions to enforce grounding policy for each call.
+function buildResponsesRequest(userMessage, baseInstructions, extra = {}) {
+  const groundedSys = withGroundingPolicy(baseInstructions);
+  const payload = {
+    assistant_id: OPENAI_ASSISTANT_ID,
+    // Optional model override if you want to force a specific one:
+    // model: OPENAI_MODEL,
+    instructions: groundedSys,
     input: [
-      { role: "system", content: groundedSys },
-      { role: "user",   content: userMessage }
+      { role: "user", content: userMessage }
     ],
-    ...(tools.some(t => t.type === "file_search") ? { tool_choice: { type: "tool", name: "file_search" } } : {}),
-    ...(tools.length ? { tools } : {}),
-    ...(tool_resources ? { tool_resources } : {}),
     text: { format: { type: "text" }, verbosity: "medium" },
     ...extra,
   };
+  return payload;
 }
 
-// ---------- Helpers ----------
+// ---------- Extract text helper ----------
 function extractTextFromResponse(resp) {
   let out = "";
   if (Array.isArray(resp?.output)) {
@@ -184,7 +151,16 @@ function extractTextFromResponse(resp) {
 async function handleNonStreaming(userMessage) {
   const sys = await fetchAssistantInstructions();
   const payload = buildResponsesRequest(userMessage, sys, { stream: false });
-  const resp = await oaJson("/responses", "POST", payload);
+  const resp = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+      "OpenAI-Beta": "assistants=v2",
+    },
+    body: JSON.stringify(payload),
+  }).then(async r => (r.ok ? r.json() : Promise.reject(new Error(await r.text().catch(()=>`${r.status}`)))));
+
   const text = extractTextFromResponse(resp);
   const usage = resp?.usage || null;
   return { ok: true, text, usage };
@@ -218,7 +194,7 @@ async function handleStreaming(res, userMessage) {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
       "Accept": "text/event-stream",
-      "OpenAI-Beta": "assistants=v2", // <-- REQUIRED here too
+      "OpenAI-Beta": "assistants=v2",
     },
     body: JSON.stringify(buildResponsesRequest(userMessage, sys, { stream: true })),
   });
@@ -234,7 +210,7 @@ async function handleStreaming(res, userMessage) {
   const reader  = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
 
-  // Optional: mirror key SSE events into server logs
+  // Optional: mirror key SSE events into server logs (does not affect client stream)
   let logBuf = "";
   const maybeLogChunk = (chunkStr) => {
     if (!DEBUG_SSE_LOG) return;
@@ -254,7 +230,7 @@ async function handleStreaming(res, userMessage) {
       if (event === "response.output_text.delta") {
         try {
           const d = JSON.parse(raw);
-        if (typeof d?.delta === "string" && d.delta.trim()) {
+          if (typeof d?.delta === "string" && d.delta.trim()) {
             console.log("[assistant][SSE][delta]", d.delta.slice(0, 200));
           }
         } catch {}
