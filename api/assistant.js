@@ -6,19 +6,12 @@
 //
 // What this version does
 // 1) Forces hosted retrieval first via file_search against your Vector Store
-// 2) Optional web search available only if OPENAI_ENABLE_WEB_SEARCH=1
-// 3) Strict grounding policy that disallows general-knowledge answers and forbids inline citations
-// 4) Clean SSE passthrough with clear error surfacing
+// 2) Optional web search if OPENAI_ENABLE_WEB_SEARCH=1
+// 3) Strict grounding policy (no general-knowledge answers; sources only at end)
+// 4) Adds the REQUIRED 'OpenAI-Beta: assistants=v2' header to all /responses calls
 //
-// Required env vars
-//  - OPENAI_API_KEY
-//  - OPENAI_ASSISTANT_ID
-//  - OPENAI_VECTOR_STORE_ID
-// Optional env vars
-//  - OPENAI_MODEL                (default: gpt-4o-mini)
-//  - OPENAI_ENABLE_WEB_SEARCH    ("1" to allow web_search as fallback)
-//  - CORS_ALLOW_ORIGIN
-//  - DEBUG_SSE_LOG               ("1" to mirror deltas to server logs)
+// Required env vars: OPENAI_API_KEY, OPENAI_ASSISTANT_ID, OPENAI_VECTOR_STORE_ID
+// Optional: OPENAI_MODEL (default gpt-4o-mini), OPENAI_ENABLE_WEB_SEARCH, CORS_ALLOW_ORIGIN, DEBUG_SSE_LOG
 
 const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -73,6 +66,7 @@ async function oaJson(path, method, body, headers = {}) {
     headers: {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
+      "OpenAI-Beta": "assistants=v2", // <-- REQUIRED for tool_resources on /responses
       ...headers,
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -161,7 +155,6 @@ function buildResponsesRequest(userMessage, sysInstructions, extra = {}) {
       { role: "system", content: groundedSys },
       { role: "user",   content: userMessage }
     ],
-    // Force the model to begin with file_search. It may use web_search only if enabled and nothing suitable is found.
     ...(tools.some(t => t.type === "file_search") ? { tool_choice: { type: "tool", name: "file_search" } } : {}),
     ...(tools.length ? { tools } : {}),
     ...(tool_resources ? { tool_resources } : {}),
@@ -225,6 +218,7 @@ async function handleStreaming(res, userMessage) {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
       "Accept": "text/event-stream",
+      "OpenAI-Beta": "assistants=v2", // <-- REQUIRED here too
     },
     body: JSON.stringify(buildResponsesRequest(userMessage, sys, { stream: true })),
   });
@@ -260,7 +254,7 @@ async function handleStreaming(res, userMessage) {
       if (event === "response.output_text.delta") {
         try {
           const d = JSON.parse(raw);
-          if (typeof d?.delta === "string" && d.delta.trim()) {
+        if (typeof d?.delta === "string" && d.delta.trim()) {
             console.log("[assistant][SSE][delta]", d.delta.slice(0, 200));
           }
         } catch {}
@@ -300,7 +294,7 @@ export default async function handler(req, res) {
   try {
     const body = await readBody(req);
     const userMessage = (body.userMessage || "").toString().trim();
-    const mode = (req.query.stream || "off").toString(); // "on" | "off"
+    const mode = (req.query.stream || "off").toString();
 
     if (!userMessage) {
       return res.status(400).json({ ok:false, error: "Missing userMessage" });
