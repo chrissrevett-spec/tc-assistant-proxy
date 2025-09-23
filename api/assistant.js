@@ -5,32 +5,36 @@
 //  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
 //
 // What this version does
-// 1) Forces hosted retrieval via file_search against your (already attached) Vector Store
-// 2) **No web tool at all** (cannot fallback to web)
-// 3) Strict grounding policy that disallows general-knowledge answers and forbids inline citations
-// 4) Clean SSE passthrough with clear error surfacing
-// 5) Extra debug logging of tool calls when DEBUG_SSE_LOG=1
+// 1) Retrieval-first via file_search against your Vector Store (REQUIRES OPENAI_VECTOR_STORE_ID)
+// 2) Optional web search controlled by OPENAI_ENABLE_WEB_SEARCH ("1" to allow)
+// 3) Strict grounding policy; sources only at the end (no inline links)
+// 4) SSE passthrough with clear error surfacing
 //
 // Required env vars
 //  - OPENAI_API_KEY
 //  - OPENAI_ASSISTANT_ID
-// Optional env vars
+//  - OPENAI_VECTOR_STORE_ID   <-- required for /responses + file_search
+// Optional
 //  - OPENAI_MODEL (default: gpt-4o-mini)
+//  - OPENAI_ENABLE_WEB_SEARCH ("1" to allow web fallback)
 //  - CORS_ALLOW_ORIGIN
-//  - DEBUG_SSE_LOG ("1" to mirror deltas & tool calls to server logs)
+//  - DEBUG_SSE_LOG ("1" to mirror deltas/tool calls to logs)
 
-const OPENAI_API_KEY      = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL        = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const OPENAI_ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID || "";
+const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_ASSISTANT_ID     = process.env.OPENAI_ASSISTANT_ID || "";
+const OPENAI_VECTOR_STORE_ID  = process.env.OPENAI_VECTOR_STORE_ID || "";
+const ENABLE_WEB_SEARCH       = process.env.OPENAI_ENABLE_WEB_SEARCH === "1";
 
-const CORS_ALLOW_ORIGIN   = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
-const CORS_ALLOW_METHODS  = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
-const CORS_ALLOW_HEADERS  = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
-const CORS_MAX_AGE        = "86400";
-const DEBUG_SSE_LOG       = process.env.DEBUG_SSE_LOG === "1";
+const CORS_ALLOW_ORIGIN       = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
+const CORS_ALLOW_METHODS      = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
+const CORS_ALLOW_HEADERS      = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
+const CORS_MAX_AGE            = "86400";
+const DEBUG_SSE_LOG           = process.env.DEBUG_SSE_LOG === "1";
 
 if (!OPENAI_API_KEY) console.error("[assistant] Missing OPENAI_API_KEY");
 if (!OPENAI_ASSISTANT_ID) console.warn("[assistant] OPENAI_ASSISTANT_ID not set — using fallback system instructions.");
+if (!OPENAI_VECTOR_STORE_ID) console.error("[assistant] Missing OPENAI_VECTOR_STORE_ID — retrieval cannot run with /responses+file_search");
 
 // ---------- CORS ----------
 function setCors(res) {
@@ -69,8 +73,7 @@ async function oaJson(path, method, body, headers = {}) {
     headers: {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
-      // Required for retrieval/file_search via Responses API features
-      "OpenAI-Beta": "assistants=v2",
+      "OpenAI-Beta": "assistants=v2", // required for retrieval features on /responses
       ...headers,
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -124,20 +127,26 @@ async function fetchAssistantInstructions() {
 function withGroundingPolicy(sys) {
   const policy = `
 CRITICAL GROUNDING POLICY:
-You must search the attached document library first using the file_search tool and base your answer on those documents.
-Web search is DISABLED. Do not cite or use any web sources.
-Do not include inline URLs, bracketed numbers like [1], or footnotes inside the body of the answer. Only list sources once at the end under a "Sources" heading.
-If the library contains no relevant passages, reply exactly: "No matching sources found in the library."
+Search the document library first using the file_search tool and base your answer on those documents.
+Only if no relevant passages are found may you consider other enabled tools (e.g., web_search). Clearly separate any web sources in the final "Sources" list.
+Do not include inline URLs, bracketed numbers like [1], or footnotes inside the body. Only list sources once at the end under "Sources".
 Prefer short verbatim quotes for key definitions and include paragraph or section numbers where available.
+If nothing relevant is found in the library, say exactly: "No matching sources found in the library."
 Never answer purely from general knowledge without sources.
 `.trim();
   return `${sys}\n\n${policy}`;
 }
 
-// ---------- Tools config (file_search ONLY) ----------
+// ---------- Tools config: file_search + optional web_search ----------
 function getTools() {
-  // Only file_search is exposed. No web_search at all.
-  return [{ type: "file_search" }];
+  const tools = [{
+    type: "file_search",
+    vector_store_ids: [OPENAI_VECTOR_STORE_ID], // REQUIRED for /responses
+  }];
+  if (ENABLE_WEB_SEARCH) {
+    tools.push({ type: "web_search" });
+  }
+  return tools;
 }
 
 // ---------- Build Responses request ----------
@@ -151,7 +160,7 @@ function buildResponsesRequest(userMessage, sysInstructions, extra = {}) {
       { role: "system", content: groundedSys },
       { role: "user",   content: userMessage }
     ],
-    // Force the first tool to be file_search. Since web tool doesn't exist, it cannot fallback.
+    // Start with file_search. The model may call web_search afterwards only if it's in tools and needed.
     tool_choice: { type: "tool", name: "file_search" },
     tools,
     text: { format: { type: "text" }, verbosity: "medium" },
@@ -230,12 +239,13 @@ async function handleStreaming(res, userMessage) {
   const reader  = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
 
-  // Optional: mirror key SSE events into server logs (including tool calls)
-  let buffer = "";
-  const flushForLog = (chunkStr) => {
-    buffer += chunkStr;
-    const blocks = buffer.split("\n\n");
-    buffer = blocks.pop() || "";
+  // Optional: mirror key SSE events into server logs
+  let logBuf = "";
+  const maybeLogChunk = (chunkStr) => {
+    if (!DEBUG_SSE_LOG) return;
+    logBuf += chunkStr;
+    const blocks = logBuf.split("\n\n");
+    logBuf = blocks.pop() || "";
     for (const block of blocks) {
       const lines = block.split("\n");
       let event = "message";
@@ -247,8 +257,6 @@ async function handleStreaming(res, userMessage) {
       }
       const raw = dataLines.join("\n");
 
-      if (!DEBUG_SSE_LOG) continue;
-
       if (event === "response.output_text.delta") {
         try {
           const d = JSON.parse(raw);
@@ -256,20 +264,15 @@ async function handleStreaming(res, userMessage) {
             console.log("[assistant][SSE][delta]", d.delta.slice(0, 200));
           }
         } catch {}
-      }
-
-      // NEW: log tool calls if any appear (should just be file_search)
-      if (event.startsWith("response.tool_call")) {
+      } else if (event.startsWith("response.tool_call")) {
         try {
           const d = JSON.parse(raw);
-          const name = d?.name || d?.tool?.name || d?.data?.name || "(unknown)";
+        const name = d?.name || d?.tool?.name || d?.data?.name || "(unknown)";
           console.log("[assistant][SSE][tool_call]", event, name);
         } catch {
           console.log("[assistant][SSE][tool_call]", event);
         }
-      }
-
-      if (event === "response.completed") {
+      } else if (event === "response.completed") {
         console.log("[assistant][SSE] completed");
       } else if (event === "error") {
         console.warn("[assistant][SSE] error", raw);
@@ -283,7 +286,7 @@ async function handleStreaming(res, userMessage) {
       if (done) break;
       const chunkStr = decoder.decode(value, { stream: true });
       try { res.write(chunkStr); } catch {}
-      flushForLog(chunkStr);
+      maybeLogChunk(chunkStr);
     }
   } catch {
     // client aborted / network issue
@@ -309,6 +312,9 @@ export default async function handler(req, res) {
 
     if (!userMessage) {
       return res.status(400).json({ ok:false, error: "Missing userMessage" });
+    }
+    if (!OPENAI_VECTOR_STORE_ID) {
+      return res.status(500).json({ ok:false, error: "Server misconfig: OPENAI_VECTOR_STORE_ID not set" });
     }
 
     if (mode === "on") {
