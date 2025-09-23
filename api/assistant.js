@@ -17,7 +17,7 @@
 // Optional
 //  - OPENAI_MODEL (default: gpt-4o-mini)
 //  - OPENAI_ENABLE_WEB_SEARCH ("1" to allow web fallback)
-//  - CORS_ALLOW_ORIGIN
+//  - CORS_ALLOW_ORIGIN (default: https://tc-assistant-proxy.vercel.app)
 //  - DEBUG_SSE_LOG ("1" to mirror deltas/tool calls to logs)
 
 const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
@@ -141,7 +141,8 @@ Never answer purely from general knowledge without sources.
 function getTools() {
   const tools = [{
     type: "file_search",
-    vector_store_ids: [OPENAI_VECTOR_STORE_ID], // REQUIRED for /responses
+    // Responses API requires vector_store_ids on the tool itself
+    vector_store_ids: [OPENAI_VECTOR_STORE_ID],
   }];
   if (ENABLE_WEB_SEARCH) {
     tools.push({ type: "web_search" });
@@ -149,7 +150,7 @@ function getTools() {
   return tools;
 }
 
-// ---------- Build Responses request ----------
+// ---------- Build Responses request (NO tool_choice) ----------
 function buildResponsesRequest(userMessage, sysInstructions, extra = {}) {
   const groundedSys = withGroundingPolicy(sysInstructions);
   const tools = getTools();
@@ -160,8 +161,7 @@ function buildResponsesRequest(userMessage, sysInstructions, extra = {}) {
       { role: "system", content: groundedSys },
       { role: "user",   content: userMessage }
     ],
-    // Start with file_search. The model may call web_search afterwards only if it's in tools and needed.
-    tool_choice: { type: "tool", name: "file_search" },
+    // Do NOT include tool_choice.* — invalid on /responses in your tenant
     tools,
     text: { format: { type: "text" }, verbosity: "medium" },
     ...extra,
@@ -267,7 +267,7 @@ async function handleStreaming(res, userMessage) {
       } else if (event.startsWith("response.tool_call")) {
         try {
           const d = JSON.parse(raw);
-        const name = d?.name || d?.tool?.name || d?.data?.name || "(unknown)";
+          const name = d?.name || d?.tool?.name || d?.data?.name || "(unknown)";
           console.log("[assistant][SSE][tool_call]", event, name);
         } catch {
           console.log("[assistant][SSE][tool_call]", event);
