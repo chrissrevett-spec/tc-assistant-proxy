@@ -12,34 +12,38 @@
     html:hover::-webkit-scrollbar-thumb, body:hover::-webkit-scrollbar-thumb { background: #b3b3b3; }
 
     html, body { height: 100%; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 0; background: #fff; color: #000; }
-
-    /* Shell */
-    .shell { width: 100%; max-width: 980px; margin: 0 auto; min-height: 100dvh; display: flex; flex-direction: column; }
-    .wrap { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 12px; transition: min-height .2s ease; }
-
-    /* --- Centered "empty state" --- */
-    .wrap.centered {
-      min-height: 100dvh;
-      justify-content: center; /* center content vertically */
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      margin: 0; padding: 0; background: #fff; color: #000;
+      display: flex; flex-direction: column; min-height: 100dvh;
     }
-    .wrap.centered .header { text-align: center; }
-    .wrap.centered #status { display: none; }
-    .wrap.centered .chat { display: none; } /* hide chat until the first response starts */
-    .wrap.centered .inputbar { border-top: none; }
 
-    /* Header */
-    .header h1 { margin: 0 0 6px; font-size: 28px; }
-    .header .sub { margin: 0; font-size: 15px; color: #000; opacity: .9; }
-    #status { font-size: 12px; color: #555; min-height: 18px; }
+    /* Shell constrains width and provides flex column */
+    .shell { width: 100%; max-width: 980px; margin: 0 auto; flex: 1 1 auto; display: flex; flex-direction: column; }
 
-    /* Chat area */
+    /* Header (top) */
+    .wrap { padding: 16px 16px 0; }
+    h1 { margin: 0 0 6px; font-size: 22px; }
+    .sub { margin: 0; font-size: 14px; color: #000; opacity: .9; }
+    #status { font-size: 12px; color: #555; min-height: 18px; margin-top: 6px; }
+
+    /* Chat area container (between header and input) */
+    .chat-wrap {
+      flex: 1 1 auto;           /* fills remaining height only when active */
+      display: flex; flex-direction: column;
+      padding: 12px 16px 0;     /* no bottom pad so input sits snug to bottom */
+      transition: min-height .2s ease;
+    }
+
+    /* Chat panel itself */
     .chat {
+      display: none;            /* hidden on load to avoid initial scroll */
       flex: 1 1 auto;
       border: 1px solid #eee; background: #fff; border-radius: 12px;
       padding: 12px; overflow-y: auto;
       box-shadow: 0 0 0 1px rgba(0,0,0,.03), 0 12px 24px rgba(0,0,0,.06);
     }
+    .chat.active { display: block; }
 
     /* Message bubbles */
     .msg { display: flex; gap: 10px; margin: 10px 0; align-items: flex-start; }
@@ -95,12 +99,16 @@
     .sources { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444; }
     .sources .title { font-weight: 600; margin-bottom: 6px; }
 
-    /* Input bar */
+    /* Input bar pinned to the bottom of the viewport area */
     .inputbar {
-      position: sticky; bottom: 0; background: #fff; padding: 10px 0 0; margin-top: 6px;
+      position: sticky; bottom: 0; z-index: 5;
+      background: #fff;
+      padding: 10px 16px 16px;
       border-top: 1px solid #f0f0f0;
     }
     .inputrow { display: flex; gap: 8px; }
+    .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
+
     textarea {
       flex: 1; min-height: 48px; max-height: 160px; resize: vertical;
       padding: 10px; font: inherit; background: #FAFAFA; color: #000;
@@ -112,62 +120,62 @@
     button {
       padding: 10px 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
       background: #FAFAFA; color: #333; transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
+      white-space: nowrap;
     }
     button:hover { background: #f0f0f0; border-color: #ccc; }
     button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
-
-    /* Helper */
-    .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
   </style>
 </head>
 <body>
   <div class="shell">
-    <!-- Add 'centered' class initially; JS will remove it once streaming begins -->
-    <div class="wrap centered" id="wrap">
-      <div class="header">
-        <h1>Talking Care Navigator</h1>
-        <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, case management and more.</p>
-        <div id="status"></div>
-      </div>
+    <!-- Header -->
+    <div class="wrap">
+      <h1>Talking Care Navigator</h1>
+      <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, case management and more.</p>
+      <div id="status"></div>
+    </div>
 
+    <!-- Chat (hidden until first message to avoid initial scroll) -->
+    <div class="chat-wrap">
       <div id="chat" class="chat" aria-live="polite" aria-busy="false"></div>
+    </div>
 
-      <div class="inputbar">
-        <div class="inputrow">
-          <label for="tc-input" class="sr">Message</label>
-          <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
-          <button id="tc-ask-stream" title="Send">✈️ Send</button>
-          <button id="tc-clear" class="secondary" title="Clear chat">Clear</button>
-        </div>
+    <!-- Input at the bottom -->
+    <div class="inputbar">
+      <div class="inputrow">
+        <label for="tc-input" class="sr">Message</label>
+        <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
+        <button id="tc-ask-stream" title="Send">✈️ Send</button>
+        <button id="tc-clear" class="secondary" title="Clear chat">Clear</button>
       </div>
     </div>
   </div>
 
-  <!-- Markdown parser (ESM) -->
+  <!-- Markdown parser (ESM) + DOMPurify -->
   <script type="module">
     import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
-    // DOMPurify for sanitizing HTML (safety)
     const purifyUrl = "https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js";
     await import(purifyUrl);
 
-    // --- UI elements
+    // Elements
     const API_BASE = location.origin.replace(/\/$/, "");
-    const $wrap  = document.getElementById("wrap");
-    const $chat  = document.getElementById("chat");
-    const $in    = document.getElementById("tc-input");
-    const $send  = document.getElementById("tc-ask-stream");
-    const $clear = document.getElementById("tc-clear");
-    const $status= document.getElementById("status");
+    const $chat   = document.getElementById("chat");
+    const $in     = document.getElementById("tc-input");
+    const $send   = document.getElementById("tc-ask-stream");
+    const $clear  = document.getElementById("tc-clear");
+    const $status = document.getElementById("status");
 
-    // Markdown config
     marked.setOptions({ mangle: false, headerIds: false });
 
-    // Helpers
     function setStatus(t) { $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
     function scrollToBottom() { $chat.scrollTop = $chat.scrollHeight; }
-    function enterActiveMode() { $wrap.classList.remove("centered"); } // reveal chat and normal layout
 
-    // Create a message bubble
+    function activateChat() {
+      if (!$chat.classList.contains("active")) {
+        $chat.classList.add("active");
+      }
+    }
+
     function createMsg(role, headerText, withCopy = false) {
       const msg = document.createElement("div");
       msg.className = `msg ${role}`;
@@ -215,7 +223,6 @@
       return { msg, content, bubble };
     }
 
-    // Render markdown safely
     function renderMarkdown(md, el) {
       const html = marked.parse(md || "");
       const safe = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
@@ -223,7 +230,6 @@
       scrollToBottom();
     }
 
-    // Append Sources (at end, once)
     function appendSources(containerEl, citations) {
       if (!citations || citations.length === 0) return;
       const seenFile = new Set(), seenURL = new Set();
@@ -255,13 +261,11 @@
       scrollToBottom();
     }
 
-    // Stream handling state
     let currentAbort = null;
 
-    // SSE parsing + rendering
     async function askStream(prompt) {
-      // We’re leaving centered mode as soon as the interaction starts
-      enterActiveMode();
+      // Activate chat area on first interaction
+      activateChat();
 
       // Add user bubble
       createMsg("user", "You").content.textContent = prompt;
@@ -274,14 +278,13 @@
       let buffer = "";
       let started = false;
       let firstDeltaSeen = false;
-      let mdAccum = "";                 // markdown accumulator for assistant message
-      const citations = [];             // { kind: "file"|"web", label, id?, url? }
+      let mdAccum = "";
+      const citations = [];
 
       setStatus("Thinking… ⏳");
       const ac = new AbortController();
       currentAbort = ac;
 
-      // Watchdog in case stream never starts (e.g. CORS)
       const watchdog = setTimeout(() => {
         if (!started) {
           aContent.innerHTML = `<span>⚠️ No stream started — check CORS settings on the server.</span>`;
@@ -353,24 +356,21 @@
 
         if (event === "done" || event === "response.completed") {
           setStatus("");
-          // Append Sources once at end
           appendSources(aContent, citations);
           return;
         }
 
-        // Delta events -> accumulate markdown, render live
         if (event.endsWith(".delta")) {
           let d;
           try { d = JSON.parse(raw); } catch { d = null; }
           const deltaText =
-              (d && typeof d.delta === "string") ? d.delta :
-              (d && d.delta && Array.isArray(d.delta.content))
-                ? d.delta.content.map(c => (c.text && (c.type?.includes("output_text"))) ? c.text : "").join("")
-                : (typeof d?.text_delta === "string" ? d.text_delta : "");
+            (d && typeof d.delta === "string") ? d.delta :
+            (d && d.delta && Array.isArray(d.delta.content))
+              ? d.delta.content.map(c => (c.text && (c.type?.includes("output_text"))) ? c.text : "").join("")
+              : (typeof d?.text_delta === "string" ? d.text_delta : "");
 
           if (deltaText) {
             if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); }
-            // Strip inline URLs/footnote markers so only end Sources remain
             const cleaned = sanitizeBodyDelta(deltaText);
             mdAccum += cleaned;
             renderMarkdown(mdAccum, aContent);
@@ -378,7 +378,6 @@
           return;
         }
 
-        // Citations / annotations
         if (event.includes("annotation") || event.includes("citation")) {
           let a;
           try {
@@ -391,7 +390,6 @@
           } else if ((a.type === "web_citation" || a.url) && a.url) {
             citations.push({ kind: "web", url: a.url, label: a.title || a.url });
           }
-          return;
         }
       }
 
@@ -413,13 +411,10 @@
 
     function sanitizeBodyDelta(s) {
       if (!s) return s;
-      // Remove inline markdown links and raw URLs from the body; citations come at the end
-      s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
-      s = s.replace(/https?:\/\/\S+/g, "");
-      // Remove bracketed numeric citations like [1]
-      s = s.replace(/\s?\[\d+\]/g, "");
-      // Remove any trailing inline "Sources:" sections in streamed text
-      s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
+      s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");   // remove inline markdown links
+      s = s.replace(/https?:\/\/\S+/g, "");                          // remove raw URLs
+      s = s.replace(/\s?\[\d+\]/g, "");                              // remove [1] style refs
+      s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");               // remove inline Sources sections
       return s;
     }
 
@@ -447,8 +442,8 @@
       $chat.innerHTML = "";
       $in.value = "";
       setStatus("");
-      // Return to centred empty state after clearing
-      $wrap.classList.add("centered");
+      // hide chat again so first screen shows header + input only
+      $chat.classList.remove("active");
     });
   </script>
 </body>
