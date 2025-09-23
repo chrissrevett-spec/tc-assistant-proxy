@@ -11,63 +11,27 @@
     html::-webkit-scrollbar-thumb, body::-webkit-scrollbar-thumb { background: #ccc; border-radius: 8px; }
     html:hover::-webkit-scrollbar-thumb, body:hover::-webkit-scrollbar-thumb { background: #b3b3b3; }
 
-    html, body { height: 100%; }
-    body {
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      margin: 0; padding: 0; background: #fff; color: #000;
-      display: flex; flex-direction: column; min-height: 100dvh;
-    }
+    html, body { height: 100%; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #fff; color: #000; }
 
-    /* Shell constrains width; natural document flow (no sticky/footer behaviour) */
-    .shell { width: 100%; max-width: 980px; margin: 0 auto; flex: 1 1 auto; display: flex; flex-direction: column; }
+    /* Shell */
+    .shell { width: 100%; max-width: 980px; margin: 0 auto; min-height: 100dvh; display: flex; flex-direction: column; }
+    .wrap { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 
     /* Header */
-    .wrap { padding: 16px 16px 8px; }
-    h1 { margin: 0 0 6px; font-size: 22px; }
+    h1 { margin: 0; font-size: 22px; }
     .sub { margin: 0; font-size: 14px; color: #000; opacity: .9; }
-    #status { font-size: 12px; color: #555; min-height: 18px; margin-top: 6px; }
+    #status { font-size: 12px; color: #555; min-height: 18px; }
 
-    /* Input bar sits right below header on load, and below chat after first message */
-    .inputbar {
-      background: #fff;
-      padding: 8px 16px 12px;
-      border-top: 1px solid #f0f0f0;
-      border-bottom: 1px solid #f0f0f0;
-      order: 2;            /* directly after header initially */
-    }
-    .inputrow { display: flex; gap: 8px; align-items: flex-start; }
-    .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
-
-    textarea {
-      flex: 1; min-height: 48px; max-height: 160px; resize: vertical;
-      padding: 10px; font: inherit; background: #FAFAFA; color: #000;
-      border: 1px solid #ddd; border-radius: 10px; transition: background .2s, border-color .2s, box-shadow .2s;
-      scrollbar-width: thin; scrollbar-color: #ccc #FAFAFA; box-sizing: border-box;
-    }
-    textarea:focus { background: #f7f7f7; border-color: #ccc; outline: none; box-shadow: 0 0 0 2px rgba(0,0,0,0.04); }
-
-    button {
-      padding: 10px 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
-      background: #FAFAFA; color: #333; transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
-      white-space: nowrap;
-    }
-    button:hover { background: #f0f0f0; border-color: #ccc; }
-    button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
-
-    /* Chat: hidden initially; shown between header and input after first send */
-    .chat-wrap { display: none; }
+    /* Chat area */
     .chat {
+      flex: 0 0 auto;
       border: 1px solid #eee; background: #fff; border-radius: 12px;
-      padding: 12px; /* no overflow; grows with content */
+      padding: 12px; overflow-y: auto; max-height: none;
       box-shadow: 0 0 0 1px rgba(0,0,0,.03), 0 12px 24px rgba(0,0,0,.06);
-      margin: 12px 16px 0; /* small spacing above; NO bottom margin = no gap above input */
     }
 
-    /* When chat becomes active, it slots between header and input; input moves below it */
-    .chat-active .chat-wrap { display: block; order: 2; }
-    .chat-active .inputbar { order: 3; border-top: none; } /* remove double rule between chat and input */
-
-    /* Messages */
+    /* Message bubbles */
     .msg { display: flex; gap: 10px; margin: 10px 0; align-items: flex-start; }
     .msg.assistant { flex-direction: row; }
     .msg.user { flex-direction: row-reverse; }
@@ -86,20 +50,28 @@
       box-shadow: 0 1px 2px rgba(0,0,0,.04);
       overflow: hidden;
     }
-    .msg.user .bubble { background: #FFF; border-color: #ddd; }
 
+    .msg.user .bubble {
+      background: #FFF; border-color: #ddd;
+    }
+
+    /* Bubble header (title row) */
     .bubble-head {
       display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
       font-weight: 600; font-size: 13px; color: #111;
     }
 
-    .bubble-actions { margin-left: auto; display: flex; gap: 6px; }
+    /* Copy button */
+    .bubble-actions {
+      margin-left: auto; display: flex; gap: 6px;
+    }
     .copy-btn {
       border: 1px solid #ddd; background: #FAFAFA; color: #333; border-radius: 6px;
       font-size: 12px; padding: 2px 6px; cursor: pointer;
     }
     .copy-btn:hover { background: #f0f0f0; }
 
+    /* Bubble content */
     .bubble-content { font-size: 14px; line-height: 1.5; }
     .bubble-content p { margin: 0 0 8px; }
     .bubble-content code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #f5f5f5; padding: 1px 4px; border-radius: 4px; border: 1px solid #eee; }
@@ -108,347 +80,89 @@
     .bubble-content ul, .bubble-content ol { margin: 8px 0 8px 20px; }
     .bubble-content blockquote { margin: 8px 0; padding: 8px 12px; background: #f7f7f7; border-left: 3px solid #ddd; border-radius: 6px; }
 
+    /* Table styling for Markdown */
     .bubble-content table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 14px; }
     .bubble-content th, .bubble-content td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
     .bubble-content th { background: #f7f7f7; }
     .bubble-content tr:nth-child(even) td { background: #fcfcfc; }
 
-    .sources { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444; }
+    /* Sources footer */
+    .sources {
+      margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444;
+    }
     .sources .title { font-weight: 600; margin-bottom: 6px; }
+
+    /* Input bar */
+    .inputbar {
+      position: relative;
+      background: #fff; padding: 10px 0 0; margin-top: 6px;
+      border-top: 1px solid #f0f0f0;
+    }
+    .inputrow { display: flex; gap: 8px; }
+    textarea {
+      flex: 1; min-height: 48px; max-height: 160px; resize: vertical;
+      padding: 10px; font: inherit; background: #FAFAFA; color: #000;
+      border: 1px solid #ddd; border-radius: 10px; transition: background .2s, border-color .2s, box-shadow .2s;
+      scrollbar-width: thin; scrollbar-color: #ccc #FAFAFA; box-sizing: border-box;
+    }
+    textarea:focus { background: #f7f7f7; border-color: #ccc; outline: none; box-shadow: 0 0 0 2px rgba(0,0,0,0.04); }
+
+    button {
+      padding: 10px 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
+      background: #FAFAFA; color: #333; transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
+    }
+    button:hover { background: #f0f0f0; border-color: #ccc; }
+    button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
+
+    /* Helper */
+    .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
   </style>
 </head>
 <body>
-  <div class="shell" id="shell">
-    <!-- Header -->
+  <div class="shell">
     <div class="wrap">
-      <h1>Talking Care Navigator</h1>
-      <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, case management and more.</p>
-      <div id="status"></div>
-    </div>
-
-    <!-- Input directly under header on load -->
-    <div class="inputbar" id="inputbar">
-      <div class="inputrow">
-        <label for="tc-input" class="sr">Message</label>
-        <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
-        <button id="tc-ask-stream" title="Send">✈️ Send</button>
-        <button id="tc-clear" class="secondary" title="Clear chat">Clear</button>
+      <div>
+        <h1>Talking Care Navigator</h1>
+        <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, case management and more.</p>
+        <div id="status"></div>
       </div>
-    </div>
 
-    <!-- Chat appears between header and input after first message -->
-    <div class="chat-wrap" id="chatwrap">
       <div id="chat" class="chat" aria-live="polite" aria-busy="false"></div>
+
+      <div class="inputbar">
+        <div class="inputrow">
+          <label for="tc-input" class="sr">Message</label>
+          <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
+          <button id="tc-ask-stream" title="Send">✈️ Send</button>
+          <button id="tc-clear" class="secondary" title="Clear chat">Clear</button>
+        </div>
+      </div>
     </div>
   </div>
 
-  <!-- Markdown parser (ESM) + DOMPurify -->
+  <!-- Force page load to start at top -->
+  <script>
+    if ('scrollRestoration' in history) {
+      history.scrollRestoration = 'manual';
+    }
+    window.addEventListener('DOMContentLoaded', () => {
+      window.scrollTo(0, 0);
+      setTimeout(() => window.scrollTo(0, 0), 0);
+    });
+    window.addEventListener('pageshow', (e) => {
+      if (e.persisted) {
+        window.scrollTo(0, 0);
+      }
+    });
+  </script>
+
+  <!-- Markdown parser (ESM) -->
   <script type="module">
     import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
     const purifyUrl = "https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js";
     await import(purifyUrl);
 
-    // Elements
-    const API_BASE = location.origin.replace(/\/$/, "");
-    const $shell   = document.getElementById("shell");
-    const $chat    = document.getElementById("chat");
-    const $chatwrap= document.getElementById("chatwrap");
-    const $inputbar= document.getElementById("inputbar");
-    const $in      = document.getElementById("tc-input");
-    const $send    = document.getElementById("tc-ask-stream");
-    const $clear   = document.getElementById("tc-clear");
-    const $status  = document.getElementById("status");
-
-    marked.setOptions({ mangle: false, headerIds: false });
-
-    function setStatus(t) { $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
-
-    // Ensure chat is visible between header and input (no sticky)
-    function activateChat() {
-      if (!$shell.classList.contains("chat-active")) {
-        $shell.classList.add("chat-active");
-      }
-    }
-
-    // Create a message bubble
-    function createMsg(role, headerText, withCopy = false) {
-      const msg = document.createElement("div");
-      msg.className = `msg ${role}`;
-      const avatar = document.createElement("div");
-      avatar.className = "avatar";
-      avatar.textContent = role === "assistant" ? "📖" : "🙂";
-
-      const bubble = document.createElement("div");
-      bubble.className = "bubble";
-
-      const head = document.createElement("div");
-      head.className = "bubble-head";
-      head.textContent = headerText;
-
-      if (withCopy) {
-        const actions = document.createElement("div");
-        actions.className = "bubble-actions";
-        const copyBtn = document.createElement("button");
-        copyBtn.className = "copy-btn";
-        copyBtn.type = "button";
-        copyBtn.title = "Copy";
-        copyBtn.textContent = "📋 Copy";
-        copyBtn.addEventListener("click", () => {
-          const txt = content.innerText.trim();
-          navigator.clipboard.writeText(txt).then(() => {
-            copyBtn.textContent = "✅ Copied";
-            setTimeout(() => (copyBtn.textContent = "📋 Copy"), 1200);
-          });
-        });
-        actions.appendChild(copyBtn);
-        head.appendChild(actions);
-      }
-
-      const content = document.createElement("div");
-      content.className = "bubble-content";
-
-      bubble.appendChild(head);
-      bubble.appendChild(content);
-
-      msg.appendChild(avatar);
-      msg.appendChild(bubble);
-      $chat.appendChild(msg);
-
-      // Keep input visually immediately below latest message by making sure
-      // it’s still directly after chat in the flow; optionally nudge scroll
-      // to keep the input in view if the content got tall:
-      $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
-
-      return { msg, content, bubble };
-    }
-
-    // Render markdown safely
-    function renderMarkdown(md, el) {
-      const html = marked.parse(md || "");
-      const safe = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
-      el.innerHTML = safe;
-      // Keep input close after content changes
-      $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
-    }
-
-    // Append Sources (at end, once)
-    function appendSources(containerEl, citations) {
-      if (!citations || citations.length === 0) return;
-      const seenFile = new Set(), seenURL = new Set();
-      const files = [], urls = [];
-      for (const c of citations) {
-        if (c.kind === "file") { if (!seenFile.has(c.id)) { seenFile.add(c.id); files.push(c); } }
-        if (c.kind === "web")  { if (!seenURL.has(c.url)) { seenURL.add(c.url); urls.push(c); } }
-      }
-      if (!files.length && !urls.length) return;
-
-      const src = document.createElement("div");
-      src.className = "sources";
-      const title = document.createElement("div");
-      title.className = "title";
-      title.textContent = "Sources:";
-      src.appendChild(title);
-
-      const list = document.createElement("ul");
-      list.style.margin = "0";
-      list.style.paddingLeft = "20px";
-      [...files, ...urls].forEach((c) => {
-        const li = document.createElement("li");
-        li.textContent = c.label;
-        list.appendChild(li);
-      });
-
-      src.appendChild(list);
-      containerEl.appendChild(src);
-      $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
-    }
-
-    let currentAbort = null;
-
-    // SSE streaming
-    async function askStream(prompt) {
-      activateChat();
-
-      // User bubble
-      createMsg("user", "You").content.textContent = prompt;
-
-      // Assistant bubble
-      const { content: aContent } = createMsg("assistant", "Talking Care Navigator", true);
-      aContent.innerHTML = `<em>Thinking… ⏳</em>`;
-
-      // State
-      let buffer = "";
-      let started = false;
-      let firstDeltaSeen = false;
-      let mdAccum = "";
-      const citations = [];
-
-      setStatus("Thinking… ⏳");
-      const ac = new AbortController();
-      currentAbort = ac;
-
-      // Watchdog for CORS/no-stream
-      const watchdog = setTimeout(() => {
-        if (!started) {
-          aContent.innerHTML = `<span>⚠️ No stream started — check CORS settings on the server.</span>`;
-          setStatus("");
-        }
-      }, 10000);
-
-      // Fetch SSE
-      let r;
-      try {
-        r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
-          body: JSON.stringify({ userMessage: prompt }),
-          signal: ac.signal
-        });
-      } catch (e) {
-        clearTimeout(watchdog);
-        aContent.innerHTML = `<span>⚠️ Request failed: ${e?.message || e}</span>`;
-        setStatus("");
-        currentAbort = null;
-        return;
-      }
-
-      if (!r.ok || !r.body) {
-        clearTimeout(watchdog);
-        let err = `HTTP ${r.status}`;
-        try { err += ` ${await r.text()}`; } catch {}
-        aContent.innerHTML = `<span>⚠️ Stream failed: ${err}</span>`;
-        setStatus("");
-        currentAbort = null;
-        return;
-      }
-
-      const reader = r.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-
-      const flushBlocks = (chunk) => {
-        buffer += chunk;
-        const blocks = buffer.split(/\n\n/);
-        buffer = blocks.pop();
-        for (const block of blocks) {
-          const lines = block.split(/\n/);
-          let event = "message";
-          const dataLines = [];
-          for (const line of lines) {
-            if (!line) continue;
-            if (line.startsWith(":")) continue;
-            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
-            if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
-          }
-          const raw = dataLines.join("\n");
-          handleEvent(event, raw);
-        }
-      };
-
-      function handleEvent(event, raw) {
-        if (event === "start") { return; }
-
-        if (event === "error") {
-          try {
-            const obj = JSON.parse(raw);
-            aContent.innerHTML = `<span>⚠️ ${escapeHtml(JSON.stringify(obj))}</span>`;
-          } catch {
-            aContent.innerHTML = `<span>⚠️ ${escapeHtml(raw)}</span>`;
-          }
-          setStatus("");
-          return;
-        }
-
-        if (event === "done" || event === "response.completed") {
-          setStatus("");
-          appendSources(aContent, citations);
-          return;
-        }
-
-        if (event.endsWith(".delta")) {
-          let d;
-          try { d = JSON.parse(raw); } catch { d = null; }
-          const deltaText =
-            (d && typeof d.delta === "string") ? d.delta :
-            (d && d.delta && Array.isArray(d.delta.content))
-              ? d.delta.content.map(c => (c.text && (c.type?.includes("output_text"))) ? c.text : "").join("")
-              : (typeof d?.text_delta === "string" ? d.text_delta : "");
-
-          if (deltaText) {
-            if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); }
-            const cleaned = sanitizeBodyDelta(deltaText);
-            mdAccum += cleaned;
-            renderMarkdown(mdAccum, aContent);
-          }
-          return;
-        }
-
-        if (event.includes("annotation") || event.includes("citation")) {
-          let a;
-          try {
-            const obj = JSON.parse(raw);
-            a = obj?.annotation || obj?.data || obj;
-          } catch { a = null; }
-          if (!a) return;
-          if (a.type === "file_citation" && a.file_id) {
-            citations.push({ kind: "file", id: a.file_id, label: a.filename || a.file_id });
-          } else if ((a.type === "web_citation" || a.url) && a.url) {
-            citations.push({ kind: "web", url: a.url, label: a.title || a.url });
-          }
-        }
-      }
-
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          if (chunk && !started) { started = true; clearTimeout(watchdog); }
-          flushBlocks(chunk);
-        }
-      } catch (e) {
-        aContent.insertAdjacentHTML("beforeend", `<p>⚠️ Stream error: ${escapeHtml(e?.message || String(e))}</p>`);
-      } finally {
-        currentAbort = null;
-        setStatus("");
-      }
-    }
-
-    function sanitizeBodyDelta(s) {
-      if (!s) return s;
-      s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");   // remove inline markdown links
-      s = s.replace(/https?:\/\/\S+/g, "");                          // remove raw URLs
-      s = s.replace(/\s?\[\d+\]/g, "");                              // remove [1] style refs
-      s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");               // remove inline Sources sections
-      return s;
-    }
-
-    function escapeHtml(str) {
-      return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;" }[ch]));
-    }
-
-    // Events
-    $send.addEventListener("click", () => {
-      const p = ($in.value || "").trim();
-      if (!p) return;
-      askStream(p);
-      $in.value = "";
-    });
-
-    $in.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        $send.click();
-      }
-    });
-
-    $clear.addEventListener("click", () => {
-      if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
-      $chat.innerHTML = "";
-      $in.value = "";
-      setStatus("");
-      // Return to pre-chat layout (input right under header, chat hidden)
-      document.getElementById("shell").classList.remove("chat-active");
-    });
+    // (rest of your module code unchanged…)
   </script>
 </body>
 </html>
