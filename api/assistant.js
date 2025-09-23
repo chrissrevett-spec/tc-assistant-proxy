@@ -8,7 +8,8 @@
 // 1) Retrieval-first via file_search against your Vector Store (REQUIRES OPENAI_VECTOR_STORE_ID)
 // 2) Optional web search controlled by OPENAI_ENABLE_WEB_SEARCH ("1" to allow)
 // 3) Strict grounding policy; sources only at the end (no inline links)
-// 4) SSE passthrough with clear error surfacing
+// 4) Rolling conversation history (client-provided), trimmed server-side
+// 5) SSE passthrough with clear error surfacing
 //
 // Required env vars
 //  - OPENAI_API_KEY
@@ -150,17 +151,41 @@ function getTools() {
   return tools;
 }
 
+// ---------- History trimming ----------
+function normalizeHistory(raw) {
+  const out = [];
+  if (!Array.isArray(raw)) return out;
+  for (const m of raw) {
+    if (!m || typeof m.content !== "string") continue;
+    if (m.role !== "user" && m.role !== "assistant") continue;
+    out.push({ role: m.role, content: m.content });
+  }
+  return out;
+}
+function trimHistoryByChars(hist, maxChars = 8000) {
+  let acc = 0;
+  const rev = [];
+  for (let i = hist.length - 1; i >= 0; i--) {
+    const c = hist[i]?.content || "";
+    acc += c.length;
+    rev.push(hist[i]);
+    if (acc >= maxChars) break;
+  }
+  return rev.reverse();
+}
+
 // ---------- Build Responses request (NO tool_choice) ----------
-function buildResponsesRequest(userMessage, sysInstructions, extra = {}) {
+function buildResponsesRequest(historyArr, userMessage, sysInstructions, extra = {}) {
   const groundedSys = withGroundingPolicy(sysInstructions);
   const tools = getTools();
 
+  const input = [{ role: "system", content: groundedSys }];
+  for (const m of historyArr) input.push(m);
+  if (userMessage) input.push({ role: "user", content: userMessage });
+
   return {
     model: OPENAI_MODEL,
-    input: [
-      { role: "system", content: groundedSys },
-      { role: "user",   content: userMessage }
-    ],
+    input,
     // Do NOT include tool_choice.* — invalid on /responses in your tenant
     tools,
     text: { format: { type: "text" }, verbosity: "medium" },
@@ -186,9 +211,9 @@ function extractTextFromResponse(resp) {
 }
 
 // ---------- Non-streaming ----------
-async function handleNonStreaming(userMessage) {
+async function handleNonStreaming(userMessage, history) {
   const sys = await fetchAssistantInstructions();
-  const payload = buildResponsesRequest(userMessage, sys, { stream: false });
+  const payload = buildResponsesRequest(history, userMessage, sys, { stream: false });
   const resp = await oaJson("/responses", "POST", payload);
   const text = extractTextFromResponse(resp);
   const usage = resp?.usage || null;
@@ -196,7 +221,7 @@ async function handleNonStreaming(userMessage) {
 }
 
 // ---------- Streaming (SSE passthrough) ----------
-async function handleStreaming(res, userMessage) {
+async function handleStreaming(res, userMessage, history) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -225,7 +250,7 @@ async function handleStreaming(res, userMessage) {
       "Accept": "text/event-stream",
       "OpenAI-Beta": "assistants=v2",
     },
-    body: JSON.stringify(buildResponsesRequest(userMessage, sys, { stream: true })),
+    body: JSON.stringify(buildResponsesRequest(history, userMessage, sys, { stream: true })),
   });
 
   if (!upstream.ok || !upstream.body) {
@@ -308,6 +333,8 @@ export default async function handler(req, res) {
   try {
     const body = await readBody(req);
     const userMessage = (body.userMessage || "").toString().trim();
+    const clientHistory = normalizeHistory(body.history || []);
+    const trimmedHistory = trimHistoryByChars(clientHistory, 8000); // adjust as needed
     const mode = (req.query.stream || "off").toString(); // "on" | "off"
 
     if (!userMessage) {
@@ -318,9 +345,9 @@ export default async function handler(req, res) {
     }
 
     if (mode === "on") {
-      return await handleStreaming(res, userMessage);
+      return await handleStreaming(res, userMessage, trimmedHistory);
     } else {
-      const out = await handleNonStreaming(userMessage);
+      const out = await handleNonStreaming(userMessage, trimmedHistory);
       return res.status(200).json(out);
     }
   } catch (err) {
