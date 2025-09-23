@@ -16,11 +16,21 @@
 
     /* Shell */
     .shell { width: 100%; max-width: 980px; margin: 0 auto; min-height: 100dvh; display: flex; flex-direction: column; }
-    .wrap { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    .wrap { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 12px; transition: min-height .2s ease; }
+
+    /* --- Centered "empty state" --- */
+    .wrap.centered {
+      min-height: 100dvh;
+      justify-content: center; /* center content vertically */
+    }
+    .wrap.centered .header { text-align: center; }
+    .wrap.centered #status { display: none; }
+    .wrap.centered .chat { display: none; } /* hide chat until the first response starts */
+    .wrap.centered .inputbar { border-top: none; }
 
     /* Header */
-    h1 { margin: 0; font-size: 22px; }
-    .sub { margin: 0; font-size: 14px; color: #000; opacity: .9; }
+    .header h1 { margin: 0 0 6px; font-size: 28px; }
+    .header .sub { margin: 0; font-size: 15px; color: #000; opacity: .9; }
     #status { font-size: 12px; color: #555; min-height: 18px; }
 
     /* Chat area */
@@ -50,10 +60,7 @@
       box-shadow: 0 1px 2px rgba(0,0,0,.04);
       overflow: hidden;
     }
-
-    .msg.user .bubble {
-      background: #FFF; border-color: #ddd;
-    }
+    .msg.user .bubble { background: #FFF; border-color: #ddd; }
 
     /* Bubble header (title row) */
     .bubble-head {
@@ -62,9 +69,7 @@
     }
 
     /* Copy button */
-    .bubble-actions {
-      margin-left: auto; display: flex; gap: 6px;
-    }
+    .bubble-actions { margin-left: auto; display: flex; gap: 6px; }
     .copy-btn {
       border: 1px solid #ddd; background: #FAFAFA; color: #333; border-radius: 6px;
       font-size: 12px; padding: 2px 6px; cursor: pointer;
@@ -87,9 +92,7 @@
     .bubble-content tr:nth-child(even) td { background: #fcfcfc; }
 
     /* Sources footer */
-    .sources {
-      margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444;
-    }
+    .sources { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444; }
     .sources .title { font-weight: 600; margin-bottom: 6px; }
 
     /* Input bar */
@@ -119,8 +122,9 @@
 </head>
 <body>
   <div class="shell">
-    <div class="wrap">
-      <div>
+    <!-- Add 'centered' class initially; JS will remove it once streaming begins -->
+    <div class="wrap centered" id="wrap">
+      <div class="header">
         <h1>Talking Care Navigator</h1>
         <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, case management and more.</p>
         <div id="status"></div>
@@ -148,18 +152,20 @@
 
     // --- UI elements
     const API_BASE = location.origin.replace(/\/$/, "");
-    const $chat = document.getElementById("chat");
-    const $in = document.getElementById("tc-input");
-    const $send = document.getElementById("tc-ask-stream");
+    const $wrap  = document.getElementById("wrap");
+    const $chat  = document.getElementById("chat");
+    const $in    = document.getElementById("tc-input");
+    const $send  = document.getElementById("tc-ask-stream");
     const $clear = document.getElementById("tc-clear");
-    const $status = document.getElementById("status");
+    const $status= document.getElementById("status");
 
-    // Markdown config (no header IDs; HTML allowed but sanitized later)
+    // Markdown config
     marked.setOptions({ mangle: false, headerIds: false });
 
     // Helpers
     function setStatus(t) { $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
     function scrollToBottom() { $chat.scrollTop = $chat.scrollHeight; }
+    function enterActiveMode() { $wrap.classList.remove("centered"); } // reveal chat and normal layout
 
     // Create a message bubble
     function createMsg(role, headerText, withCopy = false) {
@@ -254,6 +260,9 @@
 
     // SSE parsing + rendering
     async function askStream(prompt) {
+      // We’re leaving centered mode as soon as the interaction starts
+      enterActiveMode();
+
       // Add user bubble
       createMsg("user", "You").content.textContent = prompt;
 
@@ -438,6 +447,8 @@
       $chat.innerHTML = "";
       $in.value = "";
       setStatus("");
+      // Return to centred empty state after clearing
+      $wrap.classList.add("centered");
     });
   </script>
 </body>
