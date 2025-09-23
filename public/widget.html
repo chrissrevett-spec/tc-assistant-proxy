@@ -179,6 +179,18 @@
 
     function setStatus(t) { $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
 
+    // ---- Conversation history (client side) ----
+    const history = (() => {
+      try { return JSON.parse(sessionStorage.getItem("tc_history") || "[]"); }
+      catch { return []; }
+    })();
+    function saveHistory() {
+      try { sessionStorage.setItem("tc_history", JSON.stringify(history)); } catch {}
+    }
+    function clearHistory() {
+      history.length = 0; saveHistory();
+    }
+
     // Ensure chat is visible between header and input (no sticky)
     function activateChat() {
       if (!$shell.classList.contains("chat-active")) {
@@ -283,6 +295,10 @@
     async function askStream(prompt) {
       activateChat();
 
+      // Push latest user turn to local history before request
+      history.push({ role: "user", content: prompt });
+      saveHistory();
+
       // User bubble
       createMsg("user", "You").content.textContent = prompt;
 
@@ -309,13 +325,13 @@
         }
       }, 10000);
 
-      // Fetch SSE
+      // Fetch SSE with rolling history
       let r;
       try {
         r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
-          body: JSON.stringify({ userMessage: prompt }),
+          body: JSON.stringify({ userMessage: prompt, history }),
           signal: ac.signal
         });
       } catch (e) {
@@ -375,6 +391,13 @@
         if (event === "done" || event === "response.completed") {
           setStatus("");
           appendSources(aContent, citations);
+
+          // Save assistant turn to local history (strip any "Sources:" block)
+          const finalText = stripInlineSources(mdAccum).trim();
+          if (finalText) {
+            history.push({ role: "assistant", content: finalText });
+            saveHistory();
+          }
           return;
         }
 
@@ -416,7 +439,7 @@
           const { value, done } = await reader.read();
           if (done) break;
           const chunk = decoder.decode(value, { stream: true });
-        if (chunk && !started) { started = true; clearTimeout(watchdog); }
+          if (chunk && !started) { started = true; clearTimeout(watchdog); }
           flushBlocks(chunk);
         }
       } catch (e) {
@@ -434,6 +457,10 @@
       s = s.replace(/\s?\[\d+\]/g, "");                              // remove [1] style refs
       s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");               // remove inline Sources sections
       return s;
+    }
+    function stripInlineSources(s) {
+      if (!s) return s;
+      return s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
     }
 
     function escapeHtml(str) {
@@ -460,6 +487,7 @@
       $chat.innerHTML = "";
       $in.value = "";
       setStatus("");
+      clearHistory();
       // Return to pre-chat layout (input right under header, chat hidden)
       document.getElementById("shell").classList.remove("chat-active");
     });
