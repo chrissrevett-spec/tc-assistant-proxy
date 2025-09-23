@@ -312,6 +312,8 @@
       let firstDeltaSeen = false;
       let mdAccum = "";
       const citations = [];
+      let sourcesAppended = false;      // NEW: guard Sources footer
+      let assistantTurnSaved = false;   // NEW: guard history save
 
       setStatus("Thinking… ⏳");
       const ac = new AbortController();
@@ -390,13 +392,21 @@
 
         if (event === "done" || event === "response.completed") {
           setStatus("");
-          appendSources(aContent, citations);
 
-          // Save assistant turn to local history (strip any "Sources:" block)
-          const finalText = stripInlineSources(mdAccum).trim();
-          if (finalText) {
-            history.push({ role: "assistant", content: finalText });
-            saveHistory();
+          // Append Sources once
+          if (!sourcesAppended) {
+            appendSources(aContent, citations);
+            sourcesAppended = true;
+          }
+
+          // Save assistant turn to local history once (strip any inline Sources)
+          if (!assistantTurnSaved) {
+            const finalText = stripInlineSources(mdAccum).trim();
+            if (finalText) {
+              history.push({ role: "assistant", content: finalText });
+              saveHistory();
+            }
+            assistantTurnSaved = true;
           }
           return;
         }
