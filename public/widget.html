@@ -22,28 +22,63 @@
     .shell { width: 100%; max-width: 980px; margin: 0 auto; flex: 1 1 auto; display: flex; flex-direction: column; }
 
     /* Header (top) */
-    .wrap { padding: 16px 16px 0; }
+    .wrap { padding: 16px 16px 8px; }
     h1 { margin: 0 0 6px; font-size: 22px; }
     .sub { margin: 0; font-size: 14px; color: #000; opacity: .9; }
     #status { font-size: 12px; color: #555; min-height: 18px; margin-top: 6px; }
 
-    /* Chat area container (between header and input) */
-    .chat-wrap {
-      flex: 1 1 auto;           /* fills remaining height only when active */
-      display: flex; flex-direction: column;
-      padding: 12px 16px 0;     /* no bottom pad so input sits snug to bottom */
-      transition: min-height .2s ease;
+    /* Input bar (sits directly under header on load) */
+    .inputbar {
+      position: static; /* not sticky on initial load */
+      background: #fff;
+      padding: 8px 16px 12px;
+      border-top: 1px solid #f0f0f0;
+      border-bottom: 1px solid #f0f0f0;
+      order: 2;
     }
+    .inputrow { display: flex; gap: 8px; align-items: flex-start; }
+    .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
 
-    /* Chat panel itself */
+    textarea {
+      flex: 1; min-height: 48px; max-height: 160px; resize: vertical;
+      padding: 10px; font: inherit; background: #FAFAFA; color: #000;
+      border: 1px solid #ddd; border-radius: 10px; transition: background .2s, border-color .2s, box-shadow .2s;
+      scrollbar-width: thin; scrollbar-color: #ccc #FAFAFA; box-sizing: border-box;
+    }
+    textarea:focus { background: #f7f7f7; border-color: #ccc; outline: none; box-shadow: 0 0 0 2px rgba(0,0,0,0.04); }
+
+    button {
+      padding: 10px 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
+      background: #FAFAFA; color: #333; transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
+      white-space: nowrap;
+    }
+    button:hover { background: #f0f0f0; border-color: #ccc; }
+    button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
+
+    /* Chat area (hidden until first send to avoid initial gap) */
+    .chat-wrap { display: none; }
     .chat {
-      display: none;            /* hidden on load to avoid initial scroll */
       flex: 1 1 auto;
       border: 1px solid #eee; background: #fff; border-radius: 12px;
       padding: 12px; overflow-y: auto;
       box-shadow: 0 0 0 1px rgba(0,0,0,.03), 0 12px 24px rgba(0,0,0,.06);
+      min-height: 240px;
     }
-    .chat.active { display: block; }
+
+    /* When chat is active, show it between header and input; make input sticky at bottom */
+    .chat-active .chat-wrap {
+      display: flex; flex-direction: column;
+      padding: 12px 16px 0; /* visual spacing above chat */
+      order: 3;
+      flex: 1 1 auto;
+    }
+    .chat-active .inputbar {
+      position: sticky; bottom: 0; z-index: 5;
+      padding: 10px 16px 16px;
+      border-top: 1px solid #f0f0f0;
+      border-bottom: none;
+      order: 4;
+    }
 
     /* Message bubbles */
     .msg { display: flex; gap: 10px; margin: 10px 0; align-items: flex-start; }
@@ -98,36 +133,10 @@
     /* Sources footer */
     .sources { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444; }
     .sources .title { font-weight: 600; margin-bottom: 6px; }
-
-    /* Input bar pinned to the bottom of the viewport area */
-    .inputbar {
-      position: sticky; bottom: 0; z-index: 5;
-      background: #fff;
-      padding: 10px 16px 16px;
-      border-top: 1px solid #f0f0f0;
-    }
-    .inputrow { display: flex; gap: 8px; }
-    .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
-
-    textarea {
-      flex: 1; min-height: 48px; max-height: 160px; resize: vertical;
-      padding: 10px; font: inherit; background: #FAFAFA; color: #000;
-      border: 1px solid #ddd; border-radius: 10px; transition: background .2s, border-color .2s, box-shadow .2s;
-      scrollbar-width: thin; scrollbar-color: #ccc #FAFAFA; box-sizing: border-box;
-    }
-    textarea:focus { background: #f7f7f7; border-color: #ccc; outline: none; box-shadow: 0 0 0 2px rgba(0,0,0,0.04); }
-
-    button {
-      padding: 10px 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
-      background: #FAFAFA; color: #333; transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
-      white-space: nowrap;
-    }
-    button:hover { background: #f0f0f0; border-color: #ccc; }
-    button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
   </style>
 </head>
 <body>
-  <div class="shell">
+  <div class="shell" id="shell">
     <!-- Header -->
     <div class="wrap">
       <h1>Talking Care Navigator</h1>
@@ -135,19 +144,19 @@
       <div id="status"></div>
     </div>
 
-    <!-- Chat (hidden until first message to avoid initial scroll) -->
-    <div class="chat-wrap">
-      <div id="chat" class="chat" aria-live="polite" aria-busy="false"></div>
-    </div>
-
-    <!-- Input at the bottom -->
-    <div class="inputbar">
+    <!-- Input directly under header on first load -->
+    <div class="inputbar" id="inputbar">
       <div class="inputrow">
         <label for="tc-input" class="sr">Message</label>
         <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
         <button id="tc-ask-stream" title="Send">✈️ Send</button>
         <button id="tc-clear" class="secondary" title="Clear chat">Clear</button>
       </div>
+    </div>
+
+    <!-- Chat appears between header and input after first send -->
+    <div class="chat-wrap" id="chatwrap">
+      <div id="chat" class="chat" aria-live="polite" aria-busy="false"></div>
     </div>
   </div>
 
@@ -159,7 +168,9 @@
 
     // Elements
     const API_BASE = location.origin.replace(/\/$/, "");
+    const $shell  = document.getElementById("shell");
     const $chat   = document.getElementById("chat");
+    const $chatwrap = document.getElementById("chatwrap");
     const $in     = document.getElementById("tc-input");
     const $send   = document.getElementById("tc-ask-stream");
     const $clear  = document.getElementById("tc-clear");
@@ -170,9 +181,11 @@
     function setStatus(t) { $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
     function scrollToBottom() { $chat.scrollTop = $chat.scrollHeight; }
 
-    function activateChat() {
-      if (!$chat.classList.contains("active")) {
-        $chat.classList.add("active");
+    function ensureChatActive() {
+      if (!$shell.classList.contains("chat-active")) {
+        $shell.classList.add("chat-active");
+        // Move chat-wrap visually between header and input via CSS (orders), and show it
+        // (display toggled by .chat-active styles)
       }
     }
 
@@ -265,7 +278,7 @@
 
     async function askStream(prompt) {
       // Activate chat area on first interaction
-      activateChat();
+      ensureChatActive();
 
       // Add user bubble
       createMsg("user", "You").content.textContent = prompt;
@@ -442,8 +455,8 @@
       $chat.innerHTML = "";
       $in.value = "";
       setStatus("");
-      // hide chat again so first screen shows header + input only
-      $chat.classList.remove("active");
+      // Return to pre-chat layout
+      document.getElementById("shell").classList.remove("chat-active");
     });
   </script>
 </body>
