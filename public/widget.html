@@ -12,116 +12,270 @@
     html:hover::-webkit-scrollbar-thumb, body:hover::-webkit-scrollbar-thumb { background: #b3b3b3; }
 
     html, body { height: 100%; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 0; background: #fff; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 0; background: #fff; color: #000; }
 
-    .shell { width: 100%; max-width: none; min-height: 100dvh; margin: 0; border-radius: 16px; background: #fff;
-      box-shadow: 0 0 0 1px rgba(0,0,0,.06), 0 12px 24px rgba(0,0,0,.06), 0 0 0 20px #F5F5F5; box-sizing: border-box; display: flex; flex-direction: column; }
-    .wrap { border-radius: 16px; padding: 16px; background: #fff; flex: 1; display: flex; flex-direction: column; }
+    /* Shell */
+    .shell { width: 100%; max-width: 980px; margin: 0 auto; min-height: 100dvh; display: flex; flex-direction: column; }
+    .wrap { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 
-    h1 { margin: 0 0 4px; font-size: 22px; color: #000; }
-    .sub { margin: 0 0 12px; font-size: 14px; color: #000; }
-    #status { font-size: 12px; opacity: .8; margin-bottom: 8px; }
+    /* Header */
+    h1 { margin: 0; font-size: 22px; }
+    .sub { margin: 0; font-size: 14px; color: #000; opacity: .9; }
+    #status { font-size: 12px; color: #555; min-height: 18px; }
 
-    .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
-    .row > textarea { flex: 1 1 420px; }
-    .row > .btns { display:flex; flex-direction:column; gap:8px; }
+    /* Chat area */
+    .chat {
+      flex: 1 1 auto;
+      border: 1px solid #eee; background: #fff; border-radius: 12px;
+      padding: 12px; overflow-y: auto;
+      box-shadow: 0 0 0 1px rgba(0,0,0,.03), 0 12px 24px rgba(0,0,0,.06);
+    }
 
+    /* Message bubbles */
+    .msg { display: flex; gap: 10px; margin: 10px 0; align-items: flex-start; }
+    .msg.assistant { flex-direction: row; }
+    .msg.user { flex-direction: row-reverse; }
+
+    .avatar {
+      flex: 0 0 32px; height: 32px; width: 32px; border-radius: 50%;
+      display: grid; place-items: center; background: #FAFAFA; border: 1px solid #eee;
+      font-size: 18px; line-height: 1;
+    }
+
+    .bubble {
+      max-width: 80%;
+      background: #FAFAFA; color: #000;
+      border: 1px solid #eee; border-radius: 14px;
+      padding: 10px 12px; position: relative;
+      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+      overflow: hidden;
+    }
+
+    .msg.user .bubble {
+      background: #FFF; border-color: #ddd;
+    }
+
+    /* Bubble header (title row) */
+    .bubble-head {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+      font-weight: 600; font-size: 13px; color: #111;
+    }
+
+    /* Copy button */
+    .bubble-actions {
+      margin-left: auto; display: flex; gap: 6px;
+    }
+    .copy-btn {
+      border: 1px solid #ddd; background: #FAFAFA; color: #333; border-radius: 6px;
+      font-size: 12px; padding: 2px 6px; cursor: pointer;
+    }
+    .copy-btn:hover { background: #f0f0f0; }
+
+    /* Bubble content */
+    .bubble-content { font-size: 14px; line-height: 1.5; }
+    .bubble-content p { margin: 0 0 8px; }
+    .bubble-content code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #f5f5f5; padding: 1px 4px; border-radius: 4px; border: 1px solid #eee; }
+    .bubble-content pre { background: #f5f5f5; padding: 8px; border-radius: 8px; overflow-x: auto; border: 1px solid #eee; }
+    .bubble-content h1, .bubble-content h2, .bubble-content h3 { margin: 12px 0 6px; }
+    .bubble-content ul, .bubble-content ol { margin: 8px 0 8px 20px; }
+    .bubble-content blockquote { margin: 8px 0; padding: 8px 12px; background: #f7f7f7; border-left: 3px solid #ddd; border-radius: 6px; }
+
+    /* Table styling for Markdown */
+    .bubble-content table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 14px; }
+    .bubble-content th, .bubble-content td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
+    .bubble-content th { background: #f7f7f7; }
+    .bubble-content tr:nth-child(even) td { background: #fcfcfc; }
+
+    /* Sources footer */
+    .sources {
+      margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444;
+    }
+    .sources .title { font-weight: 600; margin-bottom: 6px; }
+
+    /* Input bar */
+    .inputbar {
+      position: sticky; bottom: 0; background: #fff; padding: 10px 0 0; margin-top: 6px;
+      border-top: 1px solid #f0f0f0;
+    }
+    .inputrow { display: flex; gap: 8px; }
     textarea {
-      min-height: 112px; padding: 10px; font: inherit; background: #FAFAFA; color: #000;
-      border: 1px solid #ddd; border-radius: 8px; transition: background .2s, border-color .2s, box-shadow .2s;
+      flex: 1; min-height: 48px; max-height: 160px; resize: vertical;
+      padding: 10px; font: inherit; background: #FAFAFA; color: #000;
+      border: 1px solid #ddd; border-radius: 10px; transition: background .2s, border-color .2s, box-shadow .2s;
       scrollbar-width: thin; scrollbar-color: #ccc #FAFAFA; box-sizing: border-box;
     }
-    textarea::placeholder { color: #777; }
-    textarea:hover { background: #f7f7f7; border-color: #ccc; }
     textarea:focus { background: #f7f7f7; border-color: #ccc; outline: none; box-shadow: 0 0 0 2px rgba(0,0,0,0.04); }
 
     button {
-      padding: 10px 14px; cursor: pointer; border-radius: 8px; border: 1px solid #ddd;
+      padding: 10px 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
       background: #FAFAFA; color: #333; transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
     }
     button:hover { background: #f0f0f0; border-color: #ccc; }
-    button:active { background: #e9e9e9; border-color: #c9c9c9; box-shadow: inset 0 1px 2px rgba(0,0,0,0.06); }
     button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
 
-    #out {
-      position: relative; white-space: pre-wrap; border: 1px solid #FAFAFA; border-radius: 8px;
-      padding: 12px; min-height: 160px; background: #FAFAFA; color: #000; overflow-y: auto;
-      transition: background .2s, border-color .2s, box-shadow .2s; scrollbar-width: thin; scrollbar-color: #ccc #FAFAFA;
-      box-sizing: border-box; flex: 1 1 auto;
-    }
-    #out:hover { background: #f7f7f7; border-color: #ccc; }
-    #out:empty::before { content: "I'll respond to your question here"; color: #777; }
-
-    #out::-webkit-scrollbar, textarea::-webkit-scrollbar { width: 10px; }
-    #out::-webkit-scrollbar-track, textarea::-webkit-scrollbar-track { background: #FAFAFA; border-radius: 8px; }
-    #out::-webkit-scrollbar-thumb, textarea::-webkit-scrollbar-thumb { background: #ccc; border-radius: 8px; }
-    #out:hover::-webkit-scrollbar-thumb, textarea:hover::-webkit-scrollbar-thumb { background: #b3b3b3; }
-
-    #log { display: none; }
+    /* Helper */
+    .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
   </style>
 </head>
 <body>
   <div class="shell">
     <div class="wrap">
-      <h1>Talking Care Navigator</h1>
-      <p class="sub">
-        Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, case management and more.
-      </p>
-
-      <div id="status"></div>
-
-      <div class="row">
-        <textarea id="tc-input" placeholder="How can I help?"></textarea>
-        <div class="btns">
-          <button id="tc-ask-stream">Submit</button>
-          <button id="tc-clear" class="secondary">Clear chat</button>
-        </div>
+      <div>
+        <h1>Talking Care Navigator</h1>
+        <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, case management and more.</p>
+        <div id="status"></div>
       </div>
 
-      <div id="out"></div>
-      <div id="log"></div>
+      <div id="chat" class="chat" aria-live="polite" aria-busy="false"></div>
+
+      <div class="inputbar">
+        <div class="inputrow">
+          <label for="tc-input" class="sr">Message</label>
+          <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
+          <button id="tc-ask-stream" title="Send">✈️ Send</button>
+          <button id="tc-clear" class="secondary" title="Clear chat">Clear</button>
+        </div>
+      </div>
     </div>
   </div>
 
-  <script>
-  document.addEventListener("DOMContentLoaded", () => {
+  <!-- Markdown parser (ESM) -->
+  <script type="module">
+    import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
+    // DOMPurify for sanitizing HTML (safety)
+    const purifyUrl = "https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js";
+    await import(purifyUrl);
+
+    // --- UI elements
     const API_BASE = location.origin.replace(/\/$/, "");
-    const $in   = document.getElementById("tc-input");
-    const $out  = document.getElementById("out");
-    const $stat = document.getElementById("status");
-    const $btnS = document.getElementById("tc-ask-stream");
-    const $btnC = document.getElementById("tc-clear");
-    const $log  = document.getElementById("log");
+    const $chat = document.getElementById("chat");
+    const $in = document.getElementById("tc-input");
+    const $send = document.getElementById("tc-ask-stream");
+    const $clear = document.getElementById("tc-clear");
+    const $status = document.getElementById("status");
 
-    function log(...a){ $log.textContent += a.map(v => typeof v === "string" ? v : JSON.stringify(v)).join(" ") + "\n"; }
-    function setStatus(t){ $stat.textContent = t || ""; }
-    function append(t){ $out.textContent += t; $out.scrollTop = $out.scrollHeight; }
-    function nl(){ append("\n"); }
-    function clearOut(){ $out.textContent = ""; }
+    // Markdown config (no header IDs; HTML allowed but sanitized later)
+    marked.setOptions({ mangle: false, headerIds: false });
 
-    log(`✅ widget ready. API_BASE = ${API_BASE}`);
+    // Helpers
+    function setStatus(t) { $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
+    function scrollToBottom() { $chat.scrollTop = $chat.scrollHeight; }
 
-    function getPrompt() {
-      const p = ($in.value || "").trim();
-      return p || null;
+    // Create a message bubble
+    function createMsg(role, headerText, withCopy = false) {
+      const msg = document.createElement("div");
+      msg.className = `msg ${role}`;
+      const avatar = document.createElement("div");
+      avatar.className = "avatar";
+      avatar.textContent = role === "assistant" ? "📖" : "🙂";
+
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+
+      const head = document.createElement("div");
+      head.className = "bubble-head";
+      head.textContent = headerText;
+
+      if (withCopy) {
+        const actions = document.createElement("div");
+        actions.className = "bubble-actions";
+        const copyBtn = document.createElement("button");
+        copyBtn.className = "copy-btn";
+        copyBtn.type = "button";
+        copyBtn.title = "Copy";
+        copyBtn.textContent = "📋 Copy";
+        copyBtn.addEventListener("click", () => {
+          const txt = content.innerText.trim();
+          navigator.clipboard.writeText(txt).then(() => {
+            copyBtn.textContent = "✅ Copied";
+            setTimeout(() => (copyBtn.textContent = "📋 Copy"), 1200);
+          });
+        });
+        actions.appendChild(copyBtn);
+        head.appendChild(actions);
+      }
+
+      const content = document.createElement("div");
+      content.className = "bubble-content";
+
+      bubble.appendChild(head);
+      bubble.appendChild(content);
+
+      msg.appendChild(avatar);
+      msg.appendChild(bubble);
+      $chat.appendChild(msg);
+      scrollToBottom();
+
+      return { msg, content, bubble };
     }
 
+    // Render markdown safely
+    function renderMarkdown(md, el) {
+      const html = marked.parse(md || "");
+      const safe = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+      el.innerHTML = safe;
+      scrollToBottom();
+    }
+
+    // Append Sources (at end, once)
+    function appendSources(containerEl, citations) {
+      if (!citations || citations.length === 0) return;
+      const seenFile = new Set(), seenURL = new Set();
+      const files = [], urls = [];
+      for (const c of citations) {
+        if (c.kind === "file") { if (!seenFile.has(c.id)) { seenFile.add(c.id); files.push(c); } }
+        if (c.kind === "web")  { if (!seenURL.has(c.url)) { seenURL.add(c.url); urls.push(c); } }
+      }
+      if (!files.length && !urls.length) return;
+
+      const src = document.createElement("div");
+      src.className = "sources";
+      const title = document.createElement("div");
+      title.className = "title";
+      title.textContent = "Sources:";
+      src.appendChild(title);
+
+      const list = document.createElement("ul");
+      list.style.margin = "0";
+      list.style.paddingLeft = "20px";
+      [...files, ...urls].forEach((c) => {
+        const li = document.createElement("li");
+        li.textContent = c.label;
+        list.appendChild(li);
+      });
+
+      src.appendChild(list);
+      containerEl.appendChild(src);
+      scrollToBottom();
+    }
+
+    // Stream handling state
     let currentAbort = null;
 
+    // SSE parsing + rendering
     async function askStream(prompt) {
-      setStatus("Thinking…");
-      clearOut();
-      citations.length = 0;
-      answerBuf = "";
-      firstDeltaSeen = false;
+      // Add user bubble
+      createMsg("user", "You").content.textContent = prompt;
 
+      // Add assistant bubble with “Thinking…” until first delta arrives
+      const { content: aContent } = createMsg("assistant", "Talking Care Navigator", true);
+      aContent.innerHTML = `<em>Thinking… ⏳</em>`;
+
+      // Per-response state
+      let buffer = "";
+      let started = false;
+      let firstDeltaSeen = false;
+      let mdAccum = "";                 // markdown accumulator for assistant message
+      const citations = [];             // { kind: "file"|"web", label, id?, url? }
+
+      setStatus("Thinking… ⏳");
       const ac = new AbortController();
       currentAbort = ac;
 
-      let started = false;
-      let watchdog = setTimeout(() => {
+      // Watchdog in case stream never starts (e.g. CORS)
+      const watchdog = setTimeout(() => {
         if (!started) {
-          append("⚠️ No stream started — likely CORS. Check that your page origin is in CORS_ALLOWLIST on the server.\n");
+          aContent.innerHTML = `<span>⚠️ No stream started — check CORS settings on the server.</span>`;
           setStatus("");
         }
       }, 10000);
@@ -136,26 +290,101 @@
         });
       } catch (e) {
         clearTimeout(watchdog);
+        aContent.innerHTML = `<span>⚠️ Request failed: ${e?.message || e}</span>`;
         setStatus("");
-        append(`⚠️ Request blocked or failed: ${e?.message || e}\n`);
-        log("fetch error", e);
         currentAbort = null;
         return;
       }
 
       if (!r.ok || !r.body) {
         clearTimeout(watchdog);
-        setStatus("");
         let err = `HTTP ${r.status}`;
         try { err += ` ${await r.text()}`; } catch {}
-        append(`⚠️ Stream failed: ${err}\n`);
+        aContent.innerHTML = `<span>⚠️ Stream failed: ${err}</span>`;
+        setStatus("");
         currentAbort = null;
         return;
       }
 
-      const reader  = r.body.getReader();
+      const reader = r.body.getReader();
       const decoder = new TextDecoder("utf-8");
-      buffer = "";
+
+      const flushBlocks = (chunk) => {
+        buffer += chunk;
+        const blocks = buffer.split(/\n\n/);
+        buffer = blocks.pop();
+        for (const block of blocks) {
+          const lines = block.split(/\n/);
+          let event = "message";
+          const dataLines = [];
+          for (const line of lines) {
+            if (!line) continue;
+            if (line.startsWith(":")) continue;
+            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
+            if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
+          }
+          const raw = dataLines.join("\n");
+          handleEvent(event, raw);
+        }
+      };
+
+      function handleEvent(event, raw) {
+        if (event === "start") { return; }
+
+        if (event === "error") {
+          try {
+            const obj = JSON.parse(raw);
+            aContent.innerHTML = `<span>⚠️ ${escapeHtml(JSON.stringify(obj))}</span>`;
+          } catch {
+            aContent.innerHTML = `<span>⚠️ ${escapeHtml(raw)}</span>`;
+          }
+          setStatus("");
+          return;
+        }
+
+        if (event === "done" || event === "response.completed") {
+          setStatus("");
+          // Append Sources once at end
+          appendSources(aContent, citations);
+          return;
+        }
+
+        // Delta events -> accumulate markdown, render live
+        if (event.endsWith(".delta")) {
+          let d;
+          try { d = JSON.parse(raw); } catch { d = null; }
+          const deltaText =
+              (d && typeof d.delta === "string") ? d.delta :
+              (d && d.delta && Array.isArray(d.delta.content))
+                ? d.delta.content.map(c => (c.text && (c.type?.includes("output_text"))) ? c.text : "").join("")
+                : (typeof d?.text_delta === "string" ? d.text_delta : "");
+
+          if (deltaText) {
+            if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); }
+            // Strip inline URLs/footnote markers so only end Sources remain
+            const cleaned = sanitizeBodyDelta(deltaText);
+            mdAccum += cleaned;
+            renderMarkdown(mdAccum, aContent);
+          }
+          return;
+        }
+
+        // Citations / annotations
+        if (event.includes("annotation") || event.includes("citation")) {
+          let a;
+          try {
+            const obj = JSON.parse(raw);
+            a = obj?.annotation || obj?.data || obj;
+          } catch { a = null; }
+          if (!a) return;
+          if (a.type === "file_citation" && a.file_id) {
+            citations.push({ kind: "file", id: a.file_id, label: a.filename || a.file_id });
+          } else if ((a.type === "web_citation" || a.url) && a.url) {
+            citations.push({ kind: "web", url: a.url, label: a.title || a.url });
+          }
+          return;
+        }
+      }
 
       try {
         while (true) {
@@ -166,132 +395,50 @@
           flushBlocks(chunk);
         }
       } catch (e) {
-        append(`\n⚠️ Stream error: ${e?.message || e}\n`);
+        aContent.insertAdjacentHTML("beforeend", `<p>⚠️ Stream error: ${escapeHtml(e?.message || String(e))}</p>`);
       } finally {
         currentAbort = null;
         setStatus("");
       }
     }
 
-    // ===== SSE parsing state =====
-    let buffer = "";
-    const citations = []; // { kind: "file"|"web", label, id?, url? }
-    let answerBuf = "";
-    let firstDeltaSeen = false;
-
-    function normalizeEvent(eventName, raw) {
-      let obj = null;
-      try { obj = JSON.parse(raw); } catch {}
-      if (eventName === "message" && obj && typeof obj.event === "string") {
-        return { eventName: obj.event, dataObj: obj.data ?? obj };
-      }
-      return { eventName, dataObj: obj ?? { raw } };
-    }
-
-    function extractTextDelta(d) {
-      if (d && typeof d.delta === "string") return d.delta;
-      if (d && d.delta && Array.isArray(d.delta.content)) {
-        let out = "";
-        for (const c of d.delta.content) {
-          if ((c.type && c.type.includes("output_text")) && typeof c.text === "string") out += c.text;
-        }
-        if (out) return out;
-      }
-      if (typeof d?.text_delta === "string") return d.text_delta;
-      return "";
-    }
-
     function sanitizeBodyDelta(s) {
+      if (!s) return s;
+      // Remove inline markdown links and raw URLs from the body; citations come at the end
       s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
       s = s.replace(/https?:\/\/\S+/g, "");
+      // Remove bracketed numeric citations like [1]
       s = s.replace(/\s?\[\d+\]/g, "");
-      s = s.replace(/\s?\((?:source|Source):\s*[^)]+\)/g, "");
+      // Remove any trailing inline "Sources:" sections in streamed text
       s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
       return s;
     }
 
-    function flushBlocks(chunk) {
-      buffer += chunk;
-      const blocks = buffer.split(/\n\n/);
-      buffer = blocks.pop();
-      for (const block of blocks) {
-        const lines = block.split(/\n/);
-        let event = "message";
-        const dataLines = [];
-        for (const line of lines) {
-          if (!line) continue;
-          if (line.startsWith(":")) continue;
-          if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
-          if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
-        }
-        const raw = dataLines.join("\n");
-        const { eventName, dataObj } = normalizeEvent(event, raw);
-        handleEvent(eventName, dataObj);
-      }
+    function escapeHtml(str) {
+      return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;" }[ch]));
     }
 
-    function handleEvent(event, dataObj) {
-      if (event === "start") { return; }
-      if (event === "error") { setStatus(""); append(`⚠️ ${JSON.stringify(dataObj)}\n`); return; }
-
-      if (event === "done" || event === "response.completed") {
-        setStatus("");
-        const seenFile = new Set();
-        const seenURL  = new Set();
-        const files = [];
-        const urls  = [];
-        for (const c of citations) {
-          if (c.kind === "file") { if (!seenFile.has(c.id)) { seenFile.add(c.id); files.push(c); } }
-          else if (c.kind === "web") { if (!seenURL.has(c.url)) { seenURL.add(c.url); urls.push(c); } }
-        }
-        if (files.length || urls.length) {
-          append("\n\nSources:\n");
-          files.forEach(c => append(`• ${c.label}\n`));
-          urls.forEach(c => append(`• ${c.label}\n`));
-        }
-        return;
-      }
-
-      if (event.endsWith(".delta")) {
-        const deltaText = extractTextDelta(dataObj);
-        if (deltaText) {
-          if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); }
-          const cleaned = sanitizeBodyDelta(deltaText);
-          answerBuf += cleaned;
-          append(cleaned);
-        }
-        return;
-      }
-
-      if (event.includes("annotation") || event.includes("citation")) {
-        const a = dataObj?.annotation || dataObj?.data || dataObj;
-        if (a?.type === "file_citation" && a.file_id) {
-          citations.push({ kind: "file", id: a.file_id, label: a.filename || a.file_id });
-        } else if ((a?.type === "web_citation" || a?.type === "url_citation" || a?.url) && a.url) {
-          citations.push({ kind: "web", url: a.url, label: a.title || a.url });
-        }
-        return;
-      }
-    }
-
-    $btnS.addEventListener("click", async () => {
-      const p = getPrompt(); if (!p) return;
-      await askStream(p);
+    // Events
+    $send.addEventListener("click", () => {
+      const p = ($in.value || "").trim();
+      if (!p) return;
+      askStream(p);
+      $in.value = "";
     });
 
     $in.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        $btnS.click();
+        $send.click();
       }
     });
 
-    $btnC.addEventListener("click", () => {
+    $clear.addEventListener("click", () => {
       if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
-      clearOut(); $in.value = ""; setStatus("");
-      citations.length = 0; answerBuf = ""; firstDeltaSeen = false;
+      $chat.innerHTML = "";
+      $in.value = "";
+      setStatus("");
     });
-  });
   </script>
 </body>
 </html>
