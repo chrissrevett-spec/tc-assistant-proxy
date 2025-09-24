@@ -18,28 +18,25 @@
       display: flex; flex-direction: column; min-height: 100dvh;
     }
 
-    /* Shell constrains width; natural document flow (no sticky/footer behaviour) */
     .shell { width: 100%; max-width: 980px; margin: 0 auto; flex: 1 1 auto; display: flex; flex-direction: column; }
 
-    /* Header */
     .wrap { padding: 16px 16px 8px; }
     h1 { margin: 0 0 6px; font-size: 22px; }
     .sub { margin: 0; font-size: 14px; color: #000; opacity: .9; }
     #status { font-size: 12px; color: #555; min-height: 18px; margin-top: 6px; }
 
-    /* Input bar sits right below header on load, and below chat after first message */
     .inputbar {
       background: #fff;
       padding: 8px 16px 12px;
       border-top: 1px solid #f0f0f0;
       border-bottom: 1px solid #f0f0f0;
-      order: 2;            /* directly after header initially */
+      order: 2;
     }
-    .inputrow { display: flex; gap: 8px; align-items: flex-start; }
+    .inputrow { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
     .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
 
     textarea {
-      flex: 1; min-height: 48px; max-height: 160px; resize: vertical;
+      flex: 1 1 460px; min-height: 48px; max-height: 160px; resize: vertical;
       padding: 10px; font: inherit; background: #FAFAFA; color: #000;
       border: 1px solid #ddd; border-radius: 10px; transition: background .2s, border-color .2s, box-shadow .2s;
       scrollbar-width: thin; scrollbar-color: #ccc #FAFAFA; box-sizing: border-box;
@@ -54,27 +51,26 @@
     button:hover { background: #f0f0f0; border-color: #ccc; }
     button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
 
-    /* Small pill/badge for uploads */
-    .pill {
-      font-size: 12px; padding: 4px 8px; border-radius: 999px;
-      background: #FAFAFA; border: 1px solid #ddd; color: #333;
+    .filebar { display: flex; align-items: center; gap: 8px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: #FAFAFA; border: 1px solid #ddd; border-radius: 999px;
+      padding: 4px 8px; font-size: 12px;
     }
-    .pill button { border: none; background: transparent; cursor: pointer; padding: 0 0 0 6px; }
+    .chip .rm { cursor: pointer; border: none; background: transparent; padding: 0 4px; }
 
-    /* Chat: hidden initially; shown between header and input after first send */
     .chat-wrap { display: none; }
     .chat {
       border: 1px solid #eee; background: #fff; border-radius: 12px;
-      padding: 12px; /* no overflow; grows with content */
+      padding: 12px;
       box-shadow: 0 0 0 1px rgba(0,0,0,.03), 0 12px 24px rgba(0,0,0,.06);
-      margin: 12px 16px 0; /* small spacing above; NO bottom margin = no gap above input */
+      margin: 12px 16px 0;
     }
 
-    /* When chat becomes active, it slots between header and input; input moves below it */
     .chat-active .chat-wrap { display: block; order: 2; }
-    .chat-active .inputbar { order: 3; border-top: none; } /* remove double rule between chat and input */
+    .chat-active .inputbar { order: 3; border-top: none; }
 
-    /* Messages */
     .msg { display: flex; gap: 10px; margin: 10px 0; align-items: flex-start; }
     .msg.assistant { flex-direction: row; }
     .msg.user { flex-direction: row-reverse; }
@@ -126,55 +122,48 @@
 </head>
 <body>
   <div class="shell" id="shell">
-    <!-- Header -->
     <div class="wrap">
       <h1>Talking Care Navigator</h1>
       <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, auditing, policy queries and more. Always consult your organisations' confidentiality policy.</p>
       <div id="status"></div>
     </div>
 
-    <!-- Input directly under header on load -->
     <div class="inputbar" id="inputbar">
       <div class="inputrow">
         <label for="tc-input" class="sr">Message</label>
         <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
-        <button id="tc-attach" class="secondary" title="Attach files">📎 Attach</button>
-        <input id="tc-file" type="file" multiple style="display:none" />
-        <span id="tc-files-pill" class="pill" style="display:none"></span>
+
+        <!-- Attachments UI -->
+        <div class="filebar">
+          <input id="tc-file" type="file" style="display:none" multiple />
+          <button id="tc-attach" type="button" title="Attach files">📎 Attach</button>
+          <div id="tc-chips" class="chips"></div>
+        </div>
+
         <button id="tc-ask-stream" title="Send">✈️ Send</button>
         <button id="tc-clear" class="secondary" title="Clear chat">Clear</button>
       </div>
     </div>
 
-    <!-- Chat appears between header and input after first message -->
     <div class="chat-wrap" id="chatwrap">
       <div id="chat" class="chat" aria-live="polite" aria-busy="false"></div>
     </div>
   </div>
 
-  <!-- Force page load to start at top (Option A snippet) -->
   <script>
-    if ('scrollRestoration' in history) {
-      history.scrollRestoration = 'manual';
-    }
+    if ('scrollRestoration' in history) { history.scrollRestoration = 'manual'; }
     window.addEventListener('DOMContentLoaded', () => {
       window.scrollTo(0, 0);
       setTimeout(() => window.scrollTo(0, 0), 0);
     });
-    window.addEventListener('pageshow', (e) => {
-      if (e.persisted) {
-        window.scrollTo(0, 0);
-      }
-    });
+    window.addEventListener('pageshow', (e) => { if (e.persisted) window.scrollTo(0, 0); });
   </script>
 
-  <!-- Markdown parser (ESM) + DOMPurify -->
   <script type="module">
     import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
     const purifyUrl = "https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js";
     await import(purifyUrl);
 
-    // Elements
     const API_BASE = location.origin.replace(/\/$/, "");
     const $shell   = document.getElementById("shell");
     const $chat    = document.getElementById("chat");
@@ -184,12 +173,11 @@
     const $send    = document.getElementById("tc-ask-stream");
     const $clear   = document.getElementById("tc-clear");
     const $status  = document.getElementById("status");
-    const $attach  = document.getElementById("tc-attach");
-    const $file    = document.getElementById("tc-file");
-    const $pill    = document.getElementById("tc-files-pill");
+    const $fileBtn = document.getElementById("tc-attach");
+    const $fileInp = document.getElementById("tc-file");
+    const $chips   = document.getElementById("tc-chips");
 
     marked.setOptions({ mangle: false, headerIds: false });
-
     function setStatus(t) { $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
 
     // ---- Conversation history (client side) ----
@@ -197,33 +185,39 @@
       try { return JSON.parse(sessionStorage.getItem("tc_history") || "[]"); }
       catch { return []; }
     })();
-    function saveHistory() {
-      try { sessionStorage.setItem("tc_history", JSON.stringify(history)); } catch {}
-    }
-    function clearHistory() {
-      history.length = 0; saveHistory();
-      // also clear session upload store id
-      try { sessionStorage.removeItem("tc_session_vs_id"); } catch {}
-      updatePill();
+    function saveHistory(){ try{ sessionStorage.setItem("tc_history", JSON.stringify(history)); }catch{} }
+    function clearHistory(){ history.length = 0; saveHistory(); }
+
+    // ---- Local selected/uploaded files state ----
+    // items: { name, size, type, status: 'pending'|'uploading'|'ready'|'error', fileId? }
+    const filesState = [];
+
+    function renderChips() {
+      $chips.innerHTML = "";
+      filesState.forEach((f, idx) => {
+        const chip = document.createElement("span");
+        chip.className = "chip";
+        const label = `${f.name} ${f.status === "ready" ? "✅" :
+                                  f.status === "uploading" ? "⏳" :
+                                  f.status === "error" ? "⚠️" : "•"}`;
+        chip.textContent = label;
+        const rm = document.createElement("button");
+        rm.className = "rm";
+        rm.title = "Remove";
+        rm.textContent = "×";
+        rm.addEventListener("click", () => {
+          filesState.splice(idx, 1);
+          renderChips();
+        });
+        chip.appendChild(rm);
+        $chips.appendChild(chip);
+      });
     }
 
-    // Per-session uploaded vector store id
-    function getSessionVSId() {
-      try { return sessionStorage.getItem("tc_session_vs_id") || ""; } catch { return ""; }
-    }
-    function setSessionVSId(id) {
-      try { sessionStorage.setItem("tc_session_vs_id", id || ""); } catch {}
-      updatePill();
-    }
-
-    // Ensure chat is visible between header and input (no sticky)
     function activateChat() {
-      if (!$shell.classList.contains("chat-active")) {
-        $shell.classList.add("chat-active");
-      }
+      if (!$shell.classList.contains("chat-active")) $shell.classList.add("chat-active");
     }
 
-    // Create a message bubble
     function createMsg(role, headerText, withCopy = false) {
       const msg = document.createElement("div");
       msg.className = `msg ${role}`;
@@ -266,23 +260,18 @@
       msg.appendChild(avatar);
       msg.appendChild(bubble);
       $chat.appendChild(msg);
-
-      // Keep input visually immediately below latest message
       $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
 
       return { msg, content, bubble };
     }
 
-    // Render markdown safely
     function renderMarkdown(md, el) {
       const html = marked.parse(md || "");
       const safe = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
       el.innerHTML = safe;
-      // Keep input close after content changes
       $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
     }
 
-    // Append Sources (at end, once)
     function appendSources(containerEl, citations) {
       if (!citations || citations.length === 0) return;
       const seenFile = new Set(), seenURL = new Set();
@@ -314,74 +303,59 @@
       $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
     }
 
-    let currentAbort = null;
+    // --- File attach/upload flow ---
+    $fileBtn.addEventListener("click", () => $fileInp.click());
 
-    // ===== Upload UI (expects /api/upload to exist) =====
-    $attach.addEventListener("click", () => $file.click());
-    $file.addEventListener("change", async () => {
-      const files = Array.from($file.files || []);
-      if (!files.length) return;
-      try {
-        setStatus("Uploading…");
-      const fd = new FormData();
-files.forEach(f => fd.append("files", f));
-const existingVS = getSessionVSId();
-if (existingVS) fd.append("vector_store_id", existingVS);
-const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
+    $fileInp.addEventListener("change", async () => {
+      const fileList = Array.from($fileInp.files || []);
+      if (!fileList.length) return;
 
-        if (!r.ok) {
-          const txt = await r.text().catch(() => "");
-          throw new Error(`Upload failed: ${r.status} ${txt}`);
+      for (const f of fileList) {
+        const entry = { name: f.name, size: f.size, type: f.type, status: "uploading" };
+        filesState.push(entry);
+        renderChips();
+
+        try {
+          const form = new FormData();
+          form.append("file", f, f.name);
+          // optional: you could append a "purpose" field on server; not needed here
+          const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: form });
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const data = await r.json();
+          if (data && data.file && data.file.id) {
+            entry.status = "ready";
+            entry.fileId = data.file.id;
+          } else {
+            entry.status = "error";
+          }
+        } catch (e) {
+          entry.status = "error";
         }
-        const j = await r.json();
-        if (!j?.ok || !j?.temp_vector_store_id) throw new Error("Invalid upload response");
-        setSessionVSId(j.temp_vector_store_id);
-        $file.value = "";
-        setStatus("Files added.");
-      } catch (e) {
-        setStatus("");
-        alert(e?.message || String(e));
-      } finally {
-        setStatus("");
+        renderChips();
       }
+
+      // Clear the input so the same file can be re-selected later if needed
+      $fileInp.value = "";
     });
 
-    function updatePill() {
-      const id = getSessionVSId();
-      if (id) {
-        $pill.style.display = "";
-        $pill.textContent = `📎 Files added`;
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.textContent = "✖";
-        btn.title = "Remove uploaded files (this session)";
-        btn.addEventListener("click", () => setSessionVSId(""));
-        // reset and append
-        $pill.innerHTML = "📎 Files added";
-        $pill.appendChild(btn);
-      } else {
-        $pill.style.display = "none";
-        $pill.textContent = "";
-      }
-    }
-    updatePill();
+    let currentAbort = null;
 
-    // ===== SSE streaming
     async function askStream(prompt) {
       activateChat();
 
-      // Push latest user turn to local history before request
+      // Push user turn (without attachments) to history for context continuity
       history.push({ role: "user", content: prompt });
       saveHistory();
 
-      // User bubble
       createMsg("user", "You").content.textContent = prompt;
 
-      // Assistant bubble
       const { content: aContent } = createMsg("assistant", "Talking Care Navigator", true);
       aContent.innerHTML = `<em>Thinking… ⏳</em>`;
 
-      // State
+      // Gather ready file IDs to send with this turn
+      const fileIds = filesState.filter(f => f.status === "ready" && f.fileId).map(f => f.fileId);
+
+      // Streaming state
       let buffer = "";
       let started = false;
       let firstDeltaSeen = false;
@@ -394,7 +368,6 @@ const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
       const ac = new AbortController();
       currentAbort = ac;
 
-      // Watchdog for CORS/no-stream
       const watchdog = setTimeout(() => {
         if (!started) {
           aContent.innerHTML = `<span>⚠️ No stream started — check CORS settings on the server.</span>`;
@@ -402,17 +375,12 @@ const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
         }
       }, 10000);
 
-      // Fetch SSE with rolling history + optional session vector store id
       let r;
       try {
         r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
-          body: JSON.stringify({
-            userMessage: prompt,
-            history,
-            sessionVectorStoreId: getSessionVSId() || undefined
-          }),
+          body: JSON.stringify({ userMessage: prompt, history, fileIds }),
           signal: ac.signal
         });
       } catch (e) {
@@ -471,18 +439,10 @@ const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
 
         if (event === "done" || event === "response.completed") {
           setStatus("");
-
-          if (!sourcesAppended) {
-            appendSources(aContent, citations);
-            sourcesAppended = true;
-          }
-
+          if (!sourcesAppended) { appendSources(aContent, citations); sourcesAppended = true; }
           if (!assistantTurnSaved) {
             const finalText = stripInlineSources(mdAccum).trim();
-            if (finalText) {
-              history.push({ role: "assistant", content: finalText });
-              saveHistory();
-            }
+            if (finalText) { history.push({ role: "assistant", content: finalText }); saveHistory(); }
             assistantTurnSaved = true;
           }
           return;
@@ -539,43 +499,36 @@ const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
 
     function sanitizeBodyDelta(s) {
       if (!s) return s;
-      s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");   // remove inline markdown links
-      s = s.replace(/https?:\/\/\S+/g, "");                          // remove raw URLs
-      s = s.replace(/\s?\[\d+\]/g, "");                              // remove [1] style refs
-      s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");               // remove inline Sources sections
+      s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
+      s = s.replace(/https?:\/\/\S+/g, "");
+      s = s.replace(/\s?\[\d+\]/g, "");
+      s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
       return s;
     }
     function stripInlineSources(s) {
       if (!s) return s;
       return s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
     }
-
     function escapeHtml(str) {
       return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;" }[ch]));
     }
 
-    // Events
-    $send.addEventListener("click", () => {
+    document.getElementById("tc-ask-stream").addEventListener("click", () => {
       const p = ($in.value || "").trim();
       if (!p) return;
       askStream(p);
       $in.value = "";
     });
-
     $in.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        $send.click();
-      }
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("tc-ask-stream").click(); }
     });
-
-    $clear.addEventListener("click", () => {
+    document.getElementById("tc-clear").addEventListener("click", () => {
       if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
       $chat.innerHTML = "";
       $in.value = "";
       setStatus("");
       clearHistory();
-      // Return to pre-chat layout (input right under header, chat hidden)
+      filesState.length = 0; renderChips();
       document.getElementById("shell").classList.remove("chat-active");
     });
   </script>
