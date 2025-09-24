@@ -32,11 +32,16 @@
       border-bottom: 1px solid #f0f0f0;
       order: 2;
     }
-    .inputrow { display: flex; gap: 8px; align-items: flex-start; }
+
+    /* Composer row — by default single row; wraps under a small-screen breakpoint */
+    .inputrow {
+      display: flex; gap: 8px; align-items: flex-start; flex-wrap: nowrap;
+    }
+
     .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
 
     textarea {
-      flex: 1; min-height: 48px; max-height: 160px; resize: vertical;
+      flex: 1 1 auto; min-height: 48px; max-height: 160px; resize: vertical;
       padding: 10px; font: inherit; background: #FAFAFA; color: #000;
       border: 1px solid #ddd; border-radius: 10px; transition: background .2s, border-color .2s, box-shadow .2s;
       scrollbar-width: thin; scrollbar-color: #ccc #FAFAFA; box-sizing: border-box;
@@ -50,9 +55,17 @@
       background: #FAFAFA; color: #333; font-size: 14px; line-height: 1; letter-spacing: .2px;
       transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
       white-space: nowrap; user-select: none;
+      flex: 0 0 auto;
     }
     .ui-btn:hover { background: #f0f0f0; border-color: #ccc; }
     .ui-btn.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
+
+    /* Small-screen wrapping behaviour: textarea full-width on line 1; buttons wrap to line 2 */
+    @media (max-width: 540px) {
+      .inputrow { flex-wrap: wrap; }
+      .inputrow textarea { flex: 1 1 100%; width: 100%; }
+      .inputrow .ui-btn { margin-top: 8px; }
+    }
 
     /* Upload badge row (to avoid squashing textarea on long names) */
     .attach-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
@@ -140,7 +153,7 @@
   <div class="shell" id="shell">
     <div class="wrap">
       <h1>Talking Care Navigator</h1>
-      <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, auditing, policy queries and more. Always consult your organisations' confidentiality policy. Talking Care Navigator can make mistakes. Check important info.</p>
+      <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, auditing, policy queries and more. Always consult your organisations' confidentiality policy.</p>
       <div id="status"></div>
     </div>
 
@@ -148,12 +161,12 @@
       <div class="inputrow">
         <label for="tc-input" class="sr">Message</label>
         <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
-        <button id="tc-ask-stream" class="ui-btn" title="Send">✈️ Send</button>
-        <button id="tc-clear" class="ui-btn secondary" title="Clear chat">🧽 Clear</button>
+        <button id="tc-ask-stream" class="ui-btn" title="Send" aria-label="Send">✈️ Send</button>
+        <button id="tc-clear" class="ui-btn secondary" title="Clear chat" aria-label="Clear">🧽 Clear</button>
+        <button id="attach-btn" class="ui-btn" title="Attach a file" aria-label="Attach">📎 Attach</button>
       </div>
       <div class="attach-row">
         <input id="file-input" type="file" style="display:none" />
-        <button id="attach-btn" class="ui-btn" title="Attach a file">📎 Attach</button>
         <span id="attach-status" class="attach-status pending" style="display:none;">
           <span class="icon" id="attach-icon">⌛</span>
           <span class="fname" id="attach-name"></span>
@@ -180,8 +193,8 @@
     const purifyUrl = "https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js";
     await import(purifyUrl);
 
-    // ✅ Replace this with your image URL (Squarespace: Design → Custom Files → upload → copy URL)
-    const ASSISTANT_AVATAR_URL = "https://images.squarespace-cdn.com/content/66d7774bf0cbbe646aefb211/264b05cb-b865-404b-9ac9-cc7f77f15ce9/TRANSPARENCY+crop.png?content-type=image%2Fpng"; // <-- change to your logo/icon
+    // Replace with your hosted image if you like
+    const ASSISTANT_AVATAR_URL = "https://www.talkingcare.uk/assets/tcn-avatar.png";
 
     const API_BASE = location.origin.replace(/\/$/, "");
     const $shell   = document.getElementById("shell");
@@ -221,7 +234,7 @@
         const img = document.createElement("img");
         img.src = ASSISTANT_AVATAR_URL;
         img.alt = "TCN";
-        img.onerror = () => { avatar.textContent = "📖"; }; // fallback
+        img.onerror = () => { avatar.textContent = "📖"; };
         avatar.appendChild(img);
       } else {
         avatar.textContent = role === "assistant" ? "📖" : "🙂";
@@ -318,8 +331,7 @@
       const file = $fileInput.files?.[0];
       if (!file) return;
 
-      // Client-side size cap
-      if (file.size > MAX_UPLOAD_BYTES) {
+      if (file.size > 20 * 1024 * 1024) {
         $attachStatus.style.display = "inline-flex";
         $attachStatus.className = "attach-status error";
         $attachIcon.textContent = "⚠️";
@@ -328,7 +340,6 @@
         return;
       }
 
-      // Reset UI state
       $attachStatus.style.display = "inline-flex";
       $attachStatus.className = "attach-status pending";
       $attachIcon.textContent = "⌛";
@@ -339,23 +350,17 @@
         fd.append("file", file);
         const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
         const data = await r.json().catch(() => ({}));
-        if (!r.ok || !data.ok || !data.file_id) {
-          throw new Error(data?.error || "Upload failed");
-        }
+        if (!r.ok || !data.ok || !data.file_id) throw new Error(data?.error || "Upload failed");
 
         pendingUpload = { file_id: data.file_id, filename: file.name };
-
         if (data.processed) {
-          // ✅ processed
           $attachStatus.className = "attach-status ok";
           $attachIcon.textContent = "✅";
         } else {
-          // Accepted but still processing
           $attachStatus.className = "attach-status pending";
           $attachIcon.textContent = "⌛";
           $attachName.textContent = "Processing… try your question in a moment";
         }
-
         $attachName.textContent = (file.name.length > 36 ? file.name.slice(0,33) + "..." : file.name);
       } catch (e) {
         $attachStatus.className = "attach-status error";
@@ -369,15 +374,12 @@
     async function askStream(prompt) {
       activateChat();
 
-      // Persist user turn to local history (before request)
       history.push({ role: "user", content: prompt });
       saveHistory();
 
-      // User bubble
       const userMsg = createMsg("user", "You");
       userMsg.content.textContent = prompt;
 
-      // If a file is attached, show “Using: filename” badge and clear the pending chip in the input row
       let usedFileId = null;
       let uploadTurn = false;
       if (pendingUpload.file_id) {
@@ -388,7 +390,6 @@
         used.innerHTML = `✅ Using: <strong>${(pendingUpload.filename.length > 36 ? pendingUpload.filename.slice(0,33) + "..." : pendingUpload.filename)}</strong>`;
         userMsg.bubble.appendChild(used);
 
-        // Clear the chip & input selection right away
         pendingUpload = { file_id: null, filename: "" };
         $fileInput.value = "";
         $attachStatus.style.display = "none";
@@ -397,11 +398,9 @@
         $attachName.textContent = "";
       }
 
-      // Assistant bubble
       const { content: aContent, bubble: aBubble } = createMsg("assistant", "Talking Care Navigator", true);
       aContent.innerHTML = `<em>Thinking… ⏳</em>`;
 
-      // Upload-turn banner inside assistant bubble
       if (uploadTurn) {
         const banner = document.createElement("div");
         banner.className = "upload-banner";
@@ -409,7 +408,6 @@
         aBubble.appendChild(banner);
       }
 
-      // State
       let buffer = "";
       let started = false;
       let firstDeltaSeen = false;
@@ -429,11 +427,9 @@
         }
       }, 10000);
 
-      // Compose body with rolling history, plus optional upload_file_id
       const body = { userMessage: prompt, history };
       if (usedFileId) body.upload_file_id = usedFileId;
 
-      // Fetch SSE
       let r;
       try {
         r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
@@ -486,7 +482,6 @@
         if (event === "start") return;
 
         if (event === "info") {
-          // Friendly error for ingestion failure (temp vector store creation)
           try {
             const obj = JSON.parse(raw);
             if (obj?.note === "temp_vector_store_failed") {
@@ -605,14 +600,13 @@
     $in.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("tc-ask-stream").click(); }
     });
-    $clear.addEventListener("click", () => {
+    document.getElementById("tc-clear").addEventListener("click", () => {
       if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
       $chat.innerHTML = "";
       $in.value = "";
       setStatus("");
       clearHistory();
       $shell.classList.remove("chat-active");
-      // Clear any pending upload chip
       pendingUpload = { file_id: null, filename: "" };
       $fileInput.value = "";
       $attachStatus.style.display = "none";
