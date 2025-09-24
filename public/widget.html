@@ -1,175 +1,92 @@
-<!-- widget.html -->
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Talking Care Widget</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 0;
-      padding: 0;
-      background: #f8f9fa;
-    }
-    .chat-container {
-      display: flex;
-      flex-direction: column;
-      max-width: 600px;
-      margin: 0 auto;
-      height: 100vh;
-    }
-    .messages {
-      flex: 1;
-      padding: 1rem;
-      overflow-y: auto;
-      background: white;
-    }
-    .message {
-      margin: 0.5rem 0;
-      padding: 0.75rem;
-      border-radius: 8px;
-      line-height: 1.4;
-    }
-    .user {
-      background: #dcf8c6;
-      align-self: flex-end;
-    }
-    .assistant {
-      background: #f1f0f0;
-      align-self: flex-start;
-    }
-    .input-area {
-      display: flex;
-      flex-direction: column;
-      padding: 0.5rem;
-      border-top: 1px solid #ddd;
-      background: #fff;
-    }
-    .file-preview {
-      display: flex;
-      align-items: center;
-      font-size: 0.9rem;
-      color: #333;
-      margin-bottom: 0.3rem;
-    }
-    .file-preview span {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      max-width: 80%;
-      display: inline-block;
-    }
-    .file-preview .tick {
-      color: green;
-      margin-left: 0.5rem;
-    }
-    .file-upload {
-      margin-bottom: 0.3rem;
-    }
-    .input-controls {
-      display: flex;
-      gap: 0.5rem;
-    }
-    .input-controls input[type="text"] {
-      flex: 1;
-      padding: 0.5rem;
-      font-size: 1rem;
-    }
-    .input-controls button {
-      padding: 0.5rem 1rem;
-      font-size: 1rem;
-    }
-  </style>
+  <meta charset="utf-8" />
+  <title>Talking Care Navigator</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="widget-ui.css" />
 </head>
 <body>
-  <div class="chat-container">
-    <div class="messages" id="messages"></div>
-    <div class="input-area">
-      <div class="file-upload">
-        <input type="file" id="fileInput" />
-        <div class="file-preview" id="filePreview" style="display: none">
-          <span id="fileName"></span>
-          <span class="tick" id="fileStatus">✔️</span>
-        </div>
+  <div class="shell" id="shell">
+    <div class="wrap">
+      <h1>Talking Care Navigator</h1>
+      <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, auditing, policy queries and more. Always consult your organisations' confidentiality policy.</p>
+      <div id="status"></div>
+    </div>
+
+    <div class="inputbar" id="inputbar">
+      <div class="inputrow">
+        <label for="tc-input" class="sr">Message</label>
+        <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
+        <button id="tc-ask-stream" title="Send">✈️ Send</button>
+        <button id="tc-clear" class="secondary" title="Clear chat">Clear</button>
       </div>
-      <div class="input-controls">
-        <input type="text" id="userInput" placeholder="Ask something..." />
-        <button onclick="sendMessage()">Send</button>
+      <div class="attach-row">
+        <input id="file-input" type="file" style="display:none" />
+        <button id="attach-btn" class="attach-btn" title="Attach a file">📌 Attach</button>
+        <span id="attach-status" class="attach-status pending" style="display:none;">
+          <span class="icon" id="attach-icon">⌛</span>
+          <span class="fname" id="attach-name"></span>
+        </span>
       </div>
+    </div>
+
+    <div class="chat-wrap" id="chatwrap">
+      <div id="chat" class="chat" aria-live="polite" aria-busy="false"></div>
     </div>
   </div>
 
-  <script>
-    const messagesEl = document.getElementById("messages");
-    const userInput = document.getElementById("userInput");
-    const fileInput = document.getElementById("fileInput");
-    const filePreview = document.getElementById("filePreview");
-    const fileName = document.getElementById("fileName");
-    const fileStatus = document.getElementById("fileStatus");
+  <script type="module">
+    const API_BASE = location.origin.replace(/\/$/, "");
+    const $fileInput    = document.getElementById("file-input");
+    const $attachBtn    = document.getElementById("attach-btn");
+    const $attachStatus = document.getElementById("attach-status");
+    const $attachIcon   = document.getElementById("attach-icon");
+    const $attachName   = document.getElementById("attach-name");
 
-    let uploadedFileId = null;
+    let pendingUpload = { file_id: null, filename: "" };
 
-    fileInput.addEventListener("change", async () => {
-      const file = fileInput.files[0];
+    $attachBtn.addEventListener("click", () => $fileInput.click());
+
+    $fileInput.addEventListener("change", async () => {
+      const file = $fileInput.files?.[0];
       if (!file) return;
+      $attachStatus.style.display = "inline-flex";
+      $attachStatus.className = "attach-status pending";
+      $attachIcon.textContent = "⌛";
+      $attachName.textContent = file.name.length > 36 ? file.name.slice(0, 33) + "..." : file.name;
 
-      filePreview.style.display = "flex";
-      fileName.textContent = file.name.length > 40 ? file.name.slice(0, 40) + "..." : file.name;
-      fileStatus.textContent = "⏳";
-      fileStatus.style.color = "orange";
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
+        if (!r.ok) throw new Error(await r.text());
 
-      const formData = new FormData();
-      formData.append("file", file);
+        const data = await r.json();
+        if (!data.ok || !data.file?.id) throw new Error("Upload failed");
 
-      const r = await fetch("/api/upload", {
-        method: "POST",
-        body: formData,
-      });
-      const data = await r.json();
-      if (data.ok && data.file?.id) {
-        uploadedFileId = data.file.id;
-        fileStatus.textContent = "✔️";
-        fileStatus.style.color = "green";
-      } else {
-        fileStatus.textContent = "❌";
-        fileStatus.style.color = "red";
+        pendingUpload = { file_id: data.file.id, filename: file.name };
+        $attachStatus.className = "attach-status ok";
+        $attachIcon.textContent = "✅";
+        $attachName.textContent = file.name.length > 36 ? file.name.slice(0, 33) + "..." : file.name;
+      } catch (e) {
+        console.error("Upload error", e);
+        $attachStatus.className = "attach-status error";
+        $attachIcon.textContent = "⚠️";
+        $attachName.textContent = "Upload failed";
+        pendingUpload = { file_id: null, filename: "" };
       }
     });
 
-    async function sendMessage() {
-      const text = userInput.value.trim();
-      if (!text) return;
-
-      addMessage(text, "user");
-      userInput.value = "";
-
-      if (uploadedFileId) {
-        addMessage("📎 Attached file: " + fileName.textContent, "user");
-        filePreview.style.display = "none";
-        fileInput.value = "";
-      }
-
-      const r = await fetch("/api/assistant?stream=off", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userMessage: text,
-          upload_file_id: uploadedFileId || undefined,
-        }),
-      });
-      const data = await r.json();
-      addMessage(data.text || "[no response]", "assistant");
-      uploadedFileId = null;
-    }
-
-    function addMessage(text, role) {
-      const div = document.createElement("div");
-      div.className = `message ${role}`;
-      div.textContent = text;
-      messagesEl.appendChild(div);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    }
+    window.getPendingUpload = () => pendingUpload;
+    window.clearPendingUpload = () => {
+      pendingUpload = { file_id: null, filename: "" };
+      $fileInput.value = "";
+      $attachStatus.style.display = "none";
+      $attachStatus.className = "attach-status pending";
+      $attachIcon.textContent = "⌛";
+      $attachName.textContent = "";
+    };
   </script>
 </body>
 </html>
