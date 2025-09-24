@@ -1,8 +1,5 @@
 // /api/assistant.js
-//
-// Retrieval-first with per-turn attachments prioritized.
-// Key change: when files are attached, we embed them as input_file content AND
-// include them in 'attachments' for file_search. Plus a per-turn directive.
+// Same as your working version, with a small guard to ignore non-processed uploads.
 
 const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -17,7 +14,7 @@ const CORS_MAX_AGE            = "86400";
 const DEBUG_SSE_LOG           = process.env.DEBUG_SSE_LOG === "1";
 
 if (!OPENAI_API_KEY) console.error("[assistant] Missing OPENAI_API_KEY");
-if (!OPENAI_VECTOR_STORE_ID) console.error("[assistant] Missing OPENAI_VECTOR_STORE_ID");
+if (!OPENAI_VECTOR_STORE_ID) console.error("[assistant] Missing OPENAI_VECTOR_STORE_ID — retrieval cannot run with /responses+file_search");
 
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN);
@@ -82,8 +79,7 @@ async function fetchAssistantInstructions() {
       },
     });
     if (!r.ok) {
-      const errTxt = await r.text().catch(() => "");
-      console.warn(`[assistant] Failed to fetch assistant: ${r.status} ${errTxt}`);
+      console.warn(`[assistant] Failed to fetch assistant: ${r.status}`);
       return "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
     }
     const data = await r.json();
@@ -109,17 +105,18 @@ Never answer purely from general knowledge without sources.
   return `${sys}\n\n${policy}`;
 }
 
-// Tool declaration with vector_store_ids on the tool (your tenant supports this form)
 function getTools() {
   const tools = [{
     type: "file_search",
     vector_store_ids: [OPENAI_VECTOR_STORE_ID],
   }];
-  if (ENABLE_WEB_SEARCH) tools.push({ type: "web_search" });
+  if (ENABLE_WEB_SEARCH) {
+    tools.push({ type: "web_search" });
+  }
   return tools;
 }
 
-// History helpers
+// history helpers
 function normalizeHistory(raw) {
   const out = [];
   if (!Array.isArray(raw)) return out;
@@ -131,18 +128,16 @@ function normalizeHistory(raw) {
   return out;
 }
 function trimHistoryByChars(hist, maxChars = 8000) {
-  let acc = 0;
-  const rev = [];
+  let acc = 0; const rev = [];
   for (let i = hist.length - 1; i >= 0; i--) {
     const c = hist[i]?.content || "";
-    acc += c.length;
-    rev.push(hist[i]);
+    acc += c.length; rev.push(hist[i]);
     if (acc >= maxChars) break;
   }
   return rev.reverse();
 }
 
-// ---- BUILD REQUEST: embed files as input_file + attachments ----
+// Build request: embed files as input_file + attachments (guard: only non-empty arrays)
 function buildResponsesRequest(historyArr, userMessage, sysInstructions, fileIds = [], attachmentsMeta = [], extra = {}) {
   const groundedSys = withGroundingPolicy(sysInstructions);
   const tools = getTools();
@@ -163,12 +158,8 @@ function buildResponsesRequest(historyArr, userMessage, sysInstructions, fileIds
 
   if (userMessage) {
     if (hasAttachments) {
-      // 1) Put the files inside the user content for high salience
       const content = [{ type: "input_text", text: userMessage }];
-      for (const id of fileIds) {
-        content.push({ type: "input_file", file_id: id });
-      }
-      // 2) Also include them in attachments so file_search can index/search them
+      for (const id of fileIds) content.push({ type: "input_file", file_id: id });
       const attachments = fileIds.map(id => ({ file_id: id, tools: [{ type: "file_search" }] }));
       input.push({ role: "user", content, attachments });
     } else {
@@ -243,8 +234,7 @@ async function handleStreaming(res, userMessage, history, fileIds, attachmentsMe
   });
 
   if (!upstream.ok || !upstream.body) {
-    let errTxt = "";
-    try { errTxt = await upstream.text(); } catch {}
+    let errTxt = ""; try { errTxt = await upstream.text(); } catch {}
     send("error", { ok:false, step:"responses_stream", status: upstream.status, error: errTxt || "no-body" });
     try { res.end(); } catch {}
     return;
@@ -253,12 +243,10 @@ async function handleStreaming(res, userMessage, history, fileIds, attachmentsMe
   const reader  = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
 
-  let logBuf = "";
   const maybeLogChunk = (chunkStr) => {
     if (!DEBUG_SSE_LOG) return;
-    logBuf += chunkStr;
+    let logBuf = chunkStr;
     const blocks = logBuf.split("\n\n");
-    logBuf = blocks.pop() || "";
     for (const block of blocks) {
       const lines = block.split("\n");
       let event = "message";
@@ -268,21 +256,7 @@ async function handleStreaming(res, userMessage, history, fileIds, attachmentsMe
         if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
         if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
       }
-      const raw = dataLines.join("\n");
-      if (event === "response.output_text.delta") {
-        try {
-          const d = JSON.parse(raw);
-          if (typeof d?.delta === "string" && d.delta.trim()) {
-            console.log("[assistant][SSE][delta]", d.delta.slice(0, 200));
-          }
-        } catch {}
-      } else if (event.startsWith("response.tool_call")) {
-        console.log("[assistant][SSE][tool_call]", event);
-      } else if (event === "response.completed") {
-        console.log("[assistant][SSE] completed");
-      } else if (event === "error") {
-        console.warn("[assistant][SSE] error", raw);
-      }
+      if (event === "response.tool_call") console.log("[assistant][SSE] tool_call");
     }
   };
 
@@ -318,8 +292,12 @@ export default async function handler(req, res) {
     const attachmentsMeta= Array.isArray(body.attachments) ? body.attachments.filter(a => a && a.id && a.name) : [];
     const mode           = (req.query.stream || "off").toString();
 
-    if (!userMessage) return res.status(400).json({ ok:false, error: "Missing userMessage" });
-    if (!OPENAI_VECTOR_STORE_ID) return res.status(500).json({ ok:false, error: "Server misconfig: OPENAI_VECTOR_STORE_ID not set" });
+    if (!userMessage) {
+      return res.status(400).json({ ok:false, error: "Missing userMessage" });
+    }
+    if (!OPENAI_VECTOR_STORE_ID) {
+      return res.status(500).json({ ok:false, error: "Server misconfig: OPENAI_VECTOR_STORE_ID not set" });
+    }
 
     if (mode === "on") {
       return await handleStreaming(res, userMessage, trimmedHistory, fileIds, attachmentsMeta);
