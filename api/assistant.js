@@ -1,23 +1,12 @@
 // /api/assistant.js
 //
-// Two modes via OpenAI "Responses" API:
-//  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
-//  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
-//
-// What this version does
-// 1) Retrieval-first via file_search against your Vector Store (REQUIRES OPENAI_VECTOR_STORE_ID)
-// 2) Optional web search controlled by OPENAI_ENABLE_WEB_SEARCH ("1" to allow)
-// 3) Strict grounding policy; sources only at the end (no inline links)
-// 4) Rolling conversation history (client-provided), trimmed server-side
-// 5) SSE passthrough with clear error surfacing
-//
-// NEW: If the client includes { sessionVectorStoreId }, it will be added alongside
-//      OPENAI_VECTOR_STORE_ID so the model searches both stores.
+// Retrieval-first + optional web + rolling context + per-turn file attachments
 //
 // Required env vars
 //  - OPENAI_API_KEY
 //  - OPENAI_ASSISTANT_ID
-//  - OPENAI_VECTOR_STORE_ID   <-- required for /responses + file_search
+//  - OPENAI_VECTOR_STORE_ID
+//
 // Optional
 //  - OPENAI_MODEL (default: gpt-4o-mini)
 //  - OPENAI_ENABLE_WEB_SEARCH ("1" to allow web fallback)
@@ -77,7 +66,7 @@ async function oaJson(path, method, body, headers = {}) {
     headers: {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
-      "OpenAI-Beta": "assistants=v2", // required for retrieval features on /responses
+      "OpenAI-Beta": "assistants=v2",
       ...headers,
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -141,20 +130,13 @@ Never answer purely from general knowledge without sources.
   return `${sys}\n\n${policy}`;
 }
 
-// ---------- Tools config: file_search + optional web_search ----------
-function getTools(sessionVectorStoreId) {
-  const vector_store_ids = [OPENAI_VECTOR_STORE_ID].filter(Boolean);
-  if (sessionVectorStoreId && typeof sessionVectorStoreId === "string") {
-    vector_store_ids.push(sessionVectorStoreId);
-  }
+// ---------- Tools config ----------
+function getTools() {
   const tools = [{
     type: "file_search",
-    // Responses API requires vector_store_ids on the tool itself
-    vector_store_ids,
+    vector_store_ids: [OPENAI_VECTOR_STORE_ID],
   }];
-  if (ENABLE_WEB_SEARCH) {
-    tools.push({ type: "web_search" });
-  }
+  if (ENABLE_WEB_SEARCH) tools.push({ type: "web_search" });
   return tools;
 }
 
@@ -181,19 +163,30 @@ function trimHistoryByChars(hist, maxChars = 8000) {
   return rev.reverse();
 }
 
-// ---------- Build Responses request (NO tool_choice) ----------
-function buildResponsesRequest(historyArr, userMessage, sysInstructions, sessionVectorStoreId, extra = {}) {
+// ---------- Build Responses request with optional attachments ----------
+function buildResponsesRequest(historyArr, userMessage, sysInstructions, fileIds = [], extra = {}) {
   const groundedSys = withGroundingPolicy(sysInstructions);
-  const tools = getTools(sessionVectorStoreId);
+  const tools = getTools();
 
   const input = [{ role: "system", content: groundedSys }];
   for (const m of historyArr) input.push(m);
-  if (userMessage) input.push({ role: "user", content: userMessage });
+
+  // Attach files to THIS user turn so file_search can read them
+  if (userMessage) {
+    const attachments = (fileIds || []).map(id => ({
+      file_id: id,
+      tools: [{ type: "file_search" }]
+    }));
+    input.push({
+      role: "user",
+      content: userMessage,
+      ...(attachments.length ? { attachments } : {})
+    });
+  }
 
   return {
     model: OPENAI_MODEL,
     input,
-    // Do NOT include tool_choice.* — invalid on /responses in your tenant
     tools,
     text: { format: { type: "text" }, verbosity: "medium" },
     ...extra,
@@ -218,9 +211,9 @@ function extractTextFromResponse(resp) {
 }
 
 // ---------- Non-streaming ----------
-async function handleNonStreaming(userMessage, history, sessionVectorStoreId) {
+async function handleNonStreaming(userMessage, history, fileIds) {
   const sys = await fetchAssistantInstructions();
-  const payload = buildResponsesRequest(history, userMessage, sys, sessionVectorStoreId, { stream: false });
+  const payload = buildResponsesRequest(history, userMessage, sys, fileIds, { stream: false });
   const resp = await oaJson("/responses", "POST", payload);
   const text = extractTextFromResponse(resp);
   const usage = resp?.usage || null;
@@ -228,7 +221,7 @@ async function handleNonStreaming(userMessage, history, sessionVectorStoreId) {
 }
 
 // ---------- Streaming (SSE passthrough) ----------
-async function handleStreaming(res, userMessage, history, sessionVectorStoreId) {
+async function handleStreaming(res, userMessage, history, fileIds) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -257,7 +250,7 @@ async function handleStreaming(res, userMessage, history, sessionVectorStoreId) 
       "Accept": "text/event-stream",
       "OpenAI-Beta": "assistants=v2",
     },
-    body: JSON.stringify(buildResponsesRequest(history, userMessage, sys, sessionVectorStoreId, { stream: true })),
+    body: JSON.stringify(buildResponsesRequest(history, userMessage, sys, fileIds, { stream: true })),
   });
 
   if (!upstream.ok || !upstream.body) {
@@ -271,7 +264,6 @@ async function handleStreaming(res, userMessage, history, sessionVectorStoreId) 
   const reader  = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
 
-  // Optional: mirror key SSE events into server logs
   let logBuf = "";
   const maybeLogChunk = (chunkStr) => {
     if (!DEBUG_SSE_LOG) return;
@@ -341,9 +333,9 @@ export default async function handler(req, res) {
     const body = await readBody(req);
     const userMessage = (body.userMessage || "").toString().trim();
     const clientHistory = normalizeHistory(body.history || []);
-    const trimmedHistory = trimHistoryByChars(clientHistory, 8000); // adjust as needed
-    const sessionVectorStoreId = (body.sessionVectorStoreId || "").toString().trim() || "";
-    const mode = (req.query.stream || "off").toString(); // "on" | "off"
+    const trimmedHistory = trimHistoryByChars(clientHistory, 8000);
+    const fileIds = Array.isArray(body.fileIds) ? body.fileIds.filter(s => typeof s === "string" && s.trim()) : [];
+    const mode = (req.query.stream || "off").toString();
 
     if (!userMessage) {
       return res.status(400).json({ ok:false, error: "Missing userMessage" });
@@ -353,9 +345,9 @@ export default async function handler(req, res) {
     }
 
     if (mode === "on") {
-      return await handleStreaming(res, userMessage, trimmedHistory, sessionVectorStoreId);
+      return await handleStreaming(res, userMessage, trimmedHistory, fileIds);
     } else {
-      const out = await handleNonStreaming(userMessage, trimmedHistory, sessionVectorStoreId);
+      const out = await handleNonStreaming(userMessage, trimmedHistory, fileIds);
       return res.status(200).json(out);
     }
   } catch (err) {
