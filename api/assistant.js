@@ -237,3 +237,94 @@ async function handleStreaming(res, userMessage, history, fileIds, attachmentsMe
     },
     body: JSON.stringify(buildResponsesRequest(history, userMessage, sys, fileIds, attachmentsMeta, { stream: true })),
   });
+
+  if (!upstream.ok || !upstream.body) {
+    let errTxt = "";
+    try { errTxt = await upstream.text(); } catch {}
+    send("error", { ok:false, step:"responses_stream", status: upstream.status, error: errTxt || "no-body" });
+    try { res.end(); } catch {}
+    return;
+  }
+
+  const reader  = upstream.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+
+  let logBuf = "";
+  const maybeLogChunk = (chunkStr) => {
+    if (!DEBUG_SSE_LOG) return;
+    logBuf += chunkStr;
+    const blocks = logBuf.split("\n\n");
+    logBuf = blocks.pop() || "";
+    for (const block of blocks) {
+      const lines = block.split("\n");
+      let event = "message";
+      const dataLines = [];
+      for (const line of lines) {
+        if (!line || line.startsWith(":")) continue;
+        if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
+        if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
+      }
+      const raw = dataLines.join("\n");
+      if (event === "response.output_text.delta") {
+        try {
+          const d = JSON.parse(raw);
+          if (typeof d?.delta === "string" && d.delta.trim()) {
+            console.log("[assistant][SSE][delta]", d.delta.slice(0, 200));
+          }
+        } catch {}
+      } else if (event.startsWith("response.tool_call")) {
+        console.log("[assistant][SSE][tool_call]", event);
+      } else if (event === "response.completed") {
+        console.log("[assistant][SSE] completed");
+      } else if (event === "error") {
+        console.warn("[assistant][SSE] error", raw);
+      }
+    }
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const chunkStr = decoder.decode(value, { stream: true });
+      try { res.write(chunkStr); } catch {}
+      maybeLogChunk(chunkStr);
+    }
+  } catch {
+  } finally {
+    send("done", "[DONE]");
+    try { res.end(); } catch {}
+  }
+}
+
+export default async function handler(req, res) {
+  setCors(res);
+  if (req.method === "OPTIONS") return endPreflight(res);
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "POST, OPTIONS");
+    return res.status(405).json({ ok:false, error: "Method Not Allowed" });
+  }
+
+  try {
+    const body = await readBody(req);
+    const userMessage    = (body.userMessage || "").toString().trim();
+    const clientHistory  = normalizeHistory(body.history || []);
+    const trimmedHistory = trimHistoryByChars(clientHistory, 8000);
+    const fileIds        = Array.isArray(body.fileIds) ? body.fileIds.filter(id => typeof id === "string" && id) : [];
+    const attachmentsMeta= Array.isArray(body.attachments) ? body.attachments.filter(a => a && a.id && a.name) : [];
+    const mode           = (req.query.stream || "off").toString();
+
+    if (!userMessage) return res.status(400).json({ ok:false, error: "Missing userMessage" });
+    if (!OPENAI_VECTOR_STORE_ID) return res.status(500).json({ ok:false, error: "Server misconfig: OPENAI_VECTOR_STORE_ID not set" });
+
+    if (mode === "on") {
+      return await handleStreaming(res, userMessage, trimmedHistory, fileIds, attachmentsMeta);
+    } else {
+      const out = await handleNonStreaming(userMessage, trimmedHistory, fileIds, attachmentsMeta);
+      return res.status(200).json(out);
+    }
+  } catch (err) {
+    console.error("assistant handler error:", err);
+    try { return res.status(500).json({ ok:false, error: "Internal Server Error" }); } catch {}
+  }
+}
