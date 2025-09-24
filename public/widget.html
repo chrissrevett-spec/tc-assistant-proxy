@@ -1,554 +1,163 @@
-<!doctype html>
+<!-- widget.html -->
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>Talking Care Navigator</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Talking Care Assistant</title>
   <style>
-    :root { color-scheme: light dark; scrollbar-color: #ccc #FAFAFA; scrollbar-width: thin; }
-    html::-webkit-scrollbar, body::-webkit-scrollbar { width: 10px; }
-    html::-webkit-scrollbar-track, body::-webkit-scrollbar-track { background: #FAFAFA; }
-    html::-webkit-scrollbar-thumb, body::-webkit-scrollbar-thumb { background: #ccc; border-radius: 8px; }
-    html:hover::-webkit-scrollbar-thumb, body:hover::-webkit-scrollbar-thumb { background: #b3b3b3; }
-
-    html, body { height: 100%; }
     body {
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      margin: 0; padding: 0; background: #fff; color: #000;
-      display: flex; flex-direction: column; min-height: 100dvh;
+      font-family: sans-serif;
+      margin: 0;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
     }
-
-    .shell { width: 100%; max-width: 980px; margin: 0 auto; flex: 1 1 auto; display: flex; flex-direction: column; }
-
-    .wrap { padding: 16px 16px 8px; }
-    h1 { margin: 0 0 6px; font-size: 22px; }
-    .sub { margin: 0; font-size: 14px; color: #000; opacity: .9; }
-    #status { font-size: 12px; color: #555; min-height: 18px; margin-top: 6px; }
-
-    .inputbar {
-      background: #fff;
-      padding: 8px 16px 12px;
-      border-top: 1px solid #f0f0f0;
-      border-bottom: 1px solid #f0f0f0;
-      order: 2;
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      margin-bottom: 1rem;
     }
-    .inputrow { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
-    .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
-
-    textarea {
-      flex: 1 1 420px; min-height: 48px; max-height: 160px; resize: vertical;
-      padding: 10px; font: inherit; background: #FAFAFA; color: #000;
-      border: 1px solid #ddd; border-radius: 10px; transition: background .2s, border-color .2s, box-shadow .2s;
-      scrollbar-width: thin; scrollbar-color: #ccc #FAFAFA; box-sizing: border-box;
-    }
-    textarea:focus { background: #f7f7f7; border-color: #ccc; outline: none; box-shadow: 0 0 0 2px rgba(0,0,0,0.04); }
-
-    button {
-      padding: 10px 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
-      background: #FAFAFA; color: #333; transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
-      white-space: nowrap;
-    }
-    button:hover { background: #f0f0f0; border-color: #ccc; }
-    button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
-
-    .attach-wrap { display: flex; gap: 8px; align-items: center; }
-    .chip {
-      display: none; align-items: center; gap: 6px;
-      border: 1px solid #ddd; background: #FAFAFA; color: #333; border-radius: 999px;
-      padding: 6px 10px; font-size: 12px; max-width: 320px;
-    }
-    .chip.show { display: inline-flex; }
-    .chip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
-    .chip.success { border-color: #cde6cd; background: #eef9ee; color: #166316; }
-    .chip.warn { border-color: #f0d7b0; background: #fff6e6; color: #6b4a00; }
-    .chip .remove { margin-left: 4px; background: transparent; border: none; cursor: pointer; font-size: 14px; }
-
-    .chat-wrap { display: none; }
-    .chat {
-      border: 1px solid #eee; background: #fff; border-radius: 12px;
-      padding: 12px; box-shadow: 0 0 0 1px rgba(0,0,0,.03), 0 12px 24px rgba(0,0,0,.06);
-      margin: 12px 16px 0;
-    }
-
-    .chat-active .chat-wrap { display: block; order: 2; }
-    .chat-active .inputbar { order: 3; border-top: none; }
-
-    .msg { display: flex; gap: 10px; margin: 10px 0; align-items: flex-start; }
-    .msg.assistant { flex-direction: row; }
-    .msg.user { flex-direction: row-reverse; }
-
-    .avatar {
-      flex: 0 0 32px; height: 32px; width: 32px; border-radius: 50%;
-      display: grid; place-items: center; background: #FAFAFA; border: 1px solid #eee;
-      font-size: 18px; line-height: 1;
-    }
-
-    .bubble {
+    .message {
+      padding: 0.75rem;
+      margin: 0.5rem 0;
+      border-radius: 0.5rem;
       max-width: 80%;
-      background: #FAFAFA; color: #000;
-      border: 1px solid #eee; border-radius: 14px;
-      padding: 10px 12px; position: relative;
-      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+    }
+    .user { background: #DCF8C6; align-self: flex-end; }
+    .bot { background: #F1F0F0; align-self: flex-start; }
+    .file-name {
+      font-size: 0.8rem;
+      color: #666;
+      margin-top: 0.25rem;
+      word-break: break-all;
+    }
+    #input-area {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    #text-row {
+      display: flex;
+      gap: 0.5rem;
+    }
+    #user-input {
+      flex: 1;
+      padding: 0.5rem;
+    }
+    button {
+      padding: 0.5rem 1rem;
+    }
+    #file-status {
+      font-size: 0.85rem;
+      color: #333;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .tick { color: green; }
+    .hidden { display: none; }
+    .truncate {
+      max-width: 180px;
+      white-space: nowrap;
       overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .msg.user .bubble { background: #FFF; border-color: #ddd; }
-
-    .bubble-head {
-      display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
-      font-weight: 600; font-size: 13px; color: #111;
-    }
-
-    .bubble-actions { margin-left: auto; display: flex; gap: 6px; }
-    .copy-btn {
-      border: 1px solid #ddd; background: #FAFAFA; color: #333; border-radius: 6px;
-      font-size: 12px; padding: 2px 6px; cursor: pointer;
-    }
-    .copy-btn:hover { background: #f0f0f0; }
-
-    .bubble-content { font-size: 14px; line-height: 1.5; }
-    .bubble-content p { margin: 0 0 8px; }
-    .bubble-content code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #f5f5f5; padding: 1px 4px; border-radius: 4px; border: 1px solid #eee; }
-    .bubble-content pre { background: #f5f5f5; padding: 8px; border-radius: 8px; overflow-x: auto; border: 1px solid #eee; }
-    .bubble-content h1, .bubble-content h2, .bubble-content h3 { margin: 12px 0 6px; }
-    .bubble-content ul, .bubble-content ol { margin: 8px 0 8px 20px; }
-    .bubble-content blockquote { margin: 8px 0; padding: 8px 12px; background: #f7f7f7; border-left: 3px solid #ddd; border-radius: 6px; }
-
-    .bubble-content table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 14px; }
-    .bubble-content th, .bubble-content td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
-    .bubble-content th { background: #f7f7f7; }
-    .bubble-content tr:nth-child(even) td { background: #fcfcfc; }
-
-    .sources { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444; }
-    .sources .title { font-weight: 600; margin-bottom: 6px; }
-
-    .subnote { margin-top: 6px; font-size: 12px; color: #555; }
   </style>
 </head>
 <body>
-  <div class="shell" id="shell">
-    <div class="wrap">
-      <h1>Talking Care Navigator</h1>
-      <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, auditing, policy queries and more. Always consult your organisations' confidentiality policy.</p>
-      <div id="status"></div>
-    </div>
+  <div id="chat"></div>
 
-    <div class="inputbar" id="inputbar">
-      <div class="inputrow">
-        <label for="tc-input" class="sr">Message</label>
-        <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
-
-        <div class="attach-wrap">
-          <input id="file-input" type="file" class="sr" />
-          <button id="attach-btn" type="button" title="Attach a file">📎 Attach</button>
-          <span id="attach-chip" class="chip">
-            <span id="attach-icon">⏳</span>
-            <span id="attach-name" class="name"></span>
-            <button id="attach-remove" class="remove" title="Remove">×</button>
-          </span>
-        </div>
-
-        <button id="tc-ask-stream" title="Send">✈️ Send</button>
-        <button id="tc-clear" class="secondary" title="Clear chat">Clear</button>
-      </div>
-    </div>
-
-    <div class="chat-wrap" id="chatwrap">
-      <div id="chat" class="chat" aria-live="polite" aria-busy="false"></div>
+  <div id="input-area">
+    <div id="file-status" class="hidden"></div>
+    <div id="text-row">
+      <input id="user-input" placeholder="Ask a question..." />
+      <input type="file" id="file-upload" />
+      <button onclick="send()">Send</button>
     </div>
   </div>
 
   <script>
-    if ('scrollRestoration' in history) { history.scrollRestoration = 'manual'; }
-    window.addEventListener('DOMContentLoaded', () => {
-      window.scrollTo(0, 0);
-      setTimeout(() => window.scrollTo(0, 0), 0);
-    });
-    window.addEventListener('pageshow', (e) => { if (e.persisted) window.scrollTo(0, 0); });
-  </script>
+    const chat = document.getElementById('chat');
+    const userInput = document.getElementById('user-input');
+    const fileUpload = document.getElementById('file-upload');
+    const fileStatus = document.getElementById('file-status');
 
-  <script type="module">
-    import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
-    const purifyUrl = "https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js";
-    await import(purifyUrl);
+    let uploadedFile = null;
 
-    const API_BASE = location.origin.replace(/\/$/, "");
-    const $shell   = document.getElementById("shell");
-    const $chat    = document.getElementById("chat");
-    const $chatwrap= document.getElementById("chatwrap");
-    const $inputbar= document.getElementById("inputbar");
-    const $in      = document.getElementById("tc-input");
-    const $send    = document.getElementById("tc-ask-stream");
-    const $clear   = document.getElementById("tc-clear");
-    const $status  = document.getElementById("status");
-
-    const $file    = document.getElementById("file-input");
-    const $attach  = document.getElementById("attach-btn");
-    const $chip    = document.getElementById("attach-chip");
-    const $chipIcon= document.getElementById("attach-icon");
-    const $chipName= document.getElementById("attach-name");
-    const $chipX   = document.getElementById("attach-remove");
-
-    marked.setOptions({ mangle: false, headerIds: false });
-    function setStatus(t) { $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
-    function activateChat(){ if(!$shell.classList.contains("chat-active")) $shell.classList.add("chat-active"); }
-    function shortenName(name, max=28){ if (!name) return ""; return name.length<=max?name:(name.slice(0,Math.max(0,max-6))+"…"+name.slice(-5)); }
-
-    // ---- Conversation history (client side) ----
-    const history = (() => { try { return JSON.parse(sessionStorage.getItem("tc_history") || "[]"); } catch { return []; } })();
-    function saveHistory(){ try { sessionStorage.setItem("tc_history", JSON.stringify(history)); } catch {} }
-    function clearHistory(){ history.length = 0; saveHistory(); }
-
-    // Upload state (per next send)
-    let currentUpload = null; // { fileId, filename, processed:boolean }
-
-    function renderAttachmentChip() {
-      if (!currentUpload) { $chip.className = "chip"; $chip.style.display="none"; return; }
-      $chip.style.display = "inline-flex";
-      $chip.className = "chip " + (currentUpload.processed ? "success" : "warn");
-      $chipIcon.textContent = currentUpload.processed ? "✅" : "⏳";
-      $chipName.textContent = shortenName(currentUpload.filename || "file");
+    function appendMessage(content, sender = 'bot', fileName = '') {
+      const msg = document.createElement('div');
+      msg.className = `message ${sender}`;
+      msg.innerHTML = content;
+      if (fileName) {
+        const fileTag = document.createElement('div');
+        fileTag.className = 'file-name truncate';
+        fileTag.textContent = `📎 ${fileName}`;
+        msg.appendChild(fileTag);
+      }
+      chat.appendChild(msg);
+      chat.scrollTop = chat.scrollHeight;
     }
 
-    $attach.addEventListener("click", () => $file.click());
-    $chipX.addEventListener("click", () => { currentUpload = null; renderAttachmentChip(); });
+    fileUpload.addEventListener('change', async () => {
+      const file = fileUpload.files[0];
+      if (!file) return;
 
-    $file.addEventListener("change", async () => {
-      if (!$file.files || !$file.files[0]) return;
-      const f = $file.files[0];
-      // Show chip immediately (pending)
-      currentUpload = { fileId: null, filename: f.name, processed: false };
-      renderAttachmentChip();
+      fileStatus.classList.remove('hidden');
+      fileStatus.innerHTML = `⏳ Uploading <span class="truncate">${file.name}</span>...`;
 
-      const fd = new FormData();
-      fd.append("file", f);
-      setStatus("Uploading…");
+      const form = new FormData();
+      form.append('file', file);
+
       try {
-        const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
-        const j = await r.json();
-        if (!j.ok) throw new Error(j.error || "upload failed");
-        currentUpload.fileId = j.file.id;
-        currentUpload.filename = j.file.filename || f.name;
-        currentUpload.processed = !!j.processed;
-        renderAttachmentChip();
-        setStatus("");
-      } catch (e) {
-        setStatus("");
-        // Show as warning state with failure info
-        currentUpload = { fileId: null, filename: f.name, processed: false };
-        renderAttachmentChip();
-        alert("Upload failed: " + (e?.message || e));
-      } finally {
-        // reset input so the same file can be chosen again later
-        $file.value = "";
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          body: form
+        });
+
+        const json = await res.json();
+        if (!json.ok) throw new Error(json.error || "Upload failed");
+
+        uploadedFile = {
+          id: json.file.id,
+          name: file.name,
+        };
+
+        fileStatus.innerHTML = `✅ <span class="tick">Uploaded</span>: <span class="truncate">${file.name}</span>`;
+      } catch (err) {
+        fileStatus.innerHTML = `❌ Error: ${err.message}`;
+        uploadedFile = null;
       }
     });
 
-    function createMsg(role, headerText, withCopy = false) {
-      const msg = document.createElement("div");
-      msg.className = `msg ${role}`;
-      const avatar = document.createElement("div");
-      avatar.className = "avatar";
-      avatar.textContent = role === "assistant" ? "📖" : "🙂";
+    async function send() {
+      const message = userInput.value.trim();
+      if (!message) return;
 
-      const bubble = document.createElement("div");
-      bubble.className = "bubble";
+      appendMessage(message, 'user', uploadedFile?.name || '');
 
-      const head = document.createElement("div");
-      head.className = "bubble-head";
-      head.textContent = headerText;
-
-      if (withCopy) {
-        const actions = document.createElement("div");
-        actions.className = "bubble-actions";
-        const copyBtn = document.createElement("button");
-        copyBtn.className = "copy-btn";
-        copyBtn.type = "button";
-        copyBtn.title = "Copy";
-        copyBtn.textContent = "📋 Copy";
-        copyBtn.addEventListener("click", () => {
-          const txt = content.innerText.trim();
-          navigator.clipboard.writeText(txt).then(() => {
-            copyBtn.textContent = "✅ Copied";
-            setTimeout(() => (copyBtn.textContent = "📋 Copy"), 1200);
-          });
-        });
-        actions.appendChild(copyBtn);
-        head.appendChild(actions);
-      }
-
-      const content = document.createElement("div");
-      content.className = "bubble-content";
-
-      bubble.appendChild(head);
-      bubble.appendChild(content);
-
-      msg.appendChild(avatar);
-      msg.appendChild(bubble);
-      $chat.appendChild(msg);
-      $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
-
-      return { msg, content, bubble };
-    }
-
-    function renderMarkdown(md, el) {
-      const html = marked.parse(md || "");
-      const safe = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
-      el.innerHTML = safe;
-      $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
-    }
-
-    function appendSources(containerEl, citations) {
-      if (!citations || citations.length === 0) return;
-      const seenFile = new Set(), seenURL = new Set();
-      const files = [], urls = [];
-      for (const c of citations) {
-        if (c.kind === "file") { if (!seenFile.has(c.id)) { seenFile.add(c.id); files.push(c); } }
-        if (c.kind === "web")  { if (!seenURL.has(c.url)) { seenURL.add(c.url); urls.push(c); } }
-      }
-      if (!files.length && !urls.length) return;
-
-      const src = document.createElement("div");
-      src.className = "sources";
-      const title = document.createElement("div");
-      title.className = "title";
-      title.textContent = "Sources:";
-      src.appendChild(title);
-
-      const list = document.createElement("ul");
-      list.style.margin = "0";
-      list.style.paddingLeft = "20px";
-      [...files, ...urls].forEach((c) => {
-        const li = document.createElement("li");
-        li.textContent = c.label;
-        list.appendChild(li);
-      });
-
-      src.appendChild(list);
-      containerEl.appendChild(src);
-      $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
-    }
-
-    let currentAbort = null;
-
-    async function askStream(prompt) {
-      activateChat();
-
-      // Save user turn (pre-request)
-      history.push({ role: "user", content: prompt });
-      saveHistory();
-
-      // User bubble
-      const userMsg = createMsg("user", "You");
-      userMsg.content.textContent = prompt;
-
-      // If an upload is present, show a subnote under the user bubble
-      let uploadForThisTurn = null;
-      if (currentUpload && currentUpload.fileId) {
-        uploadForThisTurn = { ...currentUpload }; // copy
-        const note = document.createElement("div");
-        note.className = "subnote";
-        note.textContent = uploadForThisTurn.processed
-          ? `Attachment included: ${shortenName(uploadForThisTurn.filename)}`
-          : `Attachment received (processing…): ${shortenName(uploadForThisTurn.filename)}`;
-        userMsg.bubble.appendChild(note);
-      }
-
-      // Clear the chip immediately after sending so it doesn't linger in the input row
-      currentUpload = null;
-      renderAttachmentChip();
-
-      // Assistant bubble
-      const { content: aContent } = createMsg("assistant", "Talking Care Navigator", true);
-      aContent.innerHTML = `<em>Thinking… ⏳</em>`;
-
-      // State
-      let buffer = "";
-      let started = false;
-      let firstDeltaSeen = false;
-      let mdAccum = "";
-      const citations = [];
-      let sourcesAppended = false;
-      let assistantTurnSaved = false;
-
-      setStatus("Thinking… ⏳");
-      const ac = new AbortController();
-      currentAbort = ac;
-
-      const watchdog = setTimeout(() => {
-        if (!started) {
-          aContent.innerHTML = `<span>⚠️ No stream started — check CORS settings on the server.</span>`;
-          setStatus("");
-        }
-      }, 10000);
-
-      let r;
-      try {
-        r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
-          body: JSON.stringify({
-            userMessage: prompt,
-            history,
-            upload_file_id: uploadForThisTurn?.fileId || null
-          }),
-          signal: ac.signal
-        });
-      } catch (e) {
-        clearTimeout(watchdog);
-        aContent.innerHTML = `<span>⚠️ Request failed: ${e?.message || e}</span>`;
-        setStatus("");
-        currentAbort = null;
-        return;
-      }
-
-      if (!r.ok || !r.body) {
-        clearTimeout(watchdog);
-        let err = `HTTP ${r.status}`;
-        try { err += ` ${await r.text()}`; } catch {}
-        aContent.innerHTML = `<span>⚠️ Stream failed: ${err}</span>`;
-        setStatus("");
-        currentAbort = null;
-        return;
-      }
-
-      const reader = r.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-
-      const flushBlocks = (chunk) => {
-        buffer += chunk;
-        const blocks = buffer.split(/\n\n/);
-        buffer = blocks.pop();
-        for (const block of blocks) {
-          const lines = block.split(/\n/);
-          let event = "message";
-          const dataLines = [];
-          for (const line of lines) {
-            if (!line) continue;
-            if (line.startsWith(":")) continue;
-            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
-            if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
-          }
-          const raw = dataLines.join("\n");
-          handleEvent(event, raw);
-        }
+      const payload = {
+        userMessage: message,
+        upload_file_id: uploadedFile?.id || null,
+        history: [], // Optional: you can track history here
       };
 
-      function sanitizeBodyDelta(s) {
-        if (!s) return s;
-        s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
-        s = s.replace(/https?:\/\/\S+/g, "");
-        s = s.replace(/\s?\[\d+\]/g, "");
-        s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
-        return s;
-      }
-      function stripInlineSources(s) {
-        if (!s) return s;
-        return s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
-      }
-      function escapeHtml(str) {
-        return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;" }[ch]));
-      }
+      const res = await fetch('/api/assistant?stream=off', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
 
-      function handleEvent(event, raw) {
-        if (event === "start") { return; }
+      const json = await res.json();
+      appendMessage(json.text || '[No response]', 'bot');
 
-        if (event === "error") {
-          try {
-            const obj = JSON.parse(raw);
-            aContent.innerHTML = `<span>⚠️ ${escapeHtml(JSON.stringify(obj))}</span>`;
-          } catch {
-            aContent.innerHTML = `<span>⚠️ ${escapeHtml(raw)}</span>`;
-          }
-          setStatus("");
-          return;
-        }
-
-        if (event === "done" || event === "response.completed") {
-          setStatus("");
-
-          if (!sourcesAppended) {
-            appendSources(aContent, citations);
-            sourcesAppended = true;
-          }
-
-          if (!assistantTurnSaved) {
-            const finalText = stripInlineSources(mdAccum).trim();
-            if (finalText) {
-              history.push({ role: "assistant", content: finalText });
-              saveHistory();
-            }
-            assistantTurnSaved = true;
-          }
-          return;
-        }
-
-        if (event.endsWith(".delta")) {
-          let d;
-          try { d = JSON.parse(raw); } catch { d = null; }
-          const deltaText =
-            (d && typeof d.delta === "string") ? d.delta :
-            (d && d.delta && Array.isArray(d.delta.content))
-              ? d.delta.content.map(c => (c.text && (c.type?.includes("output_text"))) ? c.text : "").join("")
-              : (typeof d?.text_delta === "string" ? d.text_delta : "");
-
-          if (deltaText) {
-            if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); }
-            const cleaned = sanitizeBodyDelta(deltaText);
-            mdAccum += cleaned;
-            renderMarkdown(mdAccum, aContent);
-          }
-          return;
-        }
-
-        if (event.includes("annotation") || event.includes("citation")) {
-          let a;
-          try {
-            const obj = JSON.parse(raw);
-            a = obj?.annotation || obj?.data || obj;
-          } catch { a = null; }
-          if (!a) return;
-          if (a.type === "file_citation" && a.file_id) {
-            citations.push({ kind: "file", id: a.file_id, label: a.filename || a.file_id });
-          } else if ((a.type === "web_citation" || a.url) && a.url) {
-            citations.push({ kind: "web", url: a.url, label: a.title || a.url });
-          }
-        }
-      }
-
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          if (chunk && !started) { started = true; clearTimeout(watchdog); }
-          flushBlocks(chunk);
-        }
-      } catch (e) {
-        aContent.insertAdjacentHTML("beforeend", `<p>⚠️ Stream error: ${escapeHtml(e?.message || String(e))}</p>`);
-      } finally {
-        currentAbort = null;
-        setStatus("");
-      }
+      // Reset
+      userInput.value = '';
+      fileUpload.value = '';
+      uploadedFile = null;
+      fileStatus.classList.add('hidden');
     }
-
-    $send.addEventListener("click", () => {
-      const p = ($in.value || "").trim();
-      if (!p) return;
-      askStream(p);
-      $in.value = "";
-    });
-    $in.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $send.click(); }
-    });
-    $clear.addEventListener("click", () => {
-      if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
-      $chat.innerHTML = "";
-      $in.value = "";
-      setStatus("");
-      clearHistory();
-      document.getElementById("shell").classList.remove("chat-active");
-      currentUpload = null; renderAttachmentChip();
-    });
   </script>
 </body>
 </html>
