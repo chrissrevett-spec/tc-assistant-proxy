@@ -1,6 +1,6 @@
 // /api/assistant.js
 //
-// Two modes via OpenAI "Responses" API:
+// Modes via OpenAI "Responses" API:
 //  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
 //  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
 //
@@ -9,7 +9,8 @@
 // 2) Optional web search controlled by OPENAI_ENABLE_WEB_SEARCH ("1" to allow)
 // 3) Strict grounding policy; sources only at the end (no inline links)
 // 4) Rolling conversation history (client-provided), trimmed server-side
-// 5) Per-turn ephemeral vector store for user-uploaded files (fileIds), merged with main store
+// 5) Optional per-request TEMP vector store created from an uploaded file_id,
+//    which is merged with your permanent store for that response
 // 6) SSE passthrough with clear error surfacing
 //
 // Required env vars
@@ -75,7 +76,7 @@ async function oaJson(path, method, body, headers = {}) {
     headers: {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
-      "OpenAI-Beta": "assistants=v2", // required for retrieval features on /responses
+      "OpenAI-Beta": "assistants=v2", // needed for retrieval on /responses
       ...headers,
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -85,6 +86,80 @@ async function oaJson(path, method, body, headers = {}) {
     throw new Error(`${method} ${path} failed: ${r.status} ${errTxt}`);
   }
   return r.json();
+}
+
+async function oaJsonNoBeta(path, method, body, headers = {}) {
+  // Some endpoints (files upload via multipart on a separate route) won’t use this.
+  const r = await fetch(`https://api.openai.com/v1${path}`, {
+    method,
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+      ...headers,
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) {
+    const errTxt = await r.text().catch(() => "");
+    throw new Error(`${method} ${path} failed: ${r.status} ${errTxt}`);
+  }
+  return r.json();
+}
+
+// ---------- Files: upload (multipart) ----------
+export async function config() {
+  return {
+    api: {
+      bodyParser: false, // we handle raw for multipart in /api/files/upload
+    }
+  };
+}
+
+async function readMultipartFile(req) {
+  // Simple multipart parser for a single file field "file"
+  // Works in Vercel/Node 18+ if content-type is multipart/form-data
+  const contentType = req.headers["content-type"] || "";
+  const m = contentType.match(/boundary=(.+)$/);
+  if (!m) throw new Error("Invalid multipart/form-data");
+  const boundary = m[1];
+
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const buf = Buffer.concat(chunks);
+
+  const parts = buf.toString("binary").split(`--${boundary}`);
+  for (const part of parts) {
+    if (!part || part === "--\r\n") continue;
+    const [rawHeaders, rawBody] = part.split("\r\n\r\n");
+    if (!rawHeaders || !rawBody) continue;
+    if (/name="file"/i.test(rawHeaders)) {
+      const filenameMatch = rawHeaders.match(/filename="([^"]+)"/i);
+      const filename = filenameMatch ? filenameMatch[1] : "upload.bin";
+      // strip trailing \r\n--
+      const bodyBin = rawBody.replace(/\r\n--$/, "");
+      const bodyBuf = Buffer.from(bodyBin, "binary");
+      return { filename, bodyBuf, contentType: "application/octet-stream" };
+    }
+  }
+  throw new Error("No file field found");
+}
+
+async function openaiUploadFileReturnId(filename, bodyBuf) {
+  const form = new FormData();
+  form.append("purpose", "assistants");
+  form.append("file", new Blob([bodyBuf]), filename);
+
+  const r = await fetch("https://api.openai.com/v1/files", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${OPENAI_API_KEY}` },
+    body: form,
+  });
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`POST /files failed: ${r.status} ${t}`);
+  }
+  const data = await r.json();
+  return data.id; // file_id
 }
 
 // ---------- Assistant instructions (small cache) ----------
@@ -139,12 +214,11 @@ Never answer purely from general knowledge without sources.
   return `${sys}\n\n${policy}`;
 }
 
-// ---------- Tools config: file_search + optional web_search ----------
+// ---------- Tools config ----------
 function getTools(vectorStoreIds) {
   const tools = [{
     type: "file_search",
-    // Responses API requires vector_store_ids on the tool itself
-    vector_store_ids: vectorStoreIds && vectorStoreIds.length ? vectorStoreIds : [OPENAI_VECTOR_STORE_ID],
+    vector_store_ids: vectorStoreIds,
   }];
   if (ENABLE_WEB_SEARCH) {
     tools.push({ type: "web_search" });
@@ -175,50 +249,43 @@ function trimHistoryByChars(hist, maxChars = 8000) {
   return rev.reverse();
 }
 
-// ---------- Ephemeral vector store for uploaded files ----------
-async function createTempVectorStoreWithFiles(fileIds = []) {
-  if (!fileIds.length) return null;
-  // 1) Create VS
-  const vs = await oaJson("/vector_stores", "POST", {
-    name: `session-upload-${Date.now()}`,
-  });
+// ---------- TEMP vector store ingest ----------
+async function createTempVectorStoreWithFile(fileId) {
+  // 1) Create empty temp store
+  const vs = await oaJsonNoBeta("/vector_stores", "POST", { name: `tmp_vs_${Date.now()}` }, { "OpenAI-Beta": "assistants=v2" });
   const vsId = vs.id;
 
-  // 2) Attach files (one by one for simplicity)
-  for (const fid of fileIds) {
-    await oaJson(`/vector_stores/${vsId}/files`, "POST", { file_id: fid });
-  }
+  // 2) Add file to store
+  const added = await oaJsonNoBeta(`/vector_stores/${vsId}/files`, "POST", { file_id: fileId }, { "OpenAI-Beta": "assistants=v2" });
+  const addId = added.id || fileId;
 
-  // 3) Brief poll for indexing (best-effort; continue anyway)
-  const deadline = Date.now() + 15000;
+  // 3) Poll file status in this store
+  const deadline = Date.now() + 20000; // 20s
   while (Date.now() < deadline) {
-    try {
-      const list = await oaJson(`/vector_stores/${vsId}/files`, "GET", undefined);
-      const items = Array.isArray(list?.data) ? list.data : [];
-      const haveAll = fileIds.every(fid => items.find(it => it?.file_id === fid || it?.id === fid));
-      if (haveAll) break;
-      await new Promise(r => setTimeout(r, 500));
-    } catch {
-      break;
-    }
+    const f = await oaJsonNoBeta(`/vector_stores/${vsId}/files/${addId}`, "GET", null, { "OpenAI-Beta": "assistants=v2" });
+    const st = f.status || f.state || "completed";
+    if (st === "completed") return vsId;
+    if (st === "failed" || st === "error") throw new Error(`Vector store ingestion failed: ${st}`);
+    await new Promise(r => setTimeout(r, 800));
   }
-
-  return vsId;
+  throw new Error("Vector store ingestion timeout");
 }
 
-// ---------- Build Responses request (NO tool_choice) ----------
-function buildResponsesRequest(historyArr, userMessage, sysInstructions, vectorStoreIds, extra = {}) {
+// ---------- Build Responses request ----------
+function buildResponsesRequest(historyArr, userMessage, sysInstructions, extraVectorStoreIds = [], extra = {}) {
   const groundedSys = withGroundingPolicy(sysInstructions);
-  const tools = getTools(vectorStoreIds);
-
   const input = [{ role: "system", content: groundedSys }];
   for (const m of historyArr) input.push(m);
   if (userMessage) input.push({ role: "user", content: userMessage });
 
+  // Always include your permanent store; optionally merge temp store id(s)
+  const vectorStoreIds = [OPENAI_VECTOR_STORE_ID, ...extraVectorStoreIds].filter(Boolean);
+  const tools = getTools(vectorStoreIds);
+
   return {
     model: OPENAI_MODEL,
     input,
-    tools, // no tool_choice.* — not supported in your tenant
+    tools,
     text: { format: { type: "text" }, verbosity: "medium" },
     ...extra,
   };
@@ -242,21 +309,14 @@ function extractTextFromResponse(resp) {
 }
 
 // ---------- Non-streaming ----------
-async function handleNonStreaming(userMessage, history, fileIds) {
+async function handleNonStreaming(userMessage, history, uploadFileId) {
   const sys = await fetchAssistantInstructions();
-
-  // Build vectorStoreIds: [ tempVS(if any), mainVS ]
-  let vectorStoreIds = [OPENAI_VECTOR_STORE_ID];
-  if (Array.isArray(fileIds) && fileIds.length) {
-    try {
-      const tempVS = await createTempVectorStoreWithFiles(fileIds);
-      if (tempVS) vectorStoreIds = [tempVS, OPENAI_VECTOR_STORE_ID];
-    } catch (e) {
-      console.warn("[assistant] temp VS attach failed:", e?.message || e);
-    }
+  const extraVS = [];
+  if (uploadFileId) {
+    const tmpId = await createTempVectorStoreWithFile(uploadFileId);
+    extraVS.push(tmpId);
   }
-
-  const payload = buildResponsesRequest(history, userMessage, sys, vectorStoreIds, { stream: false });
+  const payload = buildResponsesRequest(history, userMessage, sys, extraVS, { stream: false });
   const resp = await oaJson("/responses", "POST", payload);
   const text = extractTextFromResponse(resp);
   const usage = resp?.usage || null;
@@ -264,7 +324,7 @@ async function handleNonStreaming(userMessage, history, fileIds) {
 }
 
 // ---------- Streaming (SSE passthrough) ----------
-async function handleStreaming(res, userMessage, history, fileIds) {
+async function handleStreaming(res, userMessage, history, uploadFileId) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -285,15 +345,17 @@ async function handleStreaming(res, userMessage, history, fileIds) {
   send("start", { ok: true });
   const sys = await fetchAssistantInstructions();
 
-  // Build vectorStoreIds: [ tempVS(if any), mainVS ]
-  let vectorStoreIds = [OPENAI_VECTOR_STORE_ID];
-  if (Array.isArray(fileIds) && fileIds.length) {
-    try {
-      const tempVS = await createTempVectorStoreWithFiles(fileIds);
-      if (tempVS) vectorStoreIds = [tempVS, OPENAI_VECTOR_STORE_ID];
-    } catch (e) {
-      console.warn("[assistant] temp VS attach failed:", e?.message || e);
+  // If a file_id is provided, build a temp store and include it
+  let extraVS = [];
+  try {
+    if (uploadFileId) {
+      const tmpId = await createTempVectorStoreWithFile(uploadFileId);
+      extraVS.push(tmpId);
+      send("info", { note: "temp_vector_store_ready", id: tmpId });
     }
+  } catch (e) {
+    send("error", { ok:false, step:"temp_vs_ingest", error: String(e?.message || e) });
+    // continue without the temp store rather than killing the stream
   }
 
   const upstream = await fetch("https://api.openai.com/v1/responses", {
@@ -304,7 +366,7 @@ async function handleStreaming(res, userMessage, history, fileIds) {
       "Accept": "text/event-stream",
       "OpenAI-Beta": "assistants=v2",
     },
-    body: JSON.stringify(buildResponsesRequest(history, userMessage, sys, vectorStoreIds, { stream: true })),
+    body: JSON.stringify(buildResponsesRequest(history, userMessage, sys, extraVS, { stream: true })),
   });
 
   if (!upstream.ok || !upstream.body) {
@@ -335,7 +397,6 @@ async function handleStreaming(res, userMessage, history, fileIds) {
         if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
       }
       const raw = dataLines.join("\n");
-
       if (event === "response.output_text.delta") {
         try {
           const d = JSON.parse(raw);
@@ -375,8 +436,32 @@ async function handleStreaming(res, userMessage, history, fileIds) {
   }
 }
 
+// ---------- Sub-route: /api/files/upload (multipart to OpenAI Files API) ----------
+async function handleUpload(req, res) {
+  try {
+    const { filename, bodyBuf } = await readMultipartFile(req);
+    const fileId = await openaiUploadFileReturnId(filename, bodyBuf);
+    setCors(res);
+    return res.status(200).json({ ok: true, file_id: fileId, filename });
+  } catch (e) {
+    setCors(res);
+    return res.status(400).json({ ok:false, error: String(e?.message || e) });
+  }
+}
+
 // ---------- Main handler ----------
 export default async function handler(req, res) {
+  // Route split: /api/files/upload
+  if (req.url && req.url.includes("/api/files/upload")) {
+    if (req.method === "OPTIONS") return endPreflight(res);
+    if (req.method !== "POST") {
+      setCors(res);
+      res.setHeader("Allow", "POST, OPTIONS");
+      return res.status(405).json({ ok:false, error: "Method Not Allowed" });
+    }
+    return handleUpload(req, res);
+  }
+
   setCors(res);
   if (req.method === "OPTIONS") return endPreflight(res);
   if (req.method !== "POST") {
@@ -388,8 +473,8 @@ export default async function handler(req, res) {
     const body = await readBody(req);
     const userMessage = (body.userMessage || "").toString().trim();
     const clientHistory = normalizeHistory(body.history || []);
-    const trimmedHistory = trimHistoryByChars(clientHistory, 8000); // adjust as needed
-    const fileIds = Array.isArray(body.fileIds) ? body.fileIds.filter(Boolean) : [];
+    const trimmedHistory = trimHistoryByChars(clientHistory, 8000);
+    const uploadFileId = (body.upload_file_id || "").toString().trim() || null;
     const mode = (req.query.stream || "off").toString(); // "on" | "off"
 
     if (!userMessage) {
@@ -400,9 +485,9 @@ export default async function handler(req, res) {
     }
 
     if (mode === "on") {
-      return await handleStreaming(res, userMessage, trimmedHistory, fileIds);
+      return await handleStreaming(res, userMessage, trimmedHistory, uploadFileId);
     } else {
-      const out = await handleNonStreaming(userMessage, trimmedHistory, fileIds);
+      const out = await handleNonStreaming(userMessage, trimmedHistory, uploadFileId);
       return res.status(200).json(out);
     }
   } catch (err) {
