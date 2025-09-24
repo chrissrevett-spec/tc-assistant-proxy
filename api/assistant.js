@@ -3,7 +3,7 @@
 // Responses API + retrieval-first. Supports an optional per-turn uploaded file:
 // - We upload the file separately via /api/upload (purpose=assistants).
 // - Here we build a TEMP vector store, ingest that file, and put it FIRST
-//   in the file_search tool_resources.vector_store_ids for this turn.
+//   in tool_resources.file_search.vector_store_ids for this turn.
 
 const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -189,18 +189,16 @@ function buildResponsesRequest(historyArr, userMessage, sysInstructions, tempVec
   for (const m of historyArr) input.push(m);
   if (userMessage) input.push({ role: "user", content: userMessage });
 
-  // File search tool declaration (no IDs here)
+  // Declare tools
   const tools = [{ type: "file_search" }];
   if (ENABLE_WEB_SEARCH) tools.push({ type: "web_search" });
 
-  // Vector stores are passed via tool_resources (this is the critical fix)
+  // IMPORTANT: vector stores go here
   const vectorStoreIds = tempVectorStoreId
     ? [tempVectorStoreId, OPENAI_VECTOR_STORE_ID].filter(Boolean)
     : [OPENAI_VECTOR_STORE_ID].filter(Boolean);
 
-  const tool_resources = {
-    file_search: { vector_store_ids: vectorStoreIds }
-  };
+  const tool_resources = { file_search: { vector_store_ids: vectorStoreIds } };
 
   const payload = {
     model: OPENAI_MODEL,
@@ -212,8 +210,8 @@ function buildResponsesRequest(historyArr, userMessage, sysInstructions, tempVec
     ...extra,
   };
 
-  // When an upload is present, we make retrieval deterministic: disable web_search for that turn
-  // unless your env explicitly allows it.
+  // If a temp upload is present and you want deterministic retrieval without web,
+  // keep web disabled unless explicitly enabled via env.
   if (tempVectorStoreId && !ENABLE_WEB_SEARCH) {
     payload.tools = [{ type: "file_search" }];
   }
@@ -257,7 +255,8 @@ async function handleStreaming(res, userMessage, history, uploadFileId) {
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
-    "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN",
+    // 🔧 fixed: removed stray quote that caused a syntax/runtime error
+    "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN,
     "Access-Control-Allow-Methods": CORS_ALLOW_METHODS,
     "Access-Control-Allow-Headers": CORS_ALLOW_HEADERS,
   });
@@ -281,6 +280,9 @@ async function handleStreaming(res, userMessage, history, uploadFileId) {
     }
   }
 
+  // Build payload once so we can log it on failure
+  const payload = buildResponsesRequest(history, userMessage, sys, tempVS, { stream: true });
+
   const upstream = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -289,13 +291,14 @@ async function handleStreaming(res, userMessage, history, uploadFileId) {
       "Accept": "text/event-stream",
       "OpenAI-Beta": "assistants=v2",
     },
-    body: JSON.stringify(buildResponsesRequest(history, userMessage, sys, tempVS, { stream: true })),
+    body: JSON.stringify(payload),
   });
 
   if (!upstream.ok || !upstream.body) {
     let errTxt = "";
     try { errTxt = await upstream.text(); } catch {}
-    send("error", { ok:false, step:"responses_stream", status: upstream.status, error: errTxt || "no-body" });
+    // Surface as much context as possible to the client bubble
+    send("error", { ok:false, step:"responses_stream", status: upstream.status, error: errTxt || "no-body", payload });
     try { res.end(); } catch {}
     return;
   }
@@ -353,7 +356,7 @@ async function handleStreaming(res, userMessage, history, uploadFileId) {
   } catch {
     // client aborted
   } finally {
-    send("done", "[DONE]");
+    try { send("done", "[DONE]"); } catch {}
     try { res.end(); } catch {}
   }
 }
@@ -364,7 +367,7 @@ export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST, OPTIONS");
     return res.status(405).json({ ok:false, error: "Method Not Allowed" });
-    }
+  }
 
   try {
     const body = await readBody(req);
@@ -390,7 +393,7 @@ export default async function handler(req, res) {
   } catch (err) {
     console.error("assistant handler error:", err);
     try {
-      return res.status(500).json({ ok:false, error: "Internal Server Error" });
+      return res.status(500).json({ ok:false, error: "Internal Server Error", detail: String(err?.message || err) });
     } catch {}
   }
 }
