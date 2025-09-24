@@ -54,6 +54,13 @@
     button:hover { background: #f0f0f0; border-color: #ccc; }
     button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
 
+    /* Small pill/badge for uploads */
+    .pill {
+      font-size: 12px; padding: 4px 8px; border-radius: 999px;
+      background: #FAFAFA; border: 1px solid #ddd; color: #333;
+    }
+    .pill button { border: none; background: transparent; cursor: pointer; padding: 0 0 0 6px; }
+
     /* Chat: hidden initially; shown between header and input after first send */
     .chat-wrap { display: none; }
     .chat {
@@ -131,6 +138,9 @@
       <div class="inputrow">
         <label for="tc-input" class="sr">Message</label>
         <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
+        <button id="tc-attach" class="secondary" title="Attach files">📎 Attach</button>
+        <input id="tc-file" type="file" multiple style="display:none" />
+        <span id="tc-files-pill" class="pill" style="display:none"></span>
         <button id="tc-ask-stream" title="Send">✈️ Send</button>
         <button id="tc-clear" class="secondary" title="Clear chat">Clear</button>
       </div>
@@ -174,6 +184,9 @@
     const $send    = document.getElementById("tc-ask-stream");
     const $clear   = document.getElementById("tc-clear");
     const $status  = document.getElementById("status");
+    const $attach  = document.getElementById("tc-attach");
+    const $file    = document.getElementById("tc-file");
+    const $pill    = document.getElementById("tc-files-pill");
 
     marked.setOptions({ mangle: false, headerIds: false });
 
@@ -189,6 +202,18 @@
     }
     function clearHistory() {
       history.length = 0; saveHistory();
+      // also clear session upload store id
+      try { sessionStorage.removeItem("tc_session_vs_id"); } catch {}
+      updatePill();
+    }
+
+    // Per-session uploaded vector store id
+    function getSessionVSId() {
+      try { return sessionStorage.getItem("tc_session_vs_id") || ""; } catch { return ""; }
+    }
+    function setSessionVSId(id) {
+      try { sessionStorage.setItem("tc_session_vs_id", id || ""); } catch {}
+      updatePill();
     }
 
     // Ensure chat is visible between header and input (no sticky)
@@ -291,7 +316,54 @@
 
     let currentAbort = null;
 
-    // SSE streaming
+    // ===== Upload UI (expects /api/upload to exist) =====
+    $attach.addEventListener("click", () => $file.click());
+    $file.addEventListener("change", async () => {
+      const files = Array.from($file.files || []);
+      if (!files.length) return;
+      try {
+        setStatus("Uploading…");
+        const fd = new FormData();
+        files.forEach(f => fd.append("files", f));
+        const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
+        if (!r.ok) {
+          const txt = await r.text().catch(() => "");
+          throw new Error(`Upload failed: ${r.status} ${txt}`);
+        }
+        const j = await r.json();
+        if (!j?.ok || !j?.temp_vector_store_id) throw new Error("Invalid upload response");
+        setSessionVSId(j.temp_vector_store_id);
+        $file.value = "";
+        setStatus("Files added.");
+      } catch (e) {
+        setStatus("");
+        alert(e?.message || String(e));
+      } finally {
+        setStatus("");
+      }
+    });
+
+    function updatePill() {
+      const id = getSessionVSId();
+      if (id) {
+        $pill.style.display = "";
+        $pill.textContent = `📎 Files added`;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = "✖";
+        btn.title = "Remove uploaded files (this session)";
+        btn.addEventListener("click", () => setSessionVSId(""));
+        // reset and append
+        $pill.innerHTML = "📎 Files added";
+        $pill.appendChild(btn);
+      } else {
+        $pill.style.display = "none";
+        $pill.textContent = "";
+      }
+    }
+    updatePill();
+
+    // ===== SSE streaming
     async function askStream(prompt) {
       activateChat();
 
@@ -312,8 +384,8 @@
       let firstDeltaSeen = false;
       let mdAccum = "";
       const citations = [];
-      let sourcesAppended = false;      // NEW: guard Sources footer
-      let assistantTurnSaved = false;   // NEW: guard history save
+      let sourcesAppended = false;
+      let assistantTurnSaved = false;
 
       setStatus("Thinking… ⏳");
       const ac = new AbortController();
@@ -327,13 +399,17 @@
         }
       }, 10000);
 
-      // Fetch SSE with rolling history
+      // Fetch SSE with rolling history + optional session vector store id
       let r;
       try {
         r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
-          body: JSON.stringify({ userMessage: prompt, history }),
+          body: JSON.stringify({
+            userMessage: prompt,
+            history,
+            sessionVectorStoreId: getSessionVSId() || undefined
+          }),
           signal: ac.signal
         });
       } catch (e) {
@@ -393,13 +469,11 @@
         if (event === "done" || event === "response.completed") {
           setStatus("");
 
-          // Append Sources once
           if (!sourcesAppended) {
             appendSources(aContent, citations);
             sourcesAppended = true;
           }
 
-          // Save assistant turn to local history once (strip any inline Sources)
           if (!assistantTurnSaved) {
             const finalText = stripInlineSources(mdAccum).trim();
             if (finalText) {
