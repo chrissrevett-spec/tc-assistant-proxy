@@ -292,7 +292,7 @@
     let pendingUpload = { file_id: null, filename: "" };
 
     // --- Upload UI handlers ---
-    $attachBtn.addEventListener("click", () => $fileInput.click());
+    document.getElementById("attach-btn").addEventListener("click", () => $fileInput.click());
 
     $fileInput.addEventListener("change", async () => {
       const file = $fileInput.files?.[0];
@@ -306,17 +306,20 @@
       try {
         const fd = new FormData();
         fd.append("file", file);
-        const r = await fetch(`${API_BASE}/api/files/upload`, { method: "POST", body: fd });
+        // 🔧 Point to existing server route
+        const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
         if (!r.ok) {
           const t = await r.text().catch(()=> "Upload failed");
           throw new Error(t);
         }
         const data = await r.json();
-        if (!data.ok || !data.file_id) throw new Error("Upload failed");
-        pendingUpload = { file_id: data.file_id, filename: file.name };
+        // Accept either top-level file_id or nested file.id
+        const fid = data.file_id || data?.file?.id;
+        if (!data.ok || !fid) throw new Error("Upload failed");
+        pendingUpload = { file_id: fid, filename: file.name };
         // ✅ state
         $attachStatus.className = "attach-status ok";
-        $attachIcon.textContent = "✅"; // green tick icon
+        $attachIcon.textContent = "✅";
         $attachName.textContent = (file.name.length > 36 ? file.name.slice(0,33) + "..." : file.name);
       } catch (e) {
         $attachStatus.className = "attach-status error";
@@ -539,7 +542,7 @@
     $in.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("tc-ask-stream").click(); }
     });
-    $clear.addEventListener("click", () => {
+    document.getElementById("tc-clear").addEventListener("click", () => {
       if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
       $chat.innerHTML = "";
       $in.value = "";
