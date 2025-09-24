@@ -3,7 +3,7 @@
 // Responses API + retrieval-first. Supports an optional per-turn uploaded file:
 // - We upload the file separately via /api/upload (purpose=assistants).
 // - Here we build a TEMP vector store, ingest that file, and put it FIRST
-//   in the file_search tool's vector_store_ids for this turn.
+//   in the file_search tool_resources.vector_store_ids for this turn.
 
 const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -178,6 +178,7 @@ async function createTempVectorStoreWithFile(fileId) {
   throw new Error("Vector store ingestion timeout");
 }
 
+// Build a properly shaped Responses API request
 function buildResponsesRequest(historyArr, userMessage, sysInstructions, tempVectorStoreId = null, extra = {}) {
   const tempHint = tempVectorStoreId
     ? `\nUSER ATTACHMENT POLICY:\nA file was uploaded for this turn. Search the uploaded file's vector store FIRST before using the permanent library or the web. Prefer citing the uploaded file when answering this turn.\n`
@@ -188,20 +189,36 @@ function buildResponsesRequest(historyArr, userMessage, sysInstructions, tempVec
   for (const m of historyArr) input.push(m);
   if (userMessage) input.push({ role: "user", content: userMessage });
 
+  // File search tool declaration (no IDs here)
+  const tools = [{ type: "file_search" }];
+  if (ENABLE_WEB_SEARCH) tools.push({ type: "web_search" });
+
+  // Vector stores are passed via tool_resources (this is the critical fix)
   const vectorStoreIds = tempVectorStoreId
     ? [tempVectorStoreId, OPENAI_VECTOR_STORE_ID].filter(Boolean)
     : [OPENAI_VECTOR_STORE_ID].filter(Boolean);
 
-  const tools = [{ type: "file_search", vector_store_ids: vectorStoreIds }];
-  if (ENABLE_WEB_SEARCH) tools.push({ type: "web_search" });
+  const tool_resources = {
+    file_search: { vector_store_ids: vectorStoreIds }
+  };
 
-  return {
+  const payload = {
     model: OPENAI_MODEL,
     input,
     tools,
-    text: { format: { type: "text" }, verbosity: "medium" },
+    tool_resources,
+    modalities: ["text"],
+    text: { format: "markdown", verbosity: "medium" },
     ...extra,
   };
+
+  // When an upload is present, we make retrieval deterministic: disable web_search for that turn
+  // unless your env explicitly allows it.
+  if (tempVectorStoreId && !ENABLE_WEB_SEARCH) {
+    payload.tools = [{ type: "file_search" }];
+  }
+
+  return payload;
 }
 
 function extractTextFromResponse(resp) {
@@ -240,7 +257,7 @@ async function handleStreaming(res, userMessage, history, uploadFileId) {
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
-    "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN,
+    "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN",
     "Access-Control-Allow-Methods": CORS_ALLOW_METHODS,
     "Access-Control-Allow-Headers": CORS_ALLOW_HEADERS,
   });
@@ -347,7 +364,7 @@ export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST, OPTIONS");
     return res.status(405).json({ ok:false, error: "Method Not Allowed" });
-  }
+    }
 
   try {
     const body = await readBody(req);
