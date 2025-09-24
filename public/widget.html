@@ -43,17 +43,19 @@
     }
     textarea:focus { background: #f7f7f7; border-color: #ccc; outline: none; box-shadow: 0 0 0 2px rgba(0,0,0,0.04); }
 
-    button {
-      padding: 10px 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
-      background: #FAFAFA; color: #333; transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
-      white-space: nowrap;
+    /* Unified primary buttons */
+    .ui-btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      height: 40px; padding: 0 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
+      background: #FAFAFA; color: #333; font-size: 14px; line-height: 1; letter-spacing: .2px;
+      transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
+      white-space: nowrap; user-select: none;
     }
-    button:hover { background: #f0f0f0; border-color: #ccc; }
-    button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
+    .ui-btn:hover { background: #f0f0f0; border-color: #ccc; }
+    .ui-btn.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
 
     /* Upload badge row (to avoid squashing textarea on long names) */
     .attach-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
-    .attach-btn { display: inline-flex; align-items: center; gap: 6px; }
     .attach-status {
       display: inline-flex; align-items: center; gap: 6px;
       font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid #ddd; background: #FAFAFA;
@@ -83,8 +85,9 @@
     .avatar {
       flex: 0 0 32px; height: 32px; width: 32px; border-radius: 50%;
       display: grid; place-items: center; background: #FAFAFA; border: 1px solid #eee;
-      font-size: 18px; line-height: 1;
+      font-size: 18px; line-height: 1; overflow: hidden;
     }
+    .avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
 
     .bubble {
       max-width: 80%;
@@ -123,18 +126,21 @@
     .sources { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444; }
     .sources .title { font-weight: 600; margin-bottom: 6px; }
 
-    .used-file-note {
+    .used-file-note, .upload-banner, .error-banner {
       display: inline-flex; align-items: center; gap: 6px;
       font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid #ddd; background: #FAFAFA;
       margin-top: 6px;
     }
+    .used-file-note { border-color: #4caf50; background: #f2fff2; color: #256f2a; }
+    .upload-banner { border-color: #4caf50; background: #f2fff2; color: #256f2a; }
+    .error-banner { border-color: #e57373; background: #fff5f5; color: #b71c1c; }
   </style>
 </head>
 <body>
   <div class="shell" id="shell">
     <div class="wrap">
       <h1>Talking Care Navigator</h1>
-      <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, auditing, policy queries and more. Always consult your organisations' confidentiality policy. Talking Care Navigator can make mistakes. Check important info.</p>
+      <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, auditing, policy queries and more. Always consult your organisations' confidentiality policy.</p>
       <div id="status"></div>
     </div>
 
@@ -142,12 +148,12 @@
       <div class="inputrow">
         <label for="tc-input" class="sr">Message</label>
         <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
-        <button id="tc-ask-stream" title="Send">✈️ Send</button>
-        <button id="tc-clear" class="secondary" title="Clear chat">Clear</button>
+        <button id="tc-ask-stream" class="ui-btn" title="Send">✈️ Send</button>
+        <button id="tc-clear" class="ui-btn secondary" title="Clear chat">🧽 Clear</button>
       </div>
       <div class="attach-row">
         <input id="file-input" type="file" style="display:none" />
-        <button id="attach-btn" class="attach-btn" title="Attach a file">📎 Attach</button>
+        <button id="attach-btn" class="ui-btn" title="Attach a file">📎 Attach</button>
         <span id="attach-status" class="attach-status pending" style="display:none;">
           <span class="icon" id="attach-icon">⌛</span>
           <span class="fname" id="attach-name"></span>
@@ -174,6 +180,9 @@
     const purifyUrl = "https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js";
     await import(purifyUrl);
 
+    // ✅ Replace this with your image URL (Squarespace: Design → Custom Files → upload → copy URL)
+    const ASSISTANT_AVATAR_URL = "https://www.talkingcare.uk/assets/tcn-avatar.png"; // <-- change to your logo/icon
+
     const API_BASE = location.origin.replace(/\/$/, "");
     const $shell   = document.getElementById("shell");
     const $chat    = document.getElementById("chat");
@@ -190,6 +199,8 @@
     const $attachIcon   = document.getElementById("attach-icon");
     const $attachName   = document.getElementById("attach-name");
 
+    const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
+
     marked.setOptions({ mangle: false, headerIds: false });
     function setStatus(t){ $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
 
@@ -205,7 +216,16 @@
       msg.className = `msg ${role}`;
       const avatar = document.createElement("div");
       avatar.className = "avatar";
-      avatar.textContent = role === "assistant" ? "📖" : "🙂";
+
+      if (role === "assistant" && ASSISTANT_AVATAR_URL) {
+        const img = document.createElement("img");
+        img.src = ASSISTANT_AVATAR_URL;
+        img.alt = "TCN";
+        img.onerror = () => { avatar.textContent = "📖"; }; // fallback
+        avatar.appendChild(img);
+      } else {
+        avatar.textContent = role === "assistant" ? "📖" : "🙂";
+      }
 
       const bubble = document.createElement("div");
       bubble.className = "bubble";
@@ -297,6 +317,17 @@
     $fileInput.addEventListener("change", async () => {
       const file = $fileInput.files?.[0];
       if (!file) return;
+
+      // Client-side size cap
+      if (file.size > MAX_UPLOAD_BYTES) {
+        $attachStatus.style.display = "inline-flex";
+        $attachStatus.className = "attach-status error";
+        $attachIcon.textContent = "⚠️";
+        $attachName.textContent = "File too large (20 MB max)";
+        pendingUpload = { file_id: null, filename: "" };
+        return;
+      }
+
       // Reset UI state
       $attachStatus.style.display = "inline-flex";
       $attachStatus.className = "attach-status pending";
@@ -306,25 +337,30 @@
       try {
         const fd = new FormData();
         fd.append("file", file);
-        // 🔧 Point to existing server route
         const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
-        if (!r.ok) {
-          const t = await r.text().catch(()=> "Upload failed");
-          throw new Error(t);
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || !data.ok || !data.file_id) {
+          throw new Error(data?.error || "Upload failed");
         }
-        const data = await r.json();
-        // Accept either top-level file_id or nested file.id
-        const fid = data.file_id || data?.file?.id;
-        if (!data.ok || !fid) throw new Error("Upload failed");
-        pendingUpload = { file_id: fid, filename: file.name };
-        // ✅ state
-        $attachStatus.className = "attach-status ok";
-        $attachIcon.textContent = "✅";
+
+        pendingUpload = { file_id: data.file_id, filename: file.name };
+
+        if (data.processed) {
+          // ✅ processed
+          $attachStatus.className = "attach-status ok";
+          $attachIcon.textContent = "✅";
+        } else {
+          // Accepted but still processing
+          $attachStatus.className = "attach-status pending";
+          $attachIcon.textContent = "⌛";
+          $attachName.textContent = "Processing… try your question in a moment";
+        }
+
         $attachName.textContent = (file.name.length > 36 ? file.name.slice(0,33) + "..." : file.name);
       } catch (e) {
         $attachStatus.className = "attach-status error";
         $attachIcon.textContent = "⚠️";
-        $attachName.textContent = "Upload failed";
+        $attachName.textContent = e?.message || "Upload failed";
         pendingUpload = { file_id: null, filename: "" };
       }
     });
@@ -343,8 +379,10 @@
 
       // If a file is attached, show “Using: filename” badge and clear the pending chip in the input row
       let usedFileId = null;
+      let uploadTurn = false;
       if (pendingUpload.file_id) {
         usedFileId = pendingUpload.file_id;
+        uploadTurn = true;
         const used = document.createElement("div");
         used.className = "used-file-note";
         used.innerHTML = `✅ Using: <strong>${(pendingUpload.filename.length > 36 ? pendingUpload.filename.slice(0,33) + "..." : pendingUpload.filename)}</strong>`;
@@ -360,8 +398,16 @@
       }
 
       // Assistant bubble
-      const { content: aContent } = createMsg("assistant", "Talking Care Navigator", true);
+      const { content: aContent, bubble: aBubble } = createMsg("assistant", "Talking Care Navigator", true);
       aContent.innerHTML = `<em>Thinking… ⏳</em>`;
+
+      // Upload-turn banner inside assistant bubble
+      if (uploadTurn) {
+        const banner = document.createElement("div");
+        banner.className = "upload-banner";
+        banner.textContent = "Answer based only on your attached document.";
+        aBubble.appendChild(banner);
+      }
 
       // State
       let buffer = "";
@@ -378,7 +424,7 @@
 
       const watchdog = setTimeout(() => {
         if (!started) {
-          aContent.innerHTML = `<span>⚠️ No stream started — check CORS settings on the server.</span>`;
+          aContent.innerHTML = `<span class="error-banner">⚠️ No stream started — check connectivity or CORS settings.</span>`;
           setStatus("");
         }
       }, 10000);
@@ -398,7 +444,7 @@
         });
       } catch (e) {
         clearTimeout(watchdog);
-        aContent.innerHTML = `<span>⚠️ Request failed: ${e?.message || e}</span>`;
+        aContent.innerHTML = `<span class="error-banner">⚠️ Request failed: ${escapeHtml(e?.message || e)}</span>`;
         setStatus("");
         currentAbort = null;
         return;
@@ -408,7 +454,7 @@
         clearTimeout(watchdog);
         let err = `HTTP ${r.status}`;
         try { err += ` ${await r.text()}`; } catch {}
-        aContent.innerHTML = `<span>⚠️ Stream failed: ${err}</span>`;
+        aContent.innerHTML = `<span class="error-banner">⚠️ Stream failed: ${escapeHtml(err)}</span>`;
         setStatus("");
         currentAbort = null;
         return;
@@ -439,12 +485,29 @@
       function handleEvent(event, raw) {
         if (event === "start") return;
 
+        if (event === "info") {
+          // Friendly error for ingestion failure (temp vector store creation)
+          try {
+            const obj = JSON.parse(raw);
+            if (obj?.note === "temp_vector_store_failed") {
+              const errMsg = (obj?.error || "We couldn't prepare your document for search. Please try uploading again.");
+              const banner = document.createElement("div");
+              banner.className = "error-banner";
+              banner.textContent = `⚠️ ${errMsg}`;
+              aBubble.appendChild(banner);
+              if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
+              setStatus("");
+            }
+          } catch {}
+          return;
+        }
+
         if (event === "error") {
           try {
             const obj = JSON.parse(raw);
-            aContent.innerHTML = `<span>⚠️ ${escapeHtml(JSON.stringify(obj))}</span>`;
+            aContent.innerHTML = `<span class="error-banner">⚠️ ${escapeHtml(JSON.stringify(obj))}</span>`;
           } catch {
-            aContent.innerHTML = `<span>⚠️ ${escapeHtml(raw)}</span>`;
+            aContent.innerHTML = `<span class="error-banner">⚠️ ${escapeHtml(raw)}</span>`;
           }
           setStatus("");
           return;
@@ -509,7 +572,7 @@
           flushBlocks(chunk);
         }
       } catch (e) {
-        aContent.insertAdjacentHTML("beforeend", `<p>⚠️ Stream error: ${escapeHtml(e?.message || String(e))}</p>`);
+        aContent.insertAdjacentHTML("beforeend", `<p class="error-banner">⚠️ Stream error: ${escapeHtml(e?.message || String(e))}</p>`);
       } finally {
         currentAbort = null;
         setStatus("");
@@ -542,7 +605,7 @@
     $in.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("tc-ask-stream").click(); }
     });
-    document.getElementById("tc-clear").addEventListener("click", () => {
+    $clear.addEventListener("click", () => {
       if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
       $chat.innerHTML = "";
       $in.value = "";
