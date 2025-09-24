@@ -1,39 +1,27 @@
 // /api/assistant.js
 //
-// Responses API + retrieval-first with optional per-turn uploaded file:
-// - Client uploads to /api/upload (purpose=assistants) and sends upload_file_id with the next turn.
-// - We create a TEMP vector store for that file and (IMPORTANT) if a file is attached,
-//   we search ONLY that temp store for this turn (no permanent library, no web search).
-//
-// API shape (current):
-// tools: [{ type: "file_search", vector_store_ids: ["vs_id", ...] }]
-// NO "tool_resources", NO "modalities".
-// text.format must be an object with type in: "text" | "json_object" | "json_schema".
-// We use { type: "text" }.
+// Responses API + retrieval-first. Supports an optional per-turn uploaded file:
+// - We upload the file separately via /api/upload (purpose=assistants).
+// - Here we build a TEMP vector store, ingest that file, and put it FIRST
+//   in the file_search tool's vector_store_ids for this turn.
 
 const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const OPENAI_ASSISTANT_ID     = process.env.OPENAI_ASSISTANT_ID || "";
-const OPENAI_VECTOR_STORE_ID  = process.env.OPENAI_VECTOR_STORE_ID || ""; // permanent library
+const OPENAI_VECTOR_STORE_ID  = process.env.OPENAI_VECTOR_STORE_ID || "";
+const ENABLE_WEB_SEARCH       = process.env.OPENAI_ENABLE_WEB_SEARCH === "1";
 
+const CORS_ALLOW_ORIGIN       = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
 const CORS_ALLOW_METHODS      = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
 const CORS_ALLOW_HEADERS      = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
 const CORS_MAX_AGE            = "86400";
 const DEBUG_SSE_LOG           = process.env.DEBUG_SSE_LOG === "1";
 
-// Allow both direct Vercel testing and Squarespace
-const ALLOWED_ORIGINS = [
-  "https://tc-assistant-proxy.vercel.app",
-  "https://www.talkingcare.uk"
-];
-
 if (!OPENAI_API_KEY) console.error("[assistant] Missing OPENAI_API_KEY");
-if (!OPENAI_VECTOR_STORE_ID) console.error("[assistant] Missing OPENAI_VECTOR_STORE_ID — retrieval requires a base store");
+if (!OPENAI_VECTOR_STORE_ID) console.error("[assistant] Missing OPENAI_VECTOR_STORE_ID — retrieval cannot run with /responses+file_search");
 
-function setCors(res, origin = "") {
-  if (ALLOWED_ORIGINS.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-  }
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", CORS_ALLOW_METHODS);
   res.setHeader("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS);
@@ -48,7 +36,9 @@ async function readBody(req) {
     req.setEncoding("utf8");
     req.on("data", (c) => (data += c));
     req.on("end", () => {
-      try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); }
+      const t = (data || "").trim();
+      if (!t) return resolve({});
+      try { resolve(JSON.parse(t)); } catch { resolve({}); }
     });
     req.on("error", reject);
   });
@@ -106,23 +96,17 @@ async function fetchAssistantInstructions() {
   }
 }
 
-function withGroundingPolicy(sys, fileAttached = false) {
+function withGroundingPolicy(sys) {
   const policy = `
 CRITICAL GROUNDING POLICY:
 Search the document library first using the file_search tool and base your answer on those documents.
-Only if no relevant passages are found may you consider other enabled tools. Clearly separate any external web sources in the final "Sources" list if used.
+Only if no relevant passages are found may you consider other enabled tools (e.g., web_search). Clearly separate any web sources in the final "Sources" list.
 Do not include inline URLs, bracketed numbers like [1], or footnotes inside the body. Only list sources once at the end under "Sources".
 Prefer short verbatim quotes for key definitions and include paragraph or section numbers where available.
 If nothing relevant is found in the library, say exactly: "No matching sources found in the library."
 Never answer purely from general knowledge without sources.
 `.trim();
-
-  const uploadRule = fileAttached ? `
-For this turn, ONLY use the uploaded document via file_search. Do not consult the permanent library and do not use web search.
-If the uploaded document does not contain the answer, say exactly: "No matching sources found in the uploaded document."
-`.trim() : "";
-
-  return [sys, policy, uploadRule].filter(Boolean).join("\n\n");
+  return `${sys}\n\n${policy}`;
 }
 
 function normalizeHistory(raw) {
@@ -194,29 +178,37 @@ async function createTempVectorStoreWithFile(fileId) {
   throw new Error("Vector store ingestion timeout");
 }
 
-// Build a properly shaped Responses API request.
-// IMPORTANT: If tempVectorStoreId is present, we attach ONLY that store.
 function buildResponsesRequest(historyArr, userMessage, sysInstructions, tempVectorStoreId = null, extra = {}) {
-  const uploadTurn = Boolean(tempVectorStoreId);
-  const groundedSys = withGroundingPolicy(sysInstructions, uploadTurn);
+  const uploadHint = tempVectorStoreId
+    ? `
+TURN DOCUMENT STATE (UPLOAD PRESENT):
+- A document is attached for this turn.
+- Treat it as the primary source for this turn.
+- Refer to it only as "the attached document" (never "files you uploaded" or "your upload").`
+    : `
+TURN DOCUMENT STATE (NO UPLOAD THIS TURN):
+- There is NO document attached for this turn.
+- Do NOT mention documents, uploads, or the library unless the user explicitly asks about them.
+- For greetings/small talk, do NOT search or cite; simply greet and ask how you can help.`;
+
+  const groundedSys = withGroundingPolicy(`${sysInstructions}\n\n${uploadHint}`.trim());
 
   const input = [{ role: "system", content: groundedSys }];
   for (const m of historyArr) input.push(m);
   if (userMessage) input.push({ role: "user", content: userMessage });
 
-  const tools = [];
-  if (uploadTurn) {
-    tools.push({ type: "file_search", vector_store_ids: [tempVectorStoreId] });
-  } else {
-    tools.push({ type: "file_search", vector_store_ids: [OPENAI_VECTOR_STORE_ID].filter(Boolean) });
-    // Intentionally NOT adding web_search to avoid FUNCTION_INVOCATION_FAILED on accounts without it.
-  }
+  const vectorStoreIds = tempVectorStoreId
+    ? [tempVectorStoreId, OPENAI_VECTOR_STORE_ID].filter(Boolean)
+    : [OPENAI_VECTOR_STORE_ID].filter(Boolean);
+
+  const tools = [{ type: "file_search", vector_store_ids: vectorStoreIds }];
+  if (ENABLE_WEB_SEARCH) tools.push({ type: "web_search" });
 
   return {
     model: OPENAI_MODEL,
     input,
     tools,
-    text: { format: { type: "text" } },
+    text: { format: { type: "text" }, verbosity: "medium" },
     ...extra,
   };
 }
@@ -251,15 +243,13 @@ async function handleNonStreaming(userMessage, history, uploadFileId) {
   return { ok: true, text, usage };
 }
 
-async function handleStreaming(req, res, userMessage, history, uploadFileId) {
-  setCors(res, req.headers.origin || "");
-
+async function handleStreaming(res, userMessage, history, uploadFileId) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
-    "Access-Control-Allow-Origin": ALLOWED_ORIGINS.includes(req.headers.origin || "") ? (req.headers.origin || "") : "",
+    "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN,
     "Access-Control-Allow-Methods": CORS_ALLOW_METHODS,
     "Access-Control-Allow-Headers": CORS_ALLOW_HEADERS,
   });
@@ -271,7 +261,6 @@ async function handleStreaming(req, res, userMessage, history, uploadFileId) {
   };
 
   send("start", { ok: true });
-
   const sys = await fetchAssistantInstructions();
 
   let tempVS = null;
@@ -284,8 +273,6 @@ async function handleStreaming(req, res, userMessage, history, uploadFileId) {
     }
   }
 
-  const payload = buildResponsesRequest(history, userMessage, sys, tempVS, { stream: true });
-
   const upstream = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -294,13 +281,13 @@ async function handleStreaming(req, res, userMessage, history, uploadFileId) {
       "Accept": "text/event-stream",
       "OpenAI-Beta": "assistants=v2",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(buildResponsesRequest(history, userMessage, sys, tempVS, { stream: true })),
   });
 
   if (!upstream.ok || !upstream.body) {
     let errTxt = "";
     try { errTxt = await upstream.text(); } catch {}
-    send("error", { ok:false, step:"responses_stream", status: upstream.status, error: errTxt || "no-body", payload });
+    send("error", { ok:false, step:"responses_stream", status: upstream.status, error: errTxt || "no-body" });
     try { res.end(); } catch {}
     return;
   }
@@ -358,26 +345,26 @@ async function handleStreaming(req, res, userMessage, history, uploadFileId) {
   } catch {
     // client aborted
   } finally {
-    try { send("done", "[DONE]"); } catch {}
+    send("done", "[DONE]");
     try { res.end(); } catch {}
   }
 }
 
 export default async function handler(req, res) {
-  setCors(res, req.headers.origin || "");
+  setCors(res);
   if (req.method === "OPTIONS") return endPreflight(res);
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST, OPTIONS");
     return res.status(405).json({ ok:false, error: "Method Not Allowed" });
-    }
+  }
 
   try {
     const body = await readBody(req);
-    const userMessage   = (body.userMessage || "").toString().trim();
+    const userMessage = (body.userMessage || "").toString().trim();
     const clientHistory = normalizeHistory(body.history || []);
-    const trimmedHistory= trimHistoryByChars(clientHistory, 8000);
-    const uploadFileId  = (body.upload_file_id || "").toString().trim() || null;
-    const mode          = (req.query.stream || "off").toString();
+    const trimmedHistory = trimHistoryByChars(clientHistory, 8000);
+    const uploadFileId = (body.upload_file_id || "").toString().trim() || null;
+    const mode = (req.query.stream || "off").toString();
 
     if (!userMessage) {
       return res.status(400).json({ ok:false, error: "Missing userMessage" });
@@ -387,7 +374,7 @@ export default async function handler(req, res) {
     }
 
     if (mode === "on") {
-      return await handleStreaming(req, res, userMessage, trimmedHistory, uploadFileId);
+      return await handleStreaming(res, userMessage, trimmedHistory, uploadFileId);
     } else {
       const out = await handleNonStreaming(userMessage, trimmedHistory, uploadFileId);
       return res.status(200).json(out);
@@ -395,7 +382,7 @@ export default async function handler(req, res) {
   } catch (err) {
     console.error("assistant handler error:", err);
     try {
-      return res.status(500).json({ ok:false, error: "Internal Server Error", detail: String(err?.message || err) });
+      return res.status(500).json({ ok:false, error: "Internal Server Error" });
     } catch {}
   }
 }
