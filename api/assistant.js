@@ -2,12 +2,11 @@
 //
 // Responses API + retrieval-first with optional per-turn uploaded file:
 // - Client uploads to /api/upload (purpose=assistants) and sends upload_file_id with the next turn.
-// - We create a TEMP vector store for that file and put it FIRST in file_search config.
+// - We create a TEMP vector store for that file and put it FIRST in tools[0].vector_store_ids.
 //
-// Key points:
-// - Per-tool config: tools: [{ type: "file_search", file_search: { vector_store_ids: [...] } }]
-// - NO `tool_resources` and NO `modalities` (API rejects them).
-// - Emits SSE info events for easier debugging.
+// API shape (current):
+// tools: [{ type: "file_search", vector_store_ids: ["vs_tmp", "vs_perm"] }, { type: "web_search" }]
+// NO "tool_resources", NO "modalities".
 
 const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -204,9 +203,9 @@ function buildResponsesRequest(historyArr, userMessage, sysInstructions, tempVec
     ? [tempVectorStoreId, OPENAI_VECTOR_STORE_ID].filter(Boolean)
     : [OPENAI_VECTOR_STORE_ID].filter(Boolean);
 
-  // Tools: per-tool config (no `tool_resources`, no `modalities`)
+  // Tools: current API requires vector_store_ids directly on the tool
   const tools = [
-    { type: "file_search", file_search: { vector_store_ids: vectorStoreIds } }
+    { type: "file_search", vector_store_ids: vectorStoreIds }
   ];
   if (ENABLE_WEB_SEARCH && !tempVectorStoreId) {
     // Keep web search for normal turns only. Upload turns are library-only.
