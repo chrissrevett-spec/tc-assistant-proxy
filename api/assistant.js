@@ -1,7 +1,8 @@
 // /api/assistant.js
 //
-// Retrieval-first via file_search (vector store on tool), rolling history,
-// and per-turn attachments on the user message. No tool_resources.
+// Retrieval-first with per-turn attachments prioritized.
+// Key change: when files are attached, we embed them as input_file content AND
+// include them in 'attachments' for file_search. Plus a per-turn directive.
 
 const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -98,17 +99,17 @@ async function fetchAssistantInstructions() {
 function withGroundingPolicy(sys) {
   const policy = `
 CRITICAL GROUNDING POLICY:
-If the user attached files in this turn, SEARCH THE ATTACHED FILES FIRST using file_search and ground your answer in them (cite by filename).
-Use the document library (vector store) to supplement only if attachments are insufficient or off-topic.
-List sources once at the end under "Sources" (no inline links or [1] refs).
-Prefer short verbatim quotes with paragraph/section numbers when available.
+If the user attached files in this turn, SEARCH THE ATTACHMENTS FIRST using file_search and ground your answer in them (cite by filename).
+Use the document library (vector store) only if the attachments are insufficient or off-topic.
+List sources once at the end under "Sources" (no inline URLs or [1] markers).
+Prefer short verbatim quotes with paragraph/section numbers where available.
 If nothing relevant is found in the library, reply: "No matching sources found in the library."
 Never answer purely from general knowledge without sources.
 `.trim();
   return `${sys}\n\n${policy}`;
 }
 
-// Tool declaration with vector_store_ids on the tool (works in your tenant)
+// Tool declaration with vector_store_ids on the tool (your tenant supports this form)
 function getTools() {
   const tools = [{
     type: "file_search",
@@ -118,6 +119,7 @@ function getTools() {
   return tools;
 }
 
+// History helpers
 function normalizeHistory(raw) {
   const out = [];
   if (!Array.isArray(raw)) return out;
@@ -140,33 +142,35 @@ function trimHistoryByChars(hist, maxChars = 8000) {
   return rev.reverse();
 }
 
+// ---- BUILD REQUEST: embed files as input_file + attachments ----
 function buildResponsesRequest(historyArr, userMessage, sysInstructions, fileIds = [], attachmentsMeta = [], extra = {}) {
   const groundedSys = withGroundingPolicy(sysInstructions);
   const tools = getTools();
+
   const input = [{ role: "system", content: groundedSys }];
 
-  if (Array.isArray(attachmentsMeta) && attachmentsMeta.length) {
-    const names = attachmentsMeta.map(a => a?.name).filter(Boolean).join(", ");
+  const hasAttachments = Array.isArray(fileIds) && fileIds.length > 0;
+  const attachmentNames = (attachmentsMeta || []).map(a => a?.name).filter(Boolean);
+
+  if (hasAttachments && attachmentNames.length) {
     input.push({
       role: "system",
-      content: `User attached files for this turn: ${names}. Search these attachments first; supplement with the library only if needed, and cite them by filename.`
+      content: `User attached files for this turn: ${attachmentNames.join(", ")}. Search these attachments first before the library and cite them by filename.`
     });
   }
 
   for (const m of historyArr) input.push(m);
 
   if (userMessage) {
-    const hasAttachments = Array.isArray(fileIds) && fileIds.length > 0;
     if (hasAttachments) {
-      const attachments = fileIds.map(id => ({
-        file_id: id,
-        tools: [{ type: "file_search" }]
-      }));
-      input.push({
-        role: "user",
-        content: [{ type: "input_text", text: userMessage }],
-        attachments
-      });
+      // 1) Put the files inside the user content for high salience
+      const content = [{ type: "input_text", text: userMessage }];
+      for (const id of fileIds) {
+        content.push({ type: "input_file", file_id: id });
+      }
+      // 2) Also include them in attachments so file_search can index/search them
+      const attachments = fileIds.map(id => ({ file_id: id, tools: [{ type: "file_search" }] }));
+      input.push({ role: "user", content, attachments });
     } else {
       input.push({ role: "user", content: userMessage });
     }
