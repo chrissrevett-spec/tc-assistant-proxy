@@ -8,6 +8,7 @@ export const config = {
 import Busboy from "busboy";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
 const CORS_ALLOW_METHODS = "POST, OPTIONS";
 const CORS_ALLOW_HEADERS = "Content-Type";
 const CORS_MAX_AGE = "86400";
@@ -36,16 +37,29 @@ function readMultipart(req) {
     let fileName = "upload.bin";
     let fileMIME = "application/octet-stream";
 
-    bb.on("file", (_fieldname, stream, filename, _encoding, mimetype) => {
-      console.log("📂 File event hit:", { filename, encoding: _encoding, mimeType: mimetype });
-      if (filename) fileName = typeof filename === "string" ? filename : String(filename);
-      if (mimetype) fileMIME = mimetype;
+    bb.on("file", (_fieldname, stream, filename, encoding, mimetype) => {
+      // Busboy sometimes gives filename as an object (Squarespace/iframes/proxies).
+      let resolvedName = "upload.bin";
+      if (typeof filename === "string" && filename.trim()) {
+        resolvedName = filename.trim();
+      } else if (filename && typeof filename === "object" && typeof filename.filename === "string") {
+        resolvedName = filename.filename.trim() || "upload.bin";
+      }
+      const resolvedType =
+        typeof mimetype === "string" && mimetype.trim()
+          ? mimetype.trim()
+          : (filename && typeof filename === "object" && typeof filename.mimeType === "string"
+              ? filename.mimeType.trim()
+              : "application/octet-stream");
+
+      console.log("📂 File event hit:", { filename, encoding, mimeType: mimetype });
+      fileName = resolvedName;
+      fileMIME = resolvedType;
+
       const chunks = [];
       stream.on("data", (d) => chunks.push(d));
       stream.on("limit", () => reject(new Error("File too large")));
-      stream.on("end", () => {
-        fileBuffer = Buffer.concat(chunks);
-      });
+      stream.on("end", () => { fileBuffer = Buffer.concat(chunks); });
     });
 
     bb.on("error", (err) => {
@@ -68,10 +82,9 @@ function readMultipart(req) {
 
 async function uploadToOpenAI({ fileBuffer, fileName, fileMIME }) {
   console.log("⬆️ Uploading to OpenAI...");
-  // Use File to ensure correct filename is preserved
-  const fileObj = new File([fileBuffer], fileName, { type: fileMIME });
   const form = new FormData();
-  form.append("file", fileObj);
+  // Use Blob + filename param to preserve the original name
+  form.append("file", new Blob([fileBuffer], { type: fileMIME }), fileName);
   form.append("purpose", "assistants");
 
   const r = await fetch("https://api.openai.com/v1/files", {
