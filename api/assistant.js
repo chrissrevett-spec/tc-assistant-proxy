@@ -190,25 +190,23 @@ function buildResponsesRequest(historyArr, userMessage, sysInstructions, tempVec
   if (userMessage) input.push({ role: "user", content: userMessage });
 
   // Declare tools
-  const tools = [{ type: "file_search" }];
-  if (ENABLE_WEB_SEARCH) tools.push({ type: "web_search" });
+const vectorStoreIds = tempVectorStoreId
+  ? [tempVectorStoreId, OPENAI_VECTOR_STORE_ID].filter(Boolean)
+  : [OPENAI_VECTOR_STORE_ID].filter(Boolean);
 
-  // IMPORTANT: vector stores go here
-  const vectorStoreIds = tempVectorStoreId
-    ? [tempVectorStoreId, OPENAI_VECTOR_STORE_ID].filter(Boolean)
-    : [OPENAI_VECTOR_STORE_ID].filter(Boolean);
+const tools = [
+  { type: "file_search", file_search: { vector_store_ids: vectorStoreIds } }
+];
+if (ENABLE_WEB_SEARCH) tools.push({ type: "web_search" });
 
-  const tool_resources = { file_search: { vector_store_ids: vectorStoreIds } };
-
-  const payload = {
-    model: OPENAI_MODEL,
-    input,
-    tools,
-    tool_resources,
-    modalities: ["text"],
-    text: { format: "markdown", verbosity: "medium" },
-    ...extra,
-  };
+const payload = {
+  model: OPENAI_MODEL,
+  input,
+  tools,
+  modalities: ["text"],
+  text: { format: "markdown", verbosity: "medium" },
+  ...extra,
+};
 
   // If a temp upload is present and you want deterministic retrieval without web,
   // keep web disabled unless explicitly enabled via env.
