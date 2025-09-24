@@ -1,499 +1,546 @@
-// /api/assistant.js
-//
-// Modes via OpenAI "Responses" API:
-//  • Non-streaming  : POST /api/assistant?stream=off  -> JSON { ok, text, usage }
-//  • Streaming (SSE): POST /api/assistant?stream=on   -> raw SSE forwarded as-is
-//
-// What this version does
-// 1) Retrieval-first via file_search against your Vector Store (REQUIRES OPENAI_VECTOR_STORE_ID)
-// 2) Optional web search controlled by OPENAI_ENABLE_WEB_SEARCH ("1" to allow)
-// 3) Strict grounding policy; sources only at the end (no inline links)
-// 4) Rolling conversation history (client-provided), trimmed server-side
-// 5) Optional per-request TEMP vector store created from an uploaded file_id,
-//    which is merged with your permanent store for that response
-// 6) SSE passthrough with clear error surfacing
-//
-// Required env vars
-//  - OPENAI_API_KEY
-//  - OPENAI_ASSISTANT_ID
-//  - OPENAI_VECTOR_STORE_ID   <-- required for /responses + file_search
-// Optional
-//  - OPENAI_MODEL (default: gpt-4o-mini)
-//  - OPENAI_ENABLE_WEB_SEARCH ("1" to allow web fallback)
-//  - CORS_ALLOW_ORIGIN (default: https://tc-assistant-proxy.vercel.app)
-//  - DEBUG_SSE_LOG ("1" to mirror deltas/tool calls to logs)
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Talking Care Navigator</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { color-scheme: light dark; scrollbar-color: #ccc #FAFAFA; scrollbar-width: thin; }
+    html::-webkit-scrollbar, body::-webkit-scrollbar { width: 10px; }
+    html::-webkit-scrollbar-track, body::-webkit-scrollbar-track { background: #FAFAFA; }
+    html::-webkit-scrollbar-thumb, body::-webkit-scrollbar-thumb { background: #ccc; border-radius: 8px; }
+    html:hover::-webkit-scrollbar-thumb, body:hover::-webkit-scrollbar-thumb { background: #b3b3b3; }
 
-const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const OPENAI_ASSISTANT_ID     = process.env.OPENAI_ASSISTANT_ID || "";
-const OPENAI_VECTOR_STORE_ID  = process.env.OPENAI_VECTOR_STORE_ID || "";
-const ENABLE_WEB_SEARCH       = process.env.OPENAI_ENABLE_WEB_SEARCH === "1";
+    html, body { height: 100%; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      margin: 0; padding: 0; background: #fff; color: #000;
+      display: flex; flex-direction: column; min-height: 100dvh;
+    }
 
-const CORS_ALLOW_ORIGIN       = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
-const CORS_ALLOW_METHODS      = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
-const CORS_ALLOW_HEADERS      = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
-const CORS_MAX_AGE            = "86400";
-const DEBUG_SSE_LOG           = process.env.DEBUG_SSE_LOG === "1";
+    .shell { width: 100%; max-width: 980px; margin: 0 auto; flex: 1 1 auto; display: flex; flex-direction: column; }
 
-if (!OPENAI_API_KEY) console.error("[assistant] Missing OPENAI_API_KEY");
-if (!OPENAI_ASSISTANT_ID) console.warn("[assistant] OPENAI_ASSISTANT_ID not set — using fallback system instructions.");
-if (!OPENAI_VECTOR_STORE_ID) console.error("[assistant] Missing OPENAI_VECTOR_STORE_ID — retrieval cannot run with /responses+file_search");
+    .wrap { padding: 16px 16px 8px; }
+    h1 { margin: 0 0 6px; font-size: 22px; }
+    .sub { margin: 0; font-size: 14px; color: #000; opacity: .9; }
+    #status { font-size: 12px; color: #555; min-height: 18px; margin-top: 6px; }
 
-// ---------- CORS ----------
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN);
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", CORS_ALLOW_METHODS);
-  res.setHeader("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS);
-  res.setHeader("Access-Control-Max-Age", CORS_MAX_AGE);
-}
-function endPreflight(res) { res.statusCode = 204; res.end(); }
+    .inputbar {
+      background: #fff;
+      padding: 8px 16px 12px;
+      border-top: 1px solid #f0f0f0;
+      border-bottom: 1px solid #f0f0f0;
+      order: 2;
+    }
+    .inputrow { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
+    .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
 
-// ---------- Body parsing ----------
-async function readBody(req) {
-  if (req.body && typeof req.body === "object") return req.body;
-  return await new Promise((resolve, reject) => {
-    let data = "";
-    req.setEncoding("utf8");
-    req.on("data", (c) => (data += c));
-    req.on("end", () => {
-      const t = (data || "").trim();
-      if (!t) return resolve({});
-      if (t.startsWith("{") || t.startsWith("[")) {
-        try { resolve(JSON.parse(t)); } catch { resolve({}); }
-      } else {
-        resolve({ userMessage: t });
+    textarea {
+      flex: 1 1 420px; min-height: 48px; max-height: 160px; resize: vertical;
+      padding: 10px; font: inherit; background: #FAFAFA; color: #000;
+      border: 1px solid #ddd; border-radius: 10px; transition: background .2s, border-color .2s, box-shadow .2s;
+      scrollbar-width: thin; scrollbar-color: #ccc #FAFAFA; box-sizing: border-box;
+    }
+    textarea:focus { background: #f7f7f7; border-color: #ccc; outline: none; box-shadow: 0 0 0 2px rgba(0,0,0,0.04); }
+
+    button {
+      padding: 10px 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
+      background: #FAFAFA; color: #333; transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
+      white-space: nowrap;
+    }
+    button:hover { background: #f0f0f0; border-color: #ccc; }
+    button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
+
+    .attach { display:flex; align-items:center; gap:8px; }
+    .attach input[type="file"] { display:none; }
+    .file-badge {
+      display:flex; align-items:center; gap:6px;
+      border:1px solid #ddd; border-radius:8px; padding:6px 8px; background:#FAFAFA; color:#333; font-size:12px;
+      max-width: 100%;
+    }
+    .file-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
+    .file-badge.ok { border-color:#16a34a; background:#f0fff4; color:#166534; }
+    .file-badge.ok .icon { color:#16a34a; }
+    .file-badge.err { border-color:#b91c1c; background:#fef2f2; color:#991b1b; }
+    .file-actions { display:flex; gap:6px; }
+    .icon { font-size: 14px; }
+
+    .chat-wrap { display: none; }
+    .chat {
+      border: 1px solid #eee; background: #fff; border-radius: 12px;
+      padding: 12px;
+      box-shadow: 0 0 0 1px rgba(0,0,0,.03), 0 12px 24px rgba(0,0,0,.06);
+      margin: 12px 16px 0;
+    }
+
+    .chat-active .chat-wrap { display: block; order: 2; }
+    .chat-active .inputbar { order: 3; border-top: none; }
+
+    .msg { display: flex; gap: 10px; margin: 10px 0; align-items: flex-start; }
+    .msg.assistant { flex-direction: row; }
+    .msg.user { flex-direction: row-reverse; }
+
+    .avatar {
+      flex: 0 0 32px; height: 32px; width: 32px; border-radius: 50%;
+      display: grid; place-items: center; background: #FAFAFA; border: 1px solid #eee;
+      font-size: 18px; line-height: 1;
+    }
+
+    .bubble {
+      max-width: 80%;
+      background: #FAFAFA; color: #000;
+      border: 1px solid #eee; border-radius: 14px;
+      padding: 10px 12px; position: relative;
+      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+      overflow: hidden;
+    }
+    .msg.user .bubble { background: #FFF; border-color: #ddd; }
+
+    .bubble-head {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+      font-weight: 600; font-size: 13px; color: #111;
+    }
+
+    .bubble-actions { margin-left: auto; display: flex; gap: 6px; }
+    .copy-btn {
+      border: 1px solid #ddd; background: #FAFAFA; color: #333; border-radius: 6px;
+      font-size: 12px; padding: 2px 6px; cursor: pointer;
+    }
+    .copy-btn:hover { background: #f0f0f0; }
+
+    .bubble-content { font-size: 14px; line-height: 1.5; }
+    .bubble-content p { margin: 0 0 8px; }
+    .bubble-content code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #f5f5f5; padding: 1px 4px; border-radius: 4px; border: 1px solid #eee; }
+    .bubble-content pre { background: #f5f5f5; padding: 8px; border-radius: 8px; overflow-x: auto; border: 1px solid #eee; }
+    .bubble-content h1, .bubble-content h2, .bubble-content h3 { margin: 12px 0 6px; }
+    .bubble-content ul, .bubble-content ol { margin: 8px 0 8px 20px; }
+    .bubble-content blockquote { margin: 8px 0; padding: 8px 12px; background: #f7f7f7; border-left: 3px solid #ddd; border-radius: 6px; }
+
+    .bubble-content table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 14px; }
+    .bubble-content th, .bubble-content td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
+    .bubble-content th { background: #f7f7f7; }
+    .bubble-content tr:nth-child(even) td { background: #fcfcfc; }
+
+    .sources { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444; }
+    .sources .title { font-weight: 600; margin-bottom: 6px; }
+    .small-note { font-size:12px; color:#555; margin-top:6px; }
+  </style>
+</head>
+<body>
+  <div class="shell" id="shell">
+    <div class="wrap">
+      <h1>Talking Care Navigator</h1>
+      <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, auditing, policy queries and more. Always consult your organisations' confidentiality policy.</p>
+      <div id="status"></div>
+    </div>
+
+    <div class="inputbar" id="inputbar">
+      <div class="inputrow">
+        <label for="tc-input" class="sr">Message</label>
+        <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
+
+        <div class="attach">
+          <input id="file-input" type="file" />
+          <button id="btn-attach" title="Attach a file">📎 Attach</button>
+          <div id="file-badge" class="file-badge" style="display:none;">
+            <span class="icon" id="file-icon">⌛</span>
+            <span class="file-name" id="file-name"></span>
+            <div class="file-actions">
+              <button id="btn-remove" title="Remove">✖</button>
+            </div>
+          </div>
+        </div>
+
+        <button id="tc-ask-stream" title="Send">✈️ Send</button>
+        <button id="tc-clear" class="secondary" title="Clear chat">Clear</button>
+      </div>
+    </div>
+
+    <div class="chat-wrap" id="chatwrap">
+      <div id="chat" class="chat" aria-live="polite" aria-busy="false"></div>
+    </div>
+  </div>
+
+  <script>
+    if ('scrollRestoration' in history) {
+      history.scrollRestoration = 'manual';
+    }
+    window.addEventListener('DOMContentLoaded', () => {
+      window.scrollTo(0, 0);
+      setTimeout(() => window.scrollTo(0, 0), 0);
+    });
+    window.addEventListener('pageshow', (e) => {
+      if (e.persisted) { window.scrollTo(0, 0); }
+    });
+  </script>
+
+  <script type="module">
+    import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
+    const purifyUrl = "https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js";
+    await import(purifyUrl);
+
+    const API_BASE = location.origin.replace(/\/$/, "");
+    const $shell    = document.getElementById("shell");
+    const $chat     = document.getElementById("chat");
+    const $chatwrap = document.getElementById("chatwrap");
+    const $inputbar = document.getElementById("inputbar");
+    const $in       = document.getElementById("tc-input");
+    const $send     = document.getElementById("tc-ask-stream");
+    const $clear    = document.getElementById("tc-clear");
+    const $status   = document.getElementById("status");
+
+    const $fileInput = document.getElementById("file-input");
+    const $attachBtn = document.getElementById("btn-attach");
+    const $fileBadge = document.getElementById("file-badge");
+    const $fileIcon  = document.getElementById("file-icon");
+    const $fileName  = document.getElementById("file-name");
+    const $btnRemove = document.getElementById("btn-remove");
+
+    marked.setOptions({ mangle: false, headerIds: false });
+    function setStatus(t){ $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
+
+    // ---- Conversation history (client side) ----
+    const history = (() => {
+      try { return JSON.parse(sessionStorage.getItem("tc_history") || "[]"); }
+      catch { return []; }
+    })();
+    function saveHistory(){ try { sessionStorage.setItem("tc_history", JSON.stringify(history)); } catch {} }
+    function clearHistory(){ history.length = 0; saveHistory(); }
+
+    function activateChat() {
+      if (!$shell.classList.contains("chat-active")) {
+        $shell.classList.add("chat-active");
+      }
+    }
+
+    function ellipsize(name, max=28) {
+      if (!name) return "";
+      if (name.length <= max) return name;
+      const keep = Math.max(8, Math.floor((max - 3) / 2));
+      return name.slice(0, keep) + "…" + name.slice(-keep);
+    }
+
+    function createMsg(role, headerText, withCopy=false) {
+      const msg = document.createElement("div");
+      msg.className = `msg ${role}`;
+      const avatar = document.createElement("div"); avatar.className = "avatar"; avatar.textContent = role === "assistant" ? "📖" : "🙂";
+      const bubble = document.createElement("div"); bubble.className = "bubble";
+      const head = document.createElement("div"); head.className = "bubble-head"; head.textContent = headerText;
+
+      if (withCopy) {
+        const actions = document.createElement("div"); actions.className = "bubble-actions";
+        const copyBtn = document.createElement("button");
+        copyBtn.className = "copy-btn"; copyBtn.type = "button"; copyBtn.title = "Copy"; copyBtn.textContent = "📋 Copy";
+        copyBtn.addEventListener("click", () => {
+          const txt = content.innerText.trim();
+          navigator.clipboard.writeText(txt).then(() => {
+            copyBtn.textContent = "✅ Copied";
+            setTimeout(() => (copyBtn.textContent = "📋 Copy"), 1200);
+          });
+        });
+        actions.appendChild(copyBtn);
+        head.appendChild(actions);
+      }
+
+      const content = document.createElement("div"); content.className = "bubble-content";
+      bubble.appendChild(head); bubble.appendChild(content);
+      msg.appendChild(avatar); msg.appendChild(bubble);
+      $chat.appendChild(msg);
+      $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
+      return { msg, content, bubble };
+    }
+
+    function renderMarkdown(md, el) {
+      const html = marked.parse(md || "");
+      const safe = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+      el.innerHTML = safe;
+      $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
+    }
+
+    function appendSources(containerEl, citations) {
+      if (!citations || citations.length === 0) return;
+      const seenFile = new Set(), seenURL = new Set();
+      const files = [], urls = [];
+      for (const c of citations) {
+        if (c.kind === "file") { if (!seenFile.has(c.id)) { seenFile.add(c.id); files.push(c); } }
+        if (c.kind === "web")  { if (!seenURL.has(c.url)) { seenURL.add(c.url); urls.push(c); } }
+      }
+      if (!files.length && !urls.length) return;
+
+      const src = document.createElement("div"); src.className = "sources";
+      const title = document.createElement("div"); title.className = "title"; title.textContent = "Sources:";
+      src.appendChild(title);
+
+      const list = document.createElement("ul"); list.style.margin = "0"; list.style.paddingLeft = "20px";
+      [...files, ...urls].forEach((c) => {
+        const li = document.createElement("li");
+        li.textContent = c.label;
+        list.appendChild(li);
+      });
+      src.appendChild(list);
+      containerEl.appendChild(src);
+      $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
+    }
+
+    let currentAbort = null;
+    let uploaded = null; // { file_id, filename }
+
+    $attachBtn.addEventListener("click", () => $fileInput.click());
+    $btnRemove.addEventListener("click", () => {
+      uploaded = null;
+      $fileBadge.style.display = "none";
+      $fileInput.value = "";
+    });
+    $fileInput.addEventListener("change", async () => {
+      if (!$fileInput.files || !$fileInput.files[0]) return;
+      const f = $fileInput.files[0];
+
+      // Show badge while uploading
+      $fileBadge.style.display = "flex";
+      $fileBadge.classList.remove("ok", "err");
+      $fileIcon.textContent = "⌛";
+      $fileName.textContent = ellipsize(f.name);
+
+      try {
+        const form = new FormData();
+        form.append("file", f, f.name);
+        const r = await fetch(`${API_BASE}/api/assistant/files/upload`, {
+          method: "POST",
+          body: form,
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`);
+        uploaded = { file_id: j.file_id, filename: f.name };
+
+        // GREEN TICK ✓
+        $fileBadge.classList.add("ok");
+        $fileIcon.textContent = "✓";
+      } catch (e) {
+        uploaded = null;
+        $fileBadge.classList.add("err");
+        $fileIcon.textContent = "⚠️";
+        $fileName.textContent = `Upload failed`;
       }
     });
-    req.on("error", reject);
-  });
-}
 
-// ---------- OpenAI helpers ----------
-async function oaJson(path, method, body, headers = {}) {
-  const r = await fetch(`https://api.openai.com/v1${path}`, {
-    method,
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-      "OpenAI-Beta": "assistants=v2", // needed for retrieval on /responses
-      ...headers,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!r.ok) {
-    const errTxt = await r.text().catch(() => "");
-    throw new Error(`${method} ${path} failed: ${r.status} ${errTxt}`);
-  }
-  return r.json();
-}
+    async function askStream(prompt) {
+      activateChat();
 
-async function oaJsonNoBeta(path, method, body, headers = {}) {
-  // Some endpoints (files upload via multipart on a separate route) won’t use this.
-  const r = await fetch(`https://api.openai.com/v1${path}`, {
-    method,
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-      ...headers,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!r.ok) {
-    const errTxt = await r.text().catch(() => "");
-    throw new Error(`${method} ${path} failed: ${r.status} ${errTxt}`);
-  }
-  return r.json();
-}
+      // Persist user turn into local history
+      history.push({ role: "user", content: prompt }); saveHistory();
 
-// ---------- Files: upload (multipart) ----------
-export async function config() {
-  return {
-    api: {
-      bodyParser: false, // we handle raw for multipart in /api/files/upload
-    }
-  };
-}
+      // User bubble
+      const userMsg = createMsg("user", "You");
+      userMsg.content.textContent = prompt;
 
-async function readMultipartFile(req) {
-  // Simple multipart parser for a single file field "file"
-  // Works in Vercel/Node 18+ if content-type is multipart/form-data
-  const contentType = req.headers["content-type"] || "";
-  const m = contentType.match(/boundary=(.+)$/);
-  if (!m) throw new Error("Invalid multipart/form-data");
-  const boundary = m[1];
+      // If a file was attached, show a one-liner under the user bubble, then clear badge
+      let uploadForThisTurn = null;
+      if (uploaded && uploaded.file_id) {
+        uploadForThisTurn = { ...uploaded };
+        const note = document.createElement("div");
+        note.className = "small-note";
+        note.textContent = `Attached: ${ellipsize(uploaded.filename, 40)}`;
+        userMsg.content.appendChild(note);
 
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  const buf = Buffer.concat(chunks);
+        // clear UI badge for next turn
+        uploaded = null;
+        $fileBadge.style.display = "none";
+        $fileInput.value = "";
+      }
 
-  const parts = buf.toString("binary").split(`--${boundary}`);
-  for (const part of parts) {
-    if (!part || part === "--\r\n") continue;
-    const [rawHeaders, rawBody] = part.split("\r\n\r\n");
-    if (!rawHeaders || !rawBody) continue;
-    if (/name="file"/i.test(rawHeaders)) {
-      const filenameMatch = rawHeaders.match(/filename="([^"]+)"/i);
-      const filename = filenameMatch ? filenameMatch[1] : "upload.bin";
-      // strip trailing \r\n--
-      const bodyBin = rawBody.replace(/\r\n--$/, "");
-      const bodyBuf = Buffer.from(bodyBin, "binary");
-      return { filename, bodyBuf, contentType: "application/octet-stream" };
-    }
-  }
-  throw new Error("No file field found");
-}
+      // Assistant bubble
+      const { content: aContent } = createMsg("assistant", "Talking Care Navigator", true);
+      aContent.innerHTML = `<em>Thinking… ⏳</em>`;
 
-async function openaiUploadFileReturnId(filename, bodyBuf) {
-  const form = new FormData();
-  form.append("purpose", "assistants");
-  form.append("file", new Blob([bodyBuf]), filename);
+      // State
+      let buffer = "";
+      let started = false;
+      let firstDeltaSeen = false;
+      let mdAccum = "";
+      const citations = [];
+      let sourcesAppended = false;
+      let assistantTurnSaved = false;
 
-  const r = await fetch("https://api.openai.com/v1/files", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${OPENAI_API_KEY}` },
-    body: form,
-  });
-  if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    throw new Error(`POST /files failed: ${r.status} ${t}`);
-  }
-  const data = await r.json();
-  return data.id; // file_id
-}
+      setStatus("Thinking… ⏳");
+      const ac = new AbortController();
+      currentAbort = ac;
 
-// ---------- Assistant instructions (small cache) ----------
-const INSTR_CACHE_TTL_MS = 5 * 60 * 1000;
-let instrCache = { text: "", at: 0 };
-
-async function fetchAssistantInstructions() {
-  if (!OPENAI_ASSISTANT_ID) {
-    return "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
-  }
-  const now = Date.now();
-  if (instrCache.text && now - instrCache.at < INSTR_CACHE_TTL_MS) return instrCache.text;
-
-  try {
-    const r = await fetch(`https://api.openai.com/v1/assistants/${OPENAI_ASSISTANT_ID}`, {
-      method: "GET",
-      headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "assistants=v2",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-      },
-    });
-    if (!r.ok) {
-      const errTxt = await r.text().catch(() => "");
-      console.warn(`[assistant] Failed to fetch assistant: ${r.status} ${errTxt}`);
-      return "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
-    }
-    const data = await r.json();
-    const sys = (data && typeof data.instructions === "string" && data.instructions.trim()) ? data.instructions.trim() : "";
-    const finalSys = sys || "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
-    instrCache = { text: finalSys, at: now };
-    console.info("[assistant] Using system instructions from Assistant:", { id: OPENAI_ASSISTANT_ID, hasInstructions: !!sys });
-    return finalSys;
-  } catch (e) {
-    console.warn("[assistant] Error fetching assistant instructions:", e?.message || e);
-    return "You are Talking Care Navigator. Be concise, practical, UK-focused, and cite official guidance at the end when relevant.";
-  }
-}
-
-// ---------- Grounding policy ----------
-function withGroundingPolicy(sys) {
-  const policy = `
-CRITICAL GROUNDING POLICY:
-Search the document library first using the file_search tool and base your answer on those documents.
-Only if no relevant passages are found may you consider other enabled tools (e.g., web_search). Clearly separate any web sources in the final "Sources" list.
-Do not include inline URLs, bracketed numbers like [1], or footnotes inside the body. Only list sources once at the end under "Sources".
-Prefer short verbatim quotes for key definitions and include paragraph or section numbers where available.
-If nothing relevant is found in the library, say exactly: "No matching sources found in the library."
-Never answer purely from general knowledge without sources.
-`.trim();
-  return `${sys}\n\n${policy}`;
-}
-
-// ---------- Tools config ----------
-function getTools(vectorStoreIds) {
-  const tools = [{
-    type: "file_search",
-    vector_store_ids: vectorStoreIds,
-  }];
-  if (ENABLE_WEB_SEARCH) {
-    tools.push({ type: "web_search" });
-  }
-  return tools;
-}
-
-// ---------- History trimming ----------
-function normalizeHistory(raw) {
-  const out = [];
-  if (!Array.isArray(raw)) return out;
-  for (const m of raw) {
-    if (!m || typeof m.content !== "string") continue;
-    if (m.role !== "user" && m.role !== "assistant") continue;
-    out.push({ role: m.role, content: m.content });
-  }
-  return out;
-}
-function trimHistoryByChars(hist, maxChars = 8000) {
-  let acc = 0;
-  const rev = [];
-  for (let i = hist.length - 1; i >= 0; i--) {
-    const c = hist[i]?.content || "";
-    acc += c.length;
-    rev.push(hist[i]);
-    if (acc >= maxChars) break;
-  }
-  return rev.reverse();
-}
-
-// ---------- TEMP vector store ingest ----------
-async function createTempVectorStoreWithFile(fileId) {
-  // 1) Create empty temp store
-  const vs = await oaJsonNoBeta("/vector_stores", "POST", { name: `tmp_vs_${Date.now()}` }, { "OpenAI-Beta": "assistants=v2" });
-  const vsId = vs.id;
-
-  // 2) Add file to store
-  const added = await oaJsonNoBeta(`/vector_stores/${vsId}/files`, "POST", { file_id: fileId }, { "OpenAI-Beta": "assistants=v2" });
-  const addId = added.id || fileId;
-
-  // 3) Poll file status in this store
-  const deadline = Date.now() + 20000; // 20s
-  while (Date.now() < deadline) {
-    const f = await oaJsonNoBeta(`/vector_stores/${vsId}/files/${addId}`, "GET", null, { "OpenAI-Beta": "assistants=v2" });
-    const st = f.status || f.state || "completed";
-    if (st === "completed") return vsId;
-    if (st === "failed" || st === "error") throw new Error(`Vector store ingestion failed: ${st}`);
-    await new Promise(r => setTimeout(r, 800));
-  }
-  throw new Error("Vector store ingestion timeout");
-}
-
-// ---------- Build Responses request ----------
-function buildResponsesRequest(historyArr, userMessage, sysInstructions, extraVectorStoreIds = [], extra = {}) {
-  const groundedSys = withGroundingPolicy(sysInstructions);
-  const input = [{ role: "system", content: groundedSys }];
-  for (const m of historyArr) input.push(m);
-  if (userMessage) input.push({ role: "user", content: userMessage });
-
-  // Always include your permanent store; optionally merge temp store id(s)
-  const vectorStoreIds = [OPENAI_VECTOR_STORE_ID, ...extraVectorStoreIds].filter(Boolean);
-  const tools = getTools(vectorStoreIds);
-
-  return {
-    model: OPENAI_MODEL,
-    input,
-    tools,
-    text: { format: { type: "text" }, verbosity: "medium" },
-    ...extra,
-  };
-}
-
-// ---------- Helpers ----------
-function extractTextFromResponse(resp) {
-  let out = "";
-  if (Array.isArray(resp?.output)) {
-    for (const item of resp.output) {
-      if (item?.type === "message" && Array.isArray(item.content)) {
-        for (const part of item.content) {
-          if (part?.type === "output_text" && typeof part.text === "string") out += part.text;
+      const watchdog = setTimeout(() => {
+        if (!started) {
+          aContent.innerHTML = `<span>⚠️ No stream started — check CORS settings on the server.</span>`;
+          setStatus("");
         }
+      }, 10000);
+
+      // Build body, including the uploaded file_id (server will ingest to a temp VS)
+      const body = { userMessage: prompt, history };
+      if (uploadForThisTurn?.file_id) body.upload_file_id = uploadForThisTurn.file_id;
+
+      let r;
+      try {
+        r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+          body: JSON.stringify(body),
+          signal: ac.signal
+        });
+      } catch (e) {
+        clearTimeout(watchdog);
+        aContent.innerHTML = `<span>⚠️ Request failed: ${e?.message || e}</span>`;
+        setStatus("");
+        currentAbort = null;
+        return;
       }
-    }
-  }
-  if (!out && typeof resp?.text === "string") out = resp.text;
-  if (!out && typeof resp?.response?.output_text === "string") out = resp.response.output_text;
-  return out || "";
-}
 
-// ---------- Non-streaming ----------
-async function handleNonStreaming(userMessage, history, uploadFileId) {
-  const sys = await fetchAssistantInstructions();
-  const extraVS = [];
-  if (uploadFileId) {
-    const tmpId = await createTempVectorStoreWithFile(uploadFileId);
-    extraVS.push(tmpId);
-  }
-  const payload = buildResponsesRequest(history, userMessage, sys, extraVS, { stream: false });
-  const resp = await oaJson("/responses", "POST", payload);
-  const text = extractTextFromResponse(resp);
-  const usage = resp?.usage || null;
-  return { ok: true, text, usage };
-}
-
-// ---------- Streaming (SSE passthrough) ----------
-async function handleStreaming(res, userMessage, history, uploadFileId) {
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache, no-transform",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no",
-    "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN,
-    "Access-Control-Allow-Methods": CORS_ALLOW_METHODS,
-    "Access-Control-Allow-Headers": CORS_ALLOW_HEADERS,
-  });
-
-  const send = (event, data) => {
-    try {
-      if (event) res.write(`event: ${event}\n`);
-      if (data !== undefined) res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
-    } catch {}
-  };
-
-  send("start", { ok: true });
-  const sys = await fetchAssistantInstructions();
-
-  // If a file_id is provided, build a temp store and include it
-  let extraVS = [];
-  try {
-    if (uploadFileId) {
-      const tmpId = await createTempVectorStoreWithFile(uploadFileId);
-      extraVS.push(tmpId);
-      send("info", { note: "temp_vector_store_ready", id: tmpId });
-    }
-  } catch (e) {
-    send("error", { ok:false, step:"temp_vs_ingest", error: String(e?.message || e) });
-    // continue without the temp store rather than killing the stream
-  }
-
-  const upstream = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-      "Accept": "text/event-stream",
-      "OpenAI-Beta": "assistants=v2",
-    },
-    body: JSON.stringify(buildResponsesRequest(history, userMessage, sys, extraVS, { stream: true })),
-  });
-
-  if (!upstream.ok || !upstream.body) {
-    let errTxt = "";
-    try { errTxt = await upstream.text(); } catch {}
-    send("error", { ok:false, step:"responses_stream", status: upstream.status, error: errTxt || "no-body" });
-    try { res.end(); } catch {}
-    return;
-  }
-
-  const reader  = upstream.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-
-  // Optional: mirror key SSE events into server logs
-  let logBuf = "";
-  const maybeLogChunk = (chunkStr) => {
-    if (!DEBUG_SSE_LOG) return;
-    logBuf += chunkStr;
-    const blocks = logBuf.split("\n\n");
-    logBuf = blocks.pop() || "";
-    for (const block of blocks) {
-      const lines = block.split("\n");
-      let event = "message";
-      const dataLines = [];
-      for (const line of lines) {
-        if (!line || line.startsWith(":")) continue;
-        if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
-        if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
+      if (!r.ok || !r.body) {
+        clearTimeout(watchdog);
+        let err = `HTTP ${r.status}`;
+        try { err += ` ${await r.text()}`; } catch {}
+        aContent.innerHTML = `<span>⚠️ Stream failed: ${err}</span>`;
+        setStatus("");
+        currentAbort = null;
+        return;
       }
-      const raw = dataLines.join("\n");
-      if (event === "response.output_text.delta") {
-        try {
-          const d = JSON.parse(raw);
-          if (typeof d?.delta === "string" && d.delta.trim()) {
-            console.log("[assistant][SSE][delta]", d.delta.slice(0, 200));
+
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+
+      const flushBlocks = (chunk) => {
+        buffer += chunk;
+        const blocks = buffer.split(/\n\n/);
+        buffer = blocks.pop();
+        for (const block of blocks) {
+          const lines = block.split(/\n/);
+          let event = "message";
+          const dataLines = [];
+          for (const line of lines) {
+            if (!line) continue;
+            if (line.startsWith(":")) continue;
+            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
+            if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
           }
-        } catch {}
-      } else if (event.startsWith("response.tool_call")) {
-        try {
-          const d = JSON.parse(raw);
-          const name = d?.name || d?.tool?.name || d?.data?.name || "(unknown)";
-          console.log("[assistant][SSE][tool_call]", event, name);
-        } catch {
-          console.log("[assistant][SSE][tool_call]", event);
+          const raw = dataLines.join("\n");
+          handleEvent(event, raw);
         }
-      } else if (event === "response.completed") {
-        console.log("[assistant][SSE] completed");
-      } else if (event === "error") {
-        console.warn("[assistant][SSE] error", raw);
+      };
+
+      function handleEvent(event, raw) {
+        if (event === "start") { return; }
+        if (event === "error") {
+          try {
+            const obj = JSON.parse(raw);
+            aContent.innerHTML = `<span>⚠️ ${escapeHtml(JSON.stringify(obj))}</span>`;
+          } catch {
+            aContent.innerHTML = `<span>⚠️ ${escapeHtml(raw)}</span>`;
+          }
+          setStatus("");
+          return;
+        }
+        if (event === "done" || event === "response.completed") {
+          setStatus("");
+
+          if (!sourcesAppended) {
+            appendSources(aContent, citations);
+            sourcesAppended = true;
+          }
+          if (!assistantTurnSaved) {
+            const finalText = stripInlineSources(mdAccum).trim();
+            if (finalText) { history.push({ role: "assistant", content: finalText }); saveHistory(); }
+            assistantTurnSaved = true;
+          }
+          return;
+        }
+
+        if (event.endsWith(".delta")) {
+          let d;
+          try { d = JSON.parse(raw); } catch { d = null; }
+          const deltaText =
+            (d && typeof d.delta === "string") ? d.delta :
+            (d && d.delta && Array.isArray(d.delta.content))
+              ? d.delta.content.map(c => (c.text && (c.type?.includes("output_text"))) ? c.text : "").join("")
+              : (typeof d?.text_delta === "string" ? d.text_delta : "");
+
+          if (deltaText) {
+            if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); }
+            const cleaned = sanitizeBodyDelta(deltaText);
+            mdAccum += cleaned;
+            renderMarkdown(mdAccum, aContent);
+          }
+          return;
+        }
+
+        if (event.includes("annotation") || event.includes("citation")) {
+          let a;
+          try {
+            const obj = JSON.parse(raw);
+            a = obj?.annotation || obj?.data || obj;
+          } catch { a = null; }
+          if (!a) return;
+          if (a.type === "file_citation" && a.file_id) {
+            citations.push({ kind: "file", id: a.file_id, label: a.filename || a.file_id });
+          } else if ((a.type === "web_citation" || a.url) && a.url) {
+            citations.push({ kind: "web", url: a.url, label: a.title || a.url });
+          }
+        }
+      }
+
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          if (chunk && !started) { started = true; clearTimeout(watchdog); }
+          flushBlocks(chunk);
+        }
+      } catch (e) {
+        aContent.insertAdjacentHTML("beforeend", `<p>⚠️ Stream error: ${escapeHtml(e?.message || String(e))}</p>`);
+      } finally {
+        currentAbort = null;
+        setStatus("");
       }
     }
-  };
 
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      const chunkStr = decoder.decode(value, { stream: true });
-      try { res.write(chunkStr); } catch {}
-      maybeLogChunk(chunkStr);
+    function sanitizeBodyDelta(s) {
+      if (!s) return s;
+      s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
+      s = s.replace(/https?:\/\/\S+/g, "");
+      s = s.replace(/\s?\[\d+\]/g, "");
+      s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
+      return s;
     }
-  } catch {
-    // client aborted / network issue
-  } finally {
-    send("done", "[DONE]");
-    try { res.end(); } catch {}
-  }
-}
-
-// ---------- Sub-route: /api/files/upload (multipart to OpenAI Files API) ----------
-async function handleUpload(req, res) {
-  try {
-    const { filename, bodyBuf } = await readMultipartFile(req);
-    const fileId = await openaiUploadFileReturnId(filename, bodyBuf);
-    setCors(res);
-    return res.status(200).json({ ok: true, file_id: fileId, filename });
-  } catch (e) {
-    setCors(res);
-    return res.status(400).json({ ok:false, error: String(e?.message || e) });
-  }
-}
-
-// ---------- Main handler ----------
-export default async function handler(req, res) {
-  // Route split: /api/files/upload
-  if (req.url && req.url.includes("/api/files/upload")) {
-    if (req.method === "OPTIONS") return endPreflight(res);
-    if (req.method !== "POST") {
-      setCors(res);
-      res.setHeader("Allow", "POST, OPTIONS");
-      return res.status(405).json({ ok:false, error: "Method Not Allowed" });
+    function stripInlineSources(s) {
+      if (!s) return s;
+      return s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
     }
-    return handleUpload(req, res);
-  }
-
-  setCors(res);
-  if (req.method === "OPTIONS") return endPreflight(res);
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST, OPTIONS");
-    return res.status(405).json({ ok:false, error: "Method Not Allowed" });
-  }
-
-  try {
-    const body = await readBody(req);
-    const userMessage = (body.userMessage || "").toString().trim();
-    const clientHistory = normalizeHistory(body.history || []);
-    const trimmedHistory = trimHistoryByChars(clientHistory, 8000);
-    const uploadFileId = (body.upload_file_id || "").toString().trim() || null;
-    const mode = (req.query.stream || "off").toString(); // "on" | "off"
-
-    if (!userMessage) {
-      return res.status(400).json({ ok:false, error: "Missing userMessage" });
-    }
-    if (!OPENAI_VECTOR_STORE_ID) {
-      return res.status(500).json({ ok:false, error: "Server misconfig: OPENAI_VECTOR_STORE_ID not set" });
+    function escapeHtml(str) {
+      return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;" }[ch]));
     }
 
-    if (mode === "on") {
-      return await handleStreaming(res, userMessage, trimmedHistory, uploadFileId);
-    } else {
-      const out = await handleNonStreaming(userMessage, trimmedHistory, uploadFileId);
-      return res.status(200).json(out);
-    }
-  } catch (err) {
-    console.error("assistant handler error:", err);
-    try {
-      return res.status(500).json({ ok:false, error: "Internal Server Error" });
-    } catch {}
-  }
-}
+    document.getElementById("tc-ask-stream").addEventListener("click", () => {
+      const p = ($in.value || "").trim();
+      if (!p) return;
+      askStream(p);
+      $in.value = "";
+    });
+
+    $in.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        document.getElementById("tc-ask-stream").click();
+      }
+    });
+
+    $clear.addEventListener("click", () => {
+      if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
+      $chat.innerHTML = "";
+      $in.value = "";
+      setStatus("");
+      clearHistory();
+      uploaded = null;
+      $fileBadge.style.display = "none";
+      $fileInput.value = "";
+      document.getElementById("shell").classList.remove("chat-active");
+    });
+  </script>
+</body>
+</html>
