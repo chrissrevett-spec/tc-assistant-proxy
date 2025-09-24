@@ -123,6 +123,8 @@ export default async function handler(req, res) {
     cors(res);
     return res.status(200).json({
       ok: true,
+      // 👇 add top-level file_id so the existing widget logic can use it
+      file_id: fileId,
       processed,
       file: {
         id: fileId,
