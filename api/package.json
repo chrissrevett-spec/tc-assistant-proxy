@@ -3,3 +3,8 @@
   "version": "1.0.0",
   "private": true
 }
+{
+  "dependencies": {
+    "busboy": "^1.6.0"
+  }
+}
