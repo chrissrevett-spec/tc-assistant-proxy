@@ -191,7 +191,6 @@
     marked.setOptions({ mangle: false, headerIds: false });
     function setStatus(t){ $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
 
-    // Minimal chat helpers (unchanged from your working version)
     function activateChat(){ if (!$shell.classList.contains("chat-active")) $shell.classList.add("chat-active"); }
     function createMsg(role, headerText, withCopy=false) {
       const msg = document.createElement("div");
@@ -227,7 +226,7 @@
       msg.appendChild(avatar); msg.appendChild(bubble);
       $chat.appendChild(msg);
       $inputbar.scrollIntoView({ block:"end", behavior:"smooth" });
-      return { content };
+      return { container: msg, content };
     }
     function renderMarkdown(md, el) {
       const html = marked.parse(md || "");
@@ -261,7 +260,7 @@
       $inputbar.scrollIntoView({ block:"end", behavior:"smooth" });
     }
 
-    // ---- Conversation history (same as before) ----
+    // ---- Conversation history ----
     const history = (() => { try { return JSON.parse(sessionStorage.getItem("tc_history") || "[]"); } catch { return []; }})();
     function saveHistory(){ try { sessionStorage.setItem("tc_history", JSON.stringify(history)); } catch {} }
     function clearHistory(){ history.length = 0; saveHistory(); }
@@ -288,7 +287,7 @@
       if (!f) return;
       $fileBadge.style.display = "flex";
       $fileBadge.classList.remove("error");
-      $fileIcon.textContent = "⏳"; // show hourglass while uploading
+      $fileIcon.textContent = "⏳"; // hourglass while uploading
       $fileName.textContent = truncateName(f.name);
       $attachLbl.textContent = "Uploading…";
 
@@ -301,22 +300,19 @@
         if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`);
         if (!j.processed) throw new Error("File not processed in time, please retry.");
 
-        // Success UI — force green tick icon
+        // Success UI — green tick
         $fileIcon.textContent = "✅";
         $fileBadge.classList.remove("error");
         $attachLbl.textContent = "📎 Attach another";
 
-        // Store for this turn
         fileIds = [j.file.id];
         attachments = [{ id: j.file.id, name: f.name }];
 
       } catch (err) {
         console.error("upload error", err);
-        // Error UI — show badge in red but no warning triangle after success
         $fileBadge.classList.add("error");
         $fileIcon.textContent = "⚠️";
         $attachLbl.textContent = "📎 Attach";
-        // keep the badge visible so users can clear or retry
       }
     });
 
@@ -336,9 +332,29 @@
 
       activateChat();
       history.push({ role: "user", content: prompt }); saveHistory();
-      createMsg("user", "You").content.textContent = prompt;
+
+      // User bubble
+      const userMsg = createMsg("user", "You");
+      userMsg.content.textContent = prompt;
+
+      // If an attachment is present (✅), add a tiny line under the user message
+      if (attachments.length) {
+        const note = document.createElement("div");
+        note.style.fontSize = "12px";
+        note.style.opacity = "0.8";
+        note.style.marginTop = "6px";
+        note.textContent = `📎 Attached: ${truncateName(attachments[0].name)}`;
+        userMsg.content.appendChild(note);
+      }
+
+      // Assistant bubble
       const { content: aContent } = createMsg("assistant", "Talking Care Navigator", true);
       aContent.innerHTML = `<em>Thinking… ⏳</em>`;
+
+      // Clear the file badge IMMEDIATELY after we’ve captured its IDs for this turn
+      const fileIdsForTurn = fileIds.slice();
+      resetFileBadge();
+      $attachLbl.textContent = "📎 Attach";
 
       let buffer = ""; let started = false; let firstDeltaSeen = false; let mdAccum = "";
       const citations = []; let sourcesAppended = false; let assistantTurnSaved = false;
@@ -347,12 +363,8 @@
       const ac = new AbortController();
       currentAbort = ac;
 
-      // Build payload with attachments for this turn
       const payload = { userMessage: prompt, history };
-      if (fileIds.length) {
-        payload.fileIds = fileIds.slice();
-        payload.attachments = attachments.map(a => ({ id: a.id, name: a.name }));
-      }
+      if (fileIdsForTurn.length) payload.fileIds = fileIdsForTurn;
 
       let r;
       try {
@@ -401,9 +413,6 @@
             if (finalText) { history.push({ role: "assistant", content: finalText }); saveHistory(); }
             assistantTurnSaved = true;
           }
-          // Clear file state after send so badge doesn’t linger
-          resetFileBadge();
-          $attachLbl.textContent = "📎 Attach";
           return;
         }
 
