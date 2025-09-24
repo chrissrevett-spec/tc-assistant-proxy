@@ -32,11 +32,11 @@
       border-bottom: 1px solid #f0f0f0;
       order: 2;
     }
-    .inputrow { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
+    .inputrow { display: flex; gap: 8px; align-items: flex-start; }
     .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
 
     textarea {
-      flex: 1 1 420px; min-height: 48px; max-height: 160px; resize: vertical;
+      flex: 1; min-height: 48px; max-height: 160px; resize: vertical;
       padding: 10px; font: inherit; background: #FAFAFA; color: #000;
       border: 1px solid #ddd; border-radius: 10px; transition: background .2s, border-color .2s, box-shadow .2s;
       scrollbar-width: thin; scrollbar-color: #ccc #FAFAFA; box-sizing: border-box;
@@ -51,20 +51,21 @@
     button:hover { background: #f0f0f0; border-color: #ccc; }
     button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
 
-    .attach { display:flex; align-items:center; gap:8px; }
-    .attach input[type="file"] { display:none; }
-    .file-badge {
-      display:flex; align-items:center; gap:6px;
-      border:1px solid #ddd; border-radius:8px; padding:6px 8px; background:#FAFAFA; color:#333; font-size:12px;
-      max-width: 100%;
+    /* Upload badge row (to avoid squashing textarea on long names) */
+    .attach-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+    .attach-btn { display: inline-flex; align-items: center; gap: 6px; }
+    .attach-status {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid #ddd; background: #FAFAFA;
+      max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    .file-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
-    .file-badge.ok { border-color:#16a34a; background:#f0fff4; color:#166534; }
-    .file-badge.ok .icon { color:#16a34a; }
-    .file-badge.err { border-color:#b91c1c; background:#fef2f2; color:#991b1b; }
-    .file-actions { display:flex; gap:6px; }
-    .icon { font-size: 14px; }
+    .attach-status .fname { max-width: 36ch; overflow: hidden; text-overflow: ellipsis; }
+    .attach-status.ok { border-color: #4caf50; background: #f2fff2; color: #256f2a; }
+    .attach-status.pending { border-color: #ddd; background: #FAFAFA; color: #333; }
+    .attach-status.error { border-color: #e57373; background: #fff5f5; color: #b71c1c; }
+    .attach-status .icon { font-size: 14px; }
 
+    /* Chat */
     .chat-wrap { display: none; }
     .chat {
       border: 1px solid #eee; background: #fff; border-radius: 12px;
@@ -72,7 +73,6 @@
       box-shadow: 0 0 0 1px rgba(0,0,0,.03), 0 12px 24px rgba(0,0,0,.06);
       margin: 12px 16px 0;
     }
-
     .chat-active .chat-wrap { display: block; order: 2; }
     .chat-active .inputbar { order: 3; border-top: none; }
 
@@ -100,7 +100,6 @@
       display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
       font-weight: 600; font-size: 13px; color: #111;
     }
-
     .bubble-actions { margin-left: auto; display: flex; gap: 6px; }
     .copy-btn {
       border: 1px solid #ddd; background: #FAFAFA; color: #333; border-radius: 6px;
@@ -123,7 +122,12 @@
 
     .sources { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444; }
     .sources .title { font-weight: 600; margin-bottom: 6px; }
-    .small-note { font-size:12px; color:#555; margin-top:6px; }
+
+    .used-file-note {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid #ddd; background: #FAFAFA;
+      margin-top: 6px;
+    }
   </style>
 </head>
 <body>
@@ -138,21 +142,16 @@
       <div class="inputrow">
         <label for="tc-input" class="sr">Message</label>
         <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
-
-        <div class="attach">
-          <input id="file-input" type="file" />
-          <button id="btn-attach" title="Attach a file">📎 Attach</button>
-          <div id="file-badge" class="file-badge" style="display:none;">
-            <span class="icon" id="file-icon">⌛</span>
-            <span class="file-name" id="file-name"></span>
-            <div class="file-actions">
-              <button id="btn-remove" title="Remove">✖</button>
-            </div>
-          </div>
-        </div>
-
         <button id="tc-ask-stream" title="Send">✈️ Send</button>
         <button id="tc-clear" class="secondary" title="Clear chat">Clear</button>
+      </div>
+      <div class="attach-row">
+        <input id="file-input" type="file" style="display:none" />
+        <button id="attach-btn" class="attach-btn" title="Attach a file">📎 Attach</button>
+        <span id="attach-status" class="attach-status pending" style="display:none;">
+          <span class="icon" id="attach-icon">⌛</span>
+          <span class="fname" id="attach-name"></span>
+        </span>
       </div>
     </div>
 
@@ -162,16 +161,12 @@
   </div>
 
   <script>
-    if ('scrollRestoration' in history) {
-      history.scrollRestoration = 'manual';
-    }
+    if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
     window.addEventListener('DOMContentLoaded', () => {
       window.scrollTo(0, 0);
       setTimeout(() => window.scrollTo(0, 0), 0);
     });
-    window.addEventListener('pageshow', (e) => {
-      if (e.persisted) { window.scrollTo(0, 0); }
-    });
+    window.addEventListener('pageshow', (e) => { if (e.persisted) window.scrollTo(0, 0); });
   </script>
 
   <script type="module">
@@ -180,57 +175,55 @@
     await import(purifyUrl);
 
     const API_BASE = location.origin.replace(/\/$/, "");
-    const $shell    = document.getElementById("shell");
-    const $chat     = document.getElementById("chat");
-    const $chatwrap = document.getElementById("chatwrap");
-    const $inputbar = document.getElementById("inputbar");
-    const $in       = document.getElementById("tc-input");
-    const $send     = document.getElementById("tc-ask-stream");
-    const $clear    = document.getElementById("tc-clear");
-    const $status   = document.getElementById("status");
+    const $shell   = document.getElementById("shell");
+    const $chat    = document.getElementById("chat");
+    const $chatwrap= document.getElementById("chatwrap");
+    const $inputbar= document.getElementById("inputbar");
+    const $in      = document.getElementById("tc-input");
+    const $send    = document.getElementById("tc-ask-stream");
+    const $clear   = document.getElementById("tc-clear");
+    const $status  = document.getElementById("status");
 
-    const $fileInput = document.getElementById("file-input");
-    const $attachBtn = document.getElementById("btn-attach");
-    const $fileBadge = document.getElementById("file-badge");
-    const $fileIcon  = document.getElementById("file-icon");
-    const $fileName  = document.getElementById("file-name");
-    const $btnRemove = document.getElementById("btn-remove");
+    const $fileInput    = document.getElementById("file-input");
+    const $attachBtn    = document.getElementById("attach-btn");
+    const $attachStatus = document.getElementById("attach-status");
+    const $attachIcon   = document.getElementById("attach-icon");
+    const $attachName   = document.getElementById("attach-name");
 
     marked.setOptions({ mangle: false, headerIds: false });
     function setStatus(t){ $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
 
     // ---- Conversation history (client side) ----
-    const history = (() => {
-      try { return JSON.parse(sessionStorage.getItem("tc_history") || "[]"); }
-      catch { return []; }
-    })();
+    const history = (() => { try { return JSON.parse(sessionStorage.getItem("tc_history") || "[]"); } catch { return []; } })();
     function saveHistory(){ try { sessionStorage.setItem("tc_history", JSON.stringify(history)); } catch {} }
     function clearHistory(){ history.length = 0; saveHistory(); }
 
-    function activateChat() {
-      if (!$shell.classList.contains("chat-active")) {
-        $shell.classList.add("chat-active");
-      }
-    }
+    function activateChat(){ if (!$shell.classList.contains("chat-active")) $shell.classList.add("chat-active"); }
 
-    function ellipsize(name, max=28) {
-      if (!name) return "";
-      if (name.length <= max) return name;
-      const keep = Math.max(8, Math.floor((max - 3) / 2));
-      return name.slice(0, keep) + "…" + name.slice(-keep);
-    }
-
-    function createMsg(role, headerText, withCopy=false) {
+    function createMsg(role, headerText, withCopy=false){
       const msg = document.createElement("div");
       msg.className = `msg ${role}`;
-      const avatar = document.createElement("div"); avatar.className = "avatar"; avatar.textContent = role === "assistant" ? "📖" : "🙂";
-      const bubble = document.createElement("div"); bubble.className = "bubble";
-      const head = document.createElement("div"); head.className = "bubble-head"; head.textContent = headerText;
+      const avatar = document.createElement("div");
+      avatar.className = "avatar";
+      avatar.textContent = role === "assistant" ? "📖" : "🙂";
+
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+
+      const head = document.createElement("div");
+      head.className = "bubble-head";
+      head.textContent = headerText;
 
       if (withCopy) {
-        const actions = document.createElement("div"); actions.className = "bubble-actions";
+        const actions = document.createElement("div");
+        actions.className = "bubble-actions";
         const copyBtn = document.createElement("button");
-        copyBtn.className = "copy-btn"; copyBtn.type = "button"; copyBtn.title = "Copy"; copyBtn.textContent = "📋 Copy";
+        copyBtn.className = "copy-btn";
+        copyBtn.type = "button";
+        copyBtn.title = "Copy";
+        copyBtn.textContent = "📋 Copy";
+        const content = document.createElement("div");
+        content.className = "bubble-content";
         copyBtn.addEventListener("click", () => {
           const txt = content.innerText.trim();
           navigator.clipboard.writeText(txt).then(() => {
@@ -240,14 +233,24 @@
         });
         actions.appendChild(copyBtn);
         head.appendChild(actions);
+        bubble.appendChild(head);
+        bubble.appendChild(content);
+        msg.appendChild(avatar);
+        msg.appendChild(bubble);
+        $chat.appendChild(msg);
+        $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
+        return { msg, content, bubble };
+      } else {
+        const content = document.createElement("div");
+        content.className = "bubble-content";
+        bubble.appendChild(head);
+        bubble.appendChild(content);
+        msg.appendChild(avatar);
+        msg.appendChild(bubble);
+        $chat.appendChild(msg);
+        $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
+        return { msg, content, bubble };
       }
-
-      const content = document.createElement("div"); content.className = "bubble-content";
-      bubble.appendChild(head); bubble.appendChild(content);
-      msg.appendChild(avatar); msg.appendChild(bubble);
-      $chat.appendChild(msg);
-      $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
-      return { msg, content, bubble };
     }
 
     function renderMarkdown(md, el) {
@@ -266,12 +269,15 @@
         if (c.kind === "web")  { if (!seenURL.has(c.url)) { seenURL.add(c.url); urls.push(c); } }
       }
       if (!files.length && !urls.length) return;
-
-      const src = document.createElement("div"); src.className = "sources";
-      const title = document.createElement("div"); title.className = "title"; title.textContent = "Sources:";
+      const src = document.createElement("div");
+      src.className = "sources";
+      const title = document.createElement("div");
+      title.className = "title";
+      title.textContent = "Sources:";
       src.appendChild(title);
-
-      const list = document.createElement("ul"); list.style.margin = "0"; list.style.paddingLeft = "20px";
+      const list = document.createElement("ul");
+      list.style.margin = "0";
+      list.style.paddingLeft = "20px";
       [...files, ...urls].forEach((c) => {
         const li = document.createElement("li");
         li.textContent = c.label;
@@ -283,69 +289,71 @@
     }
 
     let currentAbort = null;
-    let uploaded = null; // { file_id, filename }
+    let pendingUpload = { file_id: null, filename: "" };
 
+    // --- Upload UI handlers ---
     $attachBtn.addEventListener("click", () => $fileInput.click());
-    $btnRemove.addEventListener("click", () => {
-      uploaded = null;
-      $fileBadge.style.display = "none";
-      $fileInput.value = "";
-    });
-    $fileInput.addEventListener("change", async () => {
-      if (!$fileInput.files || !$fileInput.files[0]) return;
-      const f = $fileInput.files[0];
 
-      // Show badge while uploading
-      $fileBadge.style.display = "flex";
-      $fileBadge.classList.remove("ok", "err");
-      $fileIcon.textContent = "⌛";
-      $fileName.textContent = ellipsize(f.name);
+    $fileInput.addEventListener("change", async () => {
+      const file = $fileInput.files?.[0];
+      if (!file) return;
+      // Reset UI state
+      $attachStatus.style.display = "inline-flex";
+      $attachStatus.className = "attach-status pending";
+      $attachIcon.textContent = "⌛";
+      $attachName.textContent = file.name.length > 36 ? file.name.slice(0, 33) + "..." : file.name;
 
       try {
-        const form = new FormData();
-        form.append("file", f, f.name);
-        const r = await fetch(`${API_BASE}/api/assistant/files/upload`, {
-          method: "POST",
-          body: form,
-        });
-        const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`);
-        uploaded = { file_id: j.file_id, filename: f.name };
-
-        // GREEN TICK ✓
-        $fileBadge.classList.add("ok");
-        $fileIcon.textContent = "✓";
+        const fd = new FormData();
+        fd.append("file", file);
+        const r = await fetch(`${API_BASE}/api/files/upload`, { method: "POST", body: fd });
+        if (!r.ok) {
+          const t = await r.text().catch(()=> "Upload failed");
+          throw new Error(t);
+        }
+        const data = await r.json();
+        if (!data.ok || !data.file_id) throw new Error("Upload failed");
+        pendingUpload = { file_id: data.file_id, filename: file.name };
+        // ✅ state
+        $attachStatus.className = "attach-status ok";
+        $attachIcon.textContent = "✅"; // green tick icon
+        $attachName.textContent = (file.name.length > 36 ? file.name.slice(0,33) + "..." : file.name);
       } catch (e) {
-        uploaded = null;
-        $fileBadge.classList.add("err");
-        $fileIcon.textContent = "⚠️";
-        $fileName.textContent = `Upload failed`;
+        $attachStatus.className = "attach-status error";
+        $attachIcon.textContent = "⚠️";
+        $attachName.textContent = "Upload failed";
+        pendingUpload = { file_id: null, filename: "" };
       }
     });
 
+    // --- SSE streaming ---
     async function askStream(prompt) {
       activateChat();
 
-      // Persist user turn into local history
-      history.push({ role: "user", content: prompt }); saveHistory();
+      // Persist user turn to local history (before request)
+      history.push({ role: "user", content: prompt });
+      saveHistory();
 
       // User bubble
       const userMsg = createMsg("user", "You");
       userMsg.content.textContent = prompt;
 
-      // If a file was attached, show a one-liner under the user bubble, then clear badge
-      let uploadForThisTurn = null;
-      if (uploaded && uploaded.file_id) {
-        uploadForThisTurn = { ...uploaded };
-        const note = document.createElement("div");
-        note.className = "small-note";
-        note.textContent = `Attached: ${ellipsize(uploaded.filename, 40)}`;
-        userMsg.content.appendChild(note);
+      // If a file is attached, show “Using: filename” badge and clear the pending chip in the input row
+      let usedFileId = null;
+      if (pendingUpload.file_id) {
+        usedFileId = pendingUpload.file_id;
+        const used = document.createElement("div");
+        used.className = "used-file-note";
+        used.innerHTML = `✅ Using: <strong>${(pendingUpload.filename.length > 36 ? pendingUpload.filename.slice(0,33) + "..." : pendingUpload.filename)}</strong>`;
+        userMsg.bubble.appendChild(used);
 
-        // clear UI badge for next turn
-        uploaded = null;
-        $fileBadge.style.display = "none";
+        // Clear the chip & input selection right away
+        pendingUpload = { file_id: null, filename: "" };
         $fileInput.value = "";
+        $attachStatus.style.display = "none";
+        $attachStatus.className = "attach-status pending";
+        $attachIcon.textContent = "⌛";
+        $attachName.textContent = "";
       }
 
       // Assistant bubble
@@ -372,10 +380,11 @@
         }
       }, 10000);
 
-      // Build body, including the uploaded file_id (server will ingest to a temp VS)
+      // Compose body with rolling history, plus optional upload_file_id
       const body = { userMessage: prompt, history };
-      if (uploadForThisTurn?.file_id) body.upload_file_id = uploadForThisTurn.file_id;
+      if (usedFileId) body.upload_file_id = usedFileId;
 
+      // Fetch SSE
       let r;
       try {
         r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
@@ -425,7 +434,8 @@
       };
 
       function handleEvent(event, raw) {
-        if (event === "start") { return; }
+        if (event === "start") return;
+
         if (event === "error") {
           try {
             const obj = JSON.parse(raw);
@@ -436,16 +446,19 @@
           setStatus("");
           return;
         }
+
         if (event === "done" || event === "response.completed") {
           setStatus("");
-
           if (!sourcesAppended) {
             appendSources(aContent, citations);
             sourcesAppended = true;
           }
           if (!assistantTurnSaved) {
             const finalText = stripInlineSources(mdAccum).trim();
-            if (finalText) { history.push({ role: "assistant", content: finalText }); saveHistory(); }
+            if (finalText) {
+              history.push({ role: "assistant", content: finalText });
+              saveHistory();
+            }
             assistantTurnSaved = true;
           }
           return;
@@ -516,30 +529,30 @@
       return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;" }[ch]));
     }
 
+    // Events
     document.getElementById("tc-ask-stream").addEventListener("click", () => {
       const p = ($in.value || "").trim();
       if (!p) return;
       askStream(p);
       $in.value = "";
     });
-
     $in.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        document.getElementById("tc-ask-stream").click();
-      }
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("tc-ask-stream").click(); }
     });
-
     $clear.addEventListener("click", () => {
       if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
       $chat.innerHTML = "";
       $in.value = "";
       setStatus("");
       clearHistory();
-      uploaded = null;
-      $fileBadge.style.display = "none";
+      $shell.classList.remove("chat-active");
+      // Clear any pending upload chip
+      pendingUpload = { file_id: null, filename: "" };
       $fileInput.value = "";
-      document.getElementById("shell").classList.remove("chat-active");
+      $attachStatus.style.display = "none";
+      $attachStatus.className = "attach-status pending";
+      $attachIcon.textContent = "⌛";
+      $attachName.textContent = "";
     });
   </script>
 </body>
