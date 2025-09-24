@@ -137,7 +137,6 @@
     .bubble-content tr:nth-child(even) td { background: #fcfcfc; }
 
     .sources { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444; }
-    .sources .title { font-weight: 600; margin-bottom: 6px; }
 
     .used-file-note, .upload-banner, .error-banner {
       display: inline-flex; align-items: center; gap: 6px;
@@ -193,7 +192,7 @@
     const purifyUrl = "https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js";
     await import(purifyUrl);
 
-    // Replace with your hosted image if you like
+    // Your custom avatar image
     const ASSISTANT_AVATAR_URL = "https://images.squarespace-cdn.com/content/66d7774bf0cbbe646aefb211/264b05cb-b865-404b-9ac9-cc7f77f15ce9/TRANSPARENCY+crop.png?content-type=image%2Fpng";
 
     const API_BASE = location.origin.replace(/\/$/, "");
@@ -311,7 +310,7 @@
       const list = document.createElement("ul");
       list.style.margin = "0";
       list.style.paddingLeft = "20px";
-      [...files, ...urls].forEach((c) => {
+      ;[...files, ...urls].forEach((c) => {
         const li = document.createElement("li");
         li.textContent = c.label;
         list.appendChild(li);
@@ -331,7 +330,7 @@
       const file = $fileInput.files?.[0];
       if (!file) return;
 
-      if (file.size > 20 * 1024 * 1024) {
+      if (file.size > MAX_UPLOAD_BYTES) {
         $attachStatus.style.display = "inline-flex";
         $attachStatus.className = "attach-status error";
         $attachIcon.textContent = "⚠️";
@@ -390,6 +389,7 @@
         used.innerHTML = `✅ Using: <strong>${(pendingUpload.filename.length > 36 ? pendingUpload.filename.slice(0,33) + "..." : pendingUpload.filename)}</strong>`;
         userMsg.bubble.appendChild(used);
 
+        // Clear chip & selection
         pendingUpload = { file_id: null, filename: "" };
         $fileInput.value = "";
         $attachStatus.style.display = "none";
@@ -536,7 +536,7 @@
 
           if (deltaText) {
             if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); }
-            const cleaned = sanitizeBodyDelta(deltaText);
+            const cleaned = sanitizeBodyDelta(deltaText, { uploadTurn });
             mdAccum += cleaned;
             renderMarkdown(mdAccum, aContent);
           }
@@ -574,12 +574,24 @@
       }
     }
 
-    function sanitizeBodyDelta(s) {
+    function sanitizeBodyDelta(s, { uploadTurn = false } = {}) {
       if (!s) return s;
+      // Strip inline URLs/footnotes and trailing Sources sections
       s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
       s = s.replace(/https?:\/\/\S+/g, "");
       s = s.replace(/\s?\[\d+\]/g, "");
       s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
+
+      // Phrase hardening — rewrite banned phrasing
+      const replAttached = uploadTurn ? "attached document" : "documents";
+      s = s.replace(/\bfiles?\s+you(?:['’]ve)?\s+uploaded\b/gi, uploadTurn ? "attached document(s)" : "documents");
+      s = s.replace(/\buploaded\s+files?\b/gi, replAttached + "s");
+      s = s.replace(/\byour\s+upload(?:s)?\b/gi, uploadTurn ? "the attached document(s)" : "documents");
+      s = s.replace(/\buploaded\s+document(?:s)?\b/gi, uploadTurn ? "attached document(s)" : "documents");
+      s = s.replace(/\byour\s+(file|document)(s)?\b/gi, (m, a, b) => (uploadTurn ? `the attached ${a}${b||""}` : `the ${a}${b||""}`));
+
+      // Tidy spaces
+      s = s.replace(/\s{2,}/g, " ");
       return s;
     }
     function stripInlineSources(s) {
