@@ -1,7 +1,7 @@
 // /api/assistant.js
 //
-// Retrieval-first with file_search, rolling history, attachments prioritized.
-// Uses tool_resources so BOTH the permanent vector store and per-turn attachments are searchable.
+// Retrieval-first via file_search (vector store on tool), rolling history,
+// and per-turn attachments on the user message. No tool_resources.
 
 const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -98,19 +98,22 @@ async function fetchAssistantInstructions() {
 function withGroundingPolicy(sys) {
   const policy = `
 CRITICAL GROUNDING POLICY:
-If the user attached files in this turn, SEARCH THE ATTACHED FILES FIRST using file_search and ground your answer in them. Cite them by filename.
-Use the document library (vector store) to supplement only if the attachments are insufficient or off topic.
-Only list sources once at the end under "Sources" (no inline links or [1] style refs).
+If the user attached files in this turn, SEARCH THE ATTACHED FILES FIRST using file_search and ground your answer in them (cite by filename).
+Use the document library (vector store) to supplement only if attachments are insufficient or off-topic.
+List sources once at the end under "Sources" (no inline links or [1] refs).
 Prefer short verbatim quotes with paragraph/section numbers when available.
-If nothing relevant is found in the library or attachments, reply: "No matching sources found in the library."
+If nothing relevant is found in the library, reply: "No matching sources found in the library."
 Never answer purely from general knowledge without sources.
 `.trim();
   return `${sys}\n\n${policy}`;
 }
 
-// Only declare the tool type; attach permanent store via tool_resources
+// Tool declaration with vector_store_ids on the tool (works in your tenant)
 function getTools() {
-  const tools = [{ type: "file_search" }];
+  const tools = [{
+    type: "file_search",
+    vector_store_ids: [OPENAI_VECTOR_STORE_ID],
+  }];
   if (ENABLE_WEB_SEARCH) tools.push({ type: "web_search" });
   return tools;
 }
@@ -140,10 +143,8 @@ function trimHistoryByChars(hist, maxChars = 8000) {
 function buildResponsesRequest(historyArr, userMessage, sysInstructions, fileIds = [], attachmentsMeta = [], extra = {}) {
   const groundedSys = withGroundingPolicy(sysInstructions);
   const tools = getTools();
-
   const input = [{ role: "system", content: groundedSys }];
 
-  // If attachments present, add a tiny system preface to bias retrieval
   if (Array.isArray(attachmentsMeta) && attachmentsMeta.length) {
     const names = attachmentsMeta.map(a => a?.name).filter(Boolean).join(", ");
     input.push({
@@ -156,12 +157,11 @@ function buildResponsesRequest(historyArr, userMessage, sysInstructions, fileIds
 
   if (userMessage) {
     const hasAttachments = Array.isArray(fileIds) && fileIds.length > 0;
-    const attachments = (fileIds || []).map(id => ({
-      file_id: id,
-      tools: [{ type: "file_search" }]
-    }));
-
     if (hasAttachments) {
+      const attachments = fileIds.map(id => ({
+        file_id: id,
+        tools: [{ type: "file_search" }]
+      }));
       input.push({
         role: "user",
         content: [{ type: "input_text", text: userMessage }],
@@ -176,8 +176,6 @@ function buildResponsesRequest(historyArr, userMessage, sysInstructions, fileIds
     model: OPENAI_MODEL,
     input,
     tools,
-    // Give the file_search tool access to your permanent vector store as well
-    tool_resources: { file_search: { vector_store_ids: [OPENAI_VECTOR_STORE_ID] } },
     text: { format: { type: "text" }, verbosity: "medium" },
     ...extra,
   };
@@ -239,95 +237,3 @@ async function handleStreaming(res, userMessage, history, fileIds, attachmentsMe
     },
     body: JSON.stringify(buildResponsesRequest(history, userMessage, sys, fileIds, attachmentsMeta, { stream: true })),
   });
-
-  if (!upstream.ok || !upstream.body) {
-    let errTxt = "";
-    try { errTxt = await upstream.text(); } catch {}
-    send("error", { ok:false, step:"responses_stream", status: upstream.status, error: errTxt || "no-body" });
-    try { res.end(); } catch {}
-    return;
-  }
-
-  const reader  = upstream.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-
-  let logBuf = "";
-  const maybeLogChunk = (chunkStr) => {
-    if (!DEBUG_SSE_LOG) return;
-    logBuf += chunkStr;
-    const blocks = logBuf.split("\n\n");
-    logBuf = blocks.pop() || "";
-    for (const block of blocks) {
-      const lines = block.split("\n");
-      let event = "message";
-      const dataLines = [];
-      for (const line of lines) {
-        if (!line || line.startsWith(":")) continue;
-        if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
-        if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
-      }
-      const raw = dataLines.join("\n");
-
-      if (event === "response.output_text.delta") {
-        try {
-          const d = JSON.parse(raw);
-          if (typeof d?.delta === "string" && d.delta.trim()) {
-            console.log("[assistant][SSE][delta]", d.delta.slice(0, 200));
-          }
-        } catch {}
-      } else if (event.startsWith("response.tool_call")) {
-        console.log("[assistant][SSE][tool_call]", event);
-      } else if (event === "response.completed") {
-        console.log("[assistant][SSE] completed");
-      } else if (event === "error") {
-        console.warn("[assistant][SSE] error", raw);
-      }
-    }
-  };
-
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      const chunkStr = decoder.decode(value, { stream: true });
-      try { res.write(chunkStr); } catch {}
-      maybeLogChunk(chunkStr);
-    }
-  } catch {
-  } finally {
-    send("done", "[DONE]");
-    try { res.end(); } catch {}
-  }
-}
-
-export default async function handler(req, res) {
-  setCors(res);
-  if (req.method === "OPTIONS") return endPreflight(res);
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST, OPTIONS");
-    return res.status(405).json({ ok:false, error: "Method Not Allowed" });
-  }
-
-  try {
-    const body = await readBody(req);
-    const userMessage    = (body.userMessage || "").toString().trim();
-    const clientHistory  = normalizeHistory(body.history || []);
-    const trimmedHistory = trimHistoryByChars(clientHistory, 8000);
-    const fileIds        = Array.isArray(body.fileIds) ? body.fileIds.filter(id => typeof id === "string" && id) : [];
-    const attachmentsMeta= Array.isArray(body.attachments) ? body.attachments.filter(a => a && a.id && a.name) : [];
-    const mode           = (req.query.stream || "off").toString();
-
-    if (!userMessage) return res.status(400).json({ ok:false, error: "Missing userMessage" });
-    if (!OPENAI_VECTOR_STORE_ID) return res.status(500).json({ ok:false, error: "Server misconfig: OPENAI_VECTOR_STORE_ID not set" });
-
-    if (mode === "on") {
-      return await handleStreaming(res, userMessage, trimmedHistory, fileIds, attachmentsMeta);
-    } else {
-      const out = await handleNonStreaming(userMessage, trimmedHistory, fileIds, attachmentsMeta);
-      return res.status(200).json(out);
-    }
-  } catch (err) {
-    console.error("assistant handler error:", err);
-    try { return res.status(500).json({ ok:false, error: "Internal Server Error" }); } catch {}
-  }
-}
