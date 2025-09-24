@@ -323,9 +323,12 @@
       if (!files.length) return;
       try {
         setStatus("Uploading…");
-        const fd = new FormData();
-        files.forEach(f => fd.append("files", f));
-        const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
+      const fd = new FormData();
+files.forEach(f => fd.append("files", f));
+const existingVS = getSessionVSId();
+if (existingVS) fd.append("vector_store_id", existingVS);
+const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
+
         if (!r.ok) {
           const txt = await r.text().catch(() => "");
           throw new Error(`Upload failed: ${r.status} ${txt}`);
