@@ -1,15 +1,82 @@
 // /api/upload.js
 //
-// Accepts multipart/form-data with a single "file" field.
-// 1) Uploads the file to OpenAI Files API
-// 2) Polls /v1/files/{id} until status === 'processed' (or timeout)
-// 3) Returns { ok:true, file: { id, filename, bytes, status } }
+// Uses busboy to robustly parse multipart/form-data.
+// 1) Extracts one "file" field
+// 2) Uploads to OpenAI Files API with purpose=assistants
+// 3) Polls /v1/files/{id} until status==='processed' (or timeout ~45s)
+// 4) Returns { ok:true, file:{ id, filename, bytes, status }, processed:true|false }
 
 export const config = {
-  api: { bodyParser: false }, // we'll read the stream ourselves
+  api: { bodyParser: false }, // required for busboy
 };
 
+import Busboy from "busboy";
+
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+function readMultipart(req) {
+  return new Promise((resolve, reject) => {
+    const bb = Busboy({ headers: req.headers });
+    let fileBuffer = null;
+    let fileName = "upload.bin";
+    let fileMIME = "application/octet-stream";
+
+    bb.on("file", (_fieldname, stream, filename, encoding, mimetype) => {
+      if (filename) fileName = filename;
+      if (mimetype) fileMIME = mimetype;
+      const chunks = [];
+      stream.on("data", (d) => chunks.push(d));
+      stream.on("limit", () => reject(new Error("File too large")));
+      stream.on("end", () => {
+        fileBuffer = Buffer.concat(chunks);
+      });
+    });
+
+    bb.on("error", reject);
+    bb.on("finish", () => {
+      if (!fileBuffer) return reject(new Error("No file uploaded"));
+      resolve({ fileBuffer, fileName, fileMIME });
+    });
+
+    req.pipe(bb);
+  });
+}
+
+async function uploadToOpenAI({ fileBuffer, fileName, fileMIME }) {
+  const form = new FormData();
+  form.append("file", new Blob([fileBuffer], { type: fileMIME }), fileName);
+  form.append("purpose", "assistants");
+
+  const r = await fetch("https://api.openai.com/v1/files", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: form,
+  });
+
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`OpenAI upload failed: ${r.status} ${t}`);
+  }
+  return r.json(); // { id, filename, bytes, status, ... }
+}
+
+async function pollProcessed(fileId, timeoutMs = 45000, intervalMs = 800) {
+  const start = Date.now();
+  let meta = null;
+  while (Date.now() - start < timeoutMs) {
+    const r = await fetch(`https://api.openai.com/v1/files/${fileId}`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+    });
+    if (!r.ok) break;
+    meta = await r.json();
+    const status = meta?.status;
+    if (status === "processed") return { processed: true, meta };
+    if (status === "error") return { processed: false, meta };
+    await new Promise((res) => setTimeout(res, intervalMs));
+  }
+  return { processed: false, meta };
+}
 
 export default async function handler(req, res) {
   if (req.method === "OPTIONS") {
@@ -21,89 +88,31 @@ export default async function handler(req, res) {
   }
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST, OPTIONS");
-    return res.status(405).json({ ok:false, error: "Method Not Allowed" });
+    return res.status(405).json({ ok: false, error: "Method Not Allowed" });
   }
   if (!OPENAI_API_KEY) {
-    return res.status(500).json({ ok:false, error: "Server misconfig: OPENAI_API_KEY missing" });
+    return res.status(500).json({ ok: false, error: "Server misconfig: OPENAI_API_KEY missing" });
   }
 
   try {
-    // Parse multipart quickly (single small file) without external deps
-    const contentType = req.headers["content-type"] || "";
-    const m = contentType.match(/boundary=(.*)$/);
-    if (!m) return res.status(400).json({ ok:false, error:"Missing multipart boundary" });
-    const boundary = "--" + m[1];
+    const { fileBuffer, fileName, fileMIME } = await readMultipart(req);
+    const uploaded = await uploadToOpenAI({ fileBuffer, fileName, fileMIME });
+    const fileId = uploaded.id;
 
-    const buf = Buffer.from(await req.arrayBuffer());
-    const parts = buf.toString("binary").split(boundary).filter(p => p.trim() && p.trim() !== "--");
-
-    let fileName = "upload.bin";
-    let fileBytes = null;
-    for (const part of parts) {
-      const [rawHeaders, rawBody] = part.split("\r\n\r\n");
-      if (!rawHeaders || !rawBody) continue;
-      const headers = rawHeaders.split("\r\n").filter(Boolean).slice(1).join("\n"); // skip first \r\n
-      if (/name="file"/i.test(headers)) {
-        const nameMatch = headers.match(/filename="([^"]+)"/i);
-        fileName = nameMatch ? nameMatch[1] : fileName;
-        const bodyBinary = rawBody.endsWith("\r\n") ? rawBody.slice(0, -2) : rawBody; // strip trailing CRLF
-        fileBytes = Buffer.from(bodyBinary, "binary");
-        break;
-      }
-    }
-    if (!fileBytes) return res.status(400).json({ ok:false, error:"No file field found" });
-
-    // Create a form to send to OpenAI
-    const form = new FormData();
-    form.append("file", new Blob([fileBytes]), fileName);
-    form.append("purpose", "assistants"); // required for retrieval
-
-    // Upload to OpenAI
-    const uploadResp = await fetch("https://api.openai.com/v1/files", {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${OPENAI_API_KEY}` },
-      body: form,
-    });
-    if (!uploadResp.ok) {
-      const t = await uploadResp.text().catch(() => "");
-      return res.status(502).json({ ok:false, error:`OpenAI upload failed: ${t}` });
-    }
-    const fileMeta = await uploadResp.json(); // { id, filename, bytes, status, ... }
-    const fileId = fileMeta.id;
-
-    // Poll until processed (max ~15s)
-    const started = Date.now();
-    let status = fileMeta.status || "uploaded";
-    let meta = fileMeta;
-
-    while (status !== "processed" && Date.now() - started < 15000) {
-      await new Promise(r => setTimeout(r, 600));
-      const check = await fetch(`https://api.openai.com/v1/files/${fileId}`, {
-        method: "GET",
-        headers: { "Authorization": `Bearer ${OPENAI_API_KEY}` },
-      });
-      if (!check.ok) break;
-      meta = await check.json();
-      status = meta.status || status;
-      if (status === "error") break;
-    }
-
-    if (status !== "processed") {
-      // Best-effort final check; still return the file (client/assistant will guard)
-      return res.status(200).json({
-        ok: true,
-        file: { id: fileId, filename: fileName, bytes: meta.bytes, status: status || "unknown" },
-        processed: false
-      });
-    }
+    const { processed, meta } = await pollProcessed(fileId);
 
     return res.status(200).json({
       ok: true,
-      file: { id: fileId, filename: fileName, bytes: meta.bytes, status: "processed" },
-      processed: true
+      processed,
+      file: {
+        id: fileId,
+        filename: fileName,
+        bytes: meta?.bytes ?? uploaded?.bytes ?? fileBuffer.length,
+        status: processed ? "processed" : meta?.status || uploaded?.status || "uploaded",
+      },
     });
   } catch (err) {
     console.error("upload error", err);
-    return res.status(500).json({ ok:false, error:"Upload handler failed" });
+    return res.status(500).json({ ok: false, error: err.message || "Upload handler failed" });
   }
 }
