@@ -10,17 +10,17 @@
 // 3) Strict grounding policy; sources only at the end (no inline links)
 // 4) Rolling conversation history (client-provided), trimmed server-side
 // 5) Optional per-request TEMP vector store created from an uploaded file_id,
-//    which is merged with your permanent store for that response
+//    which is merged with your permanent store for that response (TEMP FIRST)
 // 6) SSE passthrough with clear error surfacing
 //
 // Required env vars
 //  - OPENAI_API_KEY
 //  - OPENAI_ASSISTANT_ID
-//  - OPENAI_VECTOR_STORE_ID   <-- required for /responses + file_search
+//  - OPENAI_VECTOR_STORE_ID
 // Optional
 //  - OPENAI_MODEL (default: gpt-4o-mini)
 //  - OPENAI_ENABLE_WEB_SEARCH ("1" to allow web fallback)
-//  - CORS_ALLOW_ORIGIN (default: https://tc-assistant-proxy.vercel.app)
+//  - CORS_ALLOW_ORIGIN
 //  - DEBUG_SSE_LOG ("1" to mirror deltas/tool calls to logs)
 
 const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
@@ -39,6 +39,11 @@ if (!OPENAI_API_KEY) console.error("[assistant] Missing OPENAI_API_KEY");
 if (!OPENAI_ASSISTANT_ID) console.warn("[assistant] OPENAI_ASSISTANT_ID not set — using fallback system instructions.");
 if (!OPENAI_VECTOR_STORE_ID) console.error("[assistant] Missing OPENAI_VECTOR_STORE_ID — retrieval cannot run with /responses+file_search");
 
+// ---------- Next.js API config: allow raw multipart on this route for subpath /api/files/upload ----------
+export async function config() {
+  return { api: { bodyParser: false } };
+}
+
 // ---------- CORS ----------
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN);
@@ -49,7 +54,7 @@ function setCors(res) {
 }
 function endPreflight(res) { res.statusCode = 204; res.end(); }
 
-// ---------- Body parsing ----------
+// ---------- Body parsing (JSON) ----------
 async function readBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
   return await new Promise((resolve, reject) => {
@@ -67,6 +72,31 @@ async function readBody(req) {
     });
     req.on("error", reject);
   });
+}
+
+// ---------- Simple multipart reader (single field "file") ----------
+async function readMultipartFile(req) {
+  const contentType = req.headers["content-type"] || "";
+  const m = contentType.match(/boundary=(.+)$/);
+  if (!m) throw new Error("Invalid multipart/form-data");
+  const boundary = m[1];
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const buf = Buffer.concat(chunks);
+  const parts = buf.toString("binary").split(`--${boundary}`);
+  for (const part of parts) {
+    if (!part || part === "--\r\n") continue;
+    const [rawHeaders, rawBody] = part.split("\r\n\r\n");
+    if (!rawHeaders || !rawBody) continue;
+    if (/name="file"/i.test(rawHeaders)) {
+      const filenameMatch = rawHeaders.match(/filename="([^"]+)"/i);
+      const filename = filenameMatch ? filenameMatch[1] : "upload.bin";
+      const bodyBin = rawBody.replace(/\r\n--$/, "");
+      const bodyBuf = Buffer.from(bodyBin, "binary");
+      return { filename, bodyBuf, contentType: "application/octet-stream" };
+    }
+  }
+  throw new Error("No file field found");
 }
 
 // ---------- OpenAI helpers ----------
@@ -87,9 +117,7 @@ async function oaJson(path, method, body, headers = {}) {
   }
   return r.json();
 }
-
 async function oaJsonNoBeta(path, method, body, headers = {}) {
-  // Some endpoints (files upload via multipart on a separate route) won’t use this.
   const r = await fetch(`https://api.openai.com/v1${path}`, {
     method,
     headers: {
@@ -106,49 +134,11 @@ async function oaJsonNoBeta(path, method, body, headers = {}) {
   return r.json();
 }
 
-// ---------- Files: upload (multipart) ----------
-export async function config() {
-  return {
-    api: {
-      bodyParser: false, // we handle raw for multipart in /api/files/upload
-    }
-  };
-}
-
-async function readMultipartFile(req) {
-  // Simple multipart parser for a single file field "file"
-  // Works in Vercel/Node 18+ if content-type is multipart/form-data
-  const contentType = req.headers["content-type"] || "";
-  const m = contentType.match(/boundary=(.+)$/);
-  if (!m) throw new Error("Invalid multipart/form-data");
-  const boundary = m[1];
-
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  const buf = Buffer.concat(chunks);
-
-  const parts = buf.toString("binary").split(`--${boundary}`);
-  for (const part of parts) {
-    if (!part || part === "--\r\n") continue;
-    const [rawHeaders, rawBody] = part.split("\r\n\r\n");
-    if (!rawHeaders || !rawBody) continue;
-    if (/name="file"/i.test(rawHeaders)) {
-      const filenameMatch = rawHeaders.match(/filename="([^"]+)"/i);
-      const filename = filenameMatch ? filenameMatch[1] : "upload.bin";
-      // strip trailing \r\n--
-      const bodyBin = rawBody.replace(/\r\n--$/, "");
-      const bodyBuf = Buffer.from(bodyBin, "binary");
-      return { filename, bodyBuf, contentType: "application/octet-stream" };
-    }
-  }
-  throw new Error("No file field found");
-}
-
+// ---------- Files: upload to OpenAI, return file_id ----------
 async function openaiUploadFileReturnId(filename, bodyBuf) {
   const form = new FormData();
   form.append("purpose", "assistants");
   form.append("file", new Blob([bodyBuf]), filename);
-
   const r = await fetch("https://api.openai.com/v1/files", {
     method: "POST",
     headers: { "Authorization": `Bearer ${OPENAI_API_KEY}` },
@@ -162,7 +152,7 @@ async function openaiUploadFileReturnId(filename, bodyBuf) {
   return data.id; // file_id
 }
 
-// ---------- Assistant instructions (small cache) ----------
+// ---------- Assistant instructions (cached) ----------
 const INSTR_CACHE_TTL_MS = 5 * 60 * 1000;
 let instrCache = { text: "", at: 0 };
 
@@ -205,6 +195,7 @@ function withGroundingPolicy(sys) {
   const policy = `
 CRITICAL GROUNDING POLICY:
 Search the document library first using the file_search tool and base your answer on those documents.
+If the user has uploaded a file for this turn, treat it as the primary source: search the temporary vector store first, then the library.
 Only if no relevant passages are found may you consider other enabled tools (e.g., web_search). Clearly separate any web sources in the final "Sources" list.
 Do not include inline URLs, bracketed numbers like [1], or footnotes inside the body. Only list sources once at the end under "Sources".
 Prefer short verbatim quotes for key definitions and include paragraph or section numbers where available.
@@ -220,13 +211,11 @@ function getTools(vectorStoreIds) {
     type: "file_search",
     vector_store_ids: vectorStoreIds,
   }];
-  if (ENABLE_WEB_SEARCH) {
-    tools.push({ type: "web_search" });
-  }
+  if (ENABLE_WEB_SEARCH) tools.push({ type: "web_search" });
   return tools;
 }
 
-// ---------- History trimming ----------
+// ---------- History ----------
 function normalizeHistory(raw) {
   const out = [];
   if (!Array.isArray(raw)) return out;
@@ -249,7 +238,7 @@ function trimHistoryByChars(hist, maxChars = 8000) {
   return rev.reverse();
 }
 
-// ---------- TEMP vector store ingest ----------
+// ---------- TEMP vector store from uploaded file ----------
 async function createTempVectorStoreWithFile(fileId) {
   // 1) Create empty temp store
   const vs = await oaJsonNoBeta("/vector_stores", "POST", { name: `tmp_vs_${Date.now()}` }, { "OpenAI-Beta": "assistants=v2" });
@@ -278,8 +267,8 @@ function buildResponsesRequest(historyArr, userMessage, sysInstructions, extraVe
   for (const m of historyArr) input.push(m);
   if (userMessage) input.push({ role: "user", content: userMessage });
 
-  // Always include your permanent store; optionally merge temp store id(s)
-  const vectorStoreIds = [OPENAI_VECTOR_STORE_ID, ...extraVectorStoreIds].filter(Boolean);
+  // IMPORTANT: temp vector store(s) FIRST, then permanent store
+  const vectorStoreIds = [...extraVectorStoreIds, OPENAI_VECTOR_STORE_ID].filter(Boolean);
   const tools = getTools(vectorStoreIds);
 
   return {
@@ -345,7 +334,7 @@ async function handleStreaming(res, userMessage, history, uploadFileId) {
   send("start", { ok: true });
   const sys = await fetchAssistantInstructions();
 
-  // If a file_id is provided, build a temp store and include it
+  // Build temp store if we have an uploaded file
   let extraVS = [];
   try {
     if (uploadFileId) {
@@ -354,8 +343,8 @@ async function handleStreaming(res, userMessage, history, uploadFileId) {
       send("info", { note: "temp_vector_store_ready", id: tmpId });
     }
   } catch (e) {
+    // Surface error but continue without temp store
     send("error", { ok:false, step:"temp_vs_ingest", error: String(e?.message || e) });
-    // continue without the temp store rather than killing the stream
   }
 
   const upstream = await fetch("https://api.openai.com/v1/responses", {
@@ -397,6 +386,7 @@ async function handleStreaming(res, userMessage, history, uploadFileId) {
         if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
       }
       const raw = dataLines.join("\n");
+
       if (event === "response.output_text.delta") {
         try {
           const d = JSON.parse(raw);
@@ -436,7 +426,7 @@ async function handleStreaming(res, userMessage, history, uploadFileId) {
   }
 }
 
-// ---------- Sub-route: /api/files/upload (multipart to OpenAI Files API) ----------
+// ---------- Sub-route: /api/files/upload ----------
 async function handleUpload(req, res) {
   try {
     const { filename, bodyBuf } = await readMultipartFile(req);
@@ -451,7 +441,7 @@ async function handleUpload(req, res) {
 
 // ---------- Main handler ----------
 export default async function handler(req, res) {
-  // Route split: /api/files/upload
+  // Route split for uploads
   if (req.url && req.url.includes("/api/files/upload")) {
     if (req.method === "OPTIONS") return endPreflight(res);
     if (req.method !== "POST") {
