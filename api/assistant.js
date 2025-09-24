@@ -7,6 +7,7 @@
 // API shape (current):
 // tools: [{ type: "file_search", vector_store_ids: ["vs_tmp", "vs_perm"] }, { type: "web_search" }]
 // NO "tool_resources", NO "modalities".
+// text.format must be an object: { type: "markdown" } or { type: "text" }.
 
 const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -216,7 +217,8 @@ function buildResponsesRequest(historyArr, userMessage, sysInstructions, tempVec
     model: OPENAI_MODEL,
     input,
     tools,
-    text: { format: "markdown", verbosity: "medium" },
+    // ✅ FIX: format is an object, not a string
+    text: { format: { type: "markdown" }, verbosity: "medium" },
     ...extra,
   };
 }
