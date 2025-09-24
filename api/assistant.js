@@ -11,6 +11,9 @@
 // 4) Rolling conversation history (client-provided), trimmed server-side
 // 5) SSE passthrough with clear error surfacing
 //
+// NEW: If the client includes { sessionVectorStoreId }, it will be added alongside
+//      OPENAI_VECTOR_STORE_ID so the model searches both stores.
+//
 // Required env vars
 //  - OPENAI_API_KEY
 //  - OPENAI_ASSISTANT_ID
@@ -139,11 +142,15 @@ Never answer purely from general knowledge without sources.
 }
 
 // ---------- Tools config: file_search + optional web_search ----------
-function getTools() {
+function getTools(sessionVectorStoreId) {
+  const vector_store_ids = [OPENAI_VECTOR_STORE_ID].filter(Boolean);
+  if (sessionVectorStoreId && typeof sessionVectorStoreId === "string") {
+    vector_store_ids.push(sessionVectorStoreId);
+  }
   const tools = [{
     type: "file_search",
     // Responses API requires vector_store_ids on the tool itself
-    vector_store_ids: [OPENAI_VECTOR_STORE_ID],
+    vector_store_ids,
   }];
   if (ENABLE_WEB_SEARCH) {
     tools.push({ type: "web_search" });
@@ -175,9 +182,9 @@ function trimHistoryByChars(hist, maxChars = 8000) {
 }
 
 // ---------- Build Responses request (NO tool_choice) ----------
-function buildResponsesRequest(historyArr, userMessage, sysInstructions, extra = {}) {
+function buildResponsesRequest(historyArr, userMessage, sysInstructions, sessionVectorStoreId, extra = {}) {
   const groundedSys = withGroundingPolicy(sysInstructions);
-  const tools = getTools();
+  const tools = getTools(sessionVectorStoreId);
 
   const input = [{ role: "system", content: groundedSys }];
   for (const m of historyArr) input.push(m);
@@ -211,9 +218,9 @@ function extractTextFromResponse(resp) {
 }
 
 // ---------- Non-streaming ----------
-async function handleNonStreaming(userMessage, history) {
+async function handleNonStreaming(userMessage, history, sessionVectorStoreId) {
   const sys = await fetchAssistantInstructions();
-  const payload = buildResponsesRequest(history, userMessage, sys, { stream: false });
+  const payload = buildResponsesRequest(history, userMessage, sys, sessionVectorStoreId, { stream: false });
   const resp = await oaJson("/responses", "POST", payload);
   const text = extractTextFromResponse(resp);
   const usage = resp?.usage || null;
@@ -221,7 +228,7 @@ async function handleNonStreaming(userMessage, history) {
 }
 
 // ---------- Streaming (SSE passthrough) ----------
-async function handleStreaming(res, userMessage, history) {
+async function handleStreaming(res, userMessage, history, sessionVectorStoreId) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -250,7 +257,7 @@ async function handleStreaming(res, userMessage, history) {
       "Accept": "text/event-stream",
       "OpenAI-Beta": "assistants=v2",
     },
-    body: JSON.stringify(buildResponsesRequest(history, userMessage, sys, { stream: true })),
+    body: JSON.stringify(buildResponsesRequest(history, userMessage, sys, sessionVectorStoreId, { stream: true })),
   });
 
   if (!upstream.ok || !upstream.body) {
@@ -335,6 +342,7 @@ export default async function handler(req, res) {
     const userMessage = (body.userMessage || "").toString().trim();
     const clientHistory = normalizeHistory(body.history || []);
     const trimmedHistory = trimHistoryByChars(clientHistory, 8000); // adjust as needed
+    const sessionVectorStoreId = (body.sessionVectorStoreId || "").toString().trim() || "";
     const mode = (req.query.stream || "off").toString(); // "on" | "off"
 
     if (!userMessage) {
@@ -345,9 +353,9 @@ export default async function handler(req, res) {
     }
 
     if (mode === "on") {
-      return await handleStreaming(res, userMessage, trimmedHistory);
+      return await handleStreaming(res, userMessage, trimmedHistory, sessionVectorStoreId);
     } else {
-      const out = await handleNonStreaming(userMessage, trimmedHistory);
+      const out = await handleNonStreaming(userMessage, trimmedHistory, sessionVectorStoreId);
       return res.status(200).json(out);
     }
   } catch (err) {
