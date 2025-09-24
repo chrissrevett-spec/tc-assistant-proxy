@@ -59,27 +59,25 @@
     button:hover { background: #f0f0f0; border-color: #ccc; }
     button.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
 
-    /* Attach UI */
-    .attach {
-      display:flex; align-items:center; gap:8px;
+    .attach { display:flex; align-items:center; gap:8px; }
+    .attach input[type="file"] { display:none; }
+    .attach label {
+      padding: 10px 12px; border:1px solid #ddd; border-radius:10px; background:#FAFAFA; cursor:pointer;
     }
+    .attach label:hover { background:#f0f0f0; }
+
     .file-badge {
       display:flex; align-items:center; gap:6px;
-      max-width: 280px; /* truncation width */
+      max-width: 280px;
       padding: 6px 8px; border: 1px solid #e3e3e3; border-radius: 8px; background:#f7fff7;
-      font-size: 12px; color:#1a7f1a;  /* green tone */
+      font-size: 12px; color:#1a7f1a;
     }
     .file-badge .name {
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       max-width: 220px; display: inline-block;
     }
     .file-badge .icon { font-size: 16px; }
-
-    .attach input[type="file"] { display:none; }
-    .attach label {
-      padding: 10px 12px; border:1px solid #ddd; border-radius:10px; background:#FAFAFA; cursor:pointer;
-    }
-    .attach label:hover { background:#f0f0f0; }
+    .file-badge.error { background: #fff7f7; color:#a40000; border-color:#f0c0c0; }
 
     .chat-wrap { display: none; }
     .chat {
@@ -122,8 +120,6 @@
     .bubble-content table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 14px; }
     .bubble-content th, .bubble-content td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
     .bubble-content th { background: #f7f7f7; }
-    .bubble-content tr:nth-child(even) td { background: #fcfcfc; }
-
     .sources { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444; }
     .sources .title { font-weight: 600; margin-bottom: 6px; }
   </style>
@@ -193,16 +189,11 @@
     const $attachLbl = document.getElementById("attach-label");
 
     marked.setOptions({ mangle: false, headerIds: false });
-
     function setStatus(t){ $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
-    function activateChat(){ if (!$shell.classList.contains("chat-active")) $shell.classList.add("chat-active"); }
-    function renderMarkdown(md, el) {
-      const html = marked.parse(md || "");
-      const safe = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
-      el.innerHTML = safe; $inputbar.scrollIntoView({ block:"end", behavior:"smooth" });
-    }
 
-    function createMsg(role, headerText, withCopy = false) {
+    // Minimal chat helpers (unchanged from your working version)
+    function activateChat(){ if (!$shell.classList.contains("chat-active")) $shell.classList.add("chat-active"); }
+    function createMsg(role, headerText, withCopy=false) {
       const msg = document.createElement("div");
       msg.className = `msg ${role}`;
       const avatar = document.createElement("div");
@@ -228,17 +219,21 @@
             setTimeout(() => (copyBtn.textContent = "📋 Copy"), 1200);
           });
         });
-        actions.appendChild(copyBtn);
-        head.appendChild(actions);
+        actions.appendChild(copyBtn); head.appendChild(actions);
       }
       const content = document.createElement("div");
       content.className = "bubble-content";
       bubble.appendChild(head); bubble.appendChild(content);
-      msg.appendChild(avatar); msg.appendChild(bubble); $chat.appendChild(msg);
+      msg.appendChild(avatar); msg.appendChild(bubble);
+      $chat.appendChild(msg);
       $inputbar.scrollIntoView({ block:"end", behavior:"smooth" });
       return { content };
     }
-
+    function renderMarkdown(md, el) {
+      const html = marked.parse(md || "");
+      const safe = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+      el.innerHTML = safe; $inputbar.scrollIntoView({ block:"end", behavior:"smooth" });
+    }
     function appendSources(containerEl, citations) {
       if (!citations || citations.length === 0) return;
       const seenFile = new Set(), seenURL = new Set();
@@ -266,26 +261,20 @@
       $inputbar.scrollIntoView({ block:"end", behavior:"smooth" });
     }
 
-    // ---- Conversation history (client side) ----
-    const history = (() => {
-      try { return JSON.parse(sessionStorage.getItem("tc_history") || "[]"); }
-      catch { return []; }
-    })();
+    // ---- Conversation history (same as before) ----
+    const history = (() => { try { return JSON.parse(sessionStorage.getItem("tc_history") || "[]"); } catch { return []; }})();
     function saveHistory(){ try { sessionStorage.setItem("tc_history", JSON.stringify(history)); } catch {} }
     function clearHistory(){ history.length = 0; saveHistory(); }
 
     let currentAbort = null;
-    let fileIds = [];       // processed file ids to send
-    let attachments = [];   // [{ id, name }]
+    let fileIds = [];
+    let attachments = [];
 
-    // Small helpers
-    const truncateName = (name) => {
-      if (!name) return "";
-      return name.length > 35 ? name.slice(0, 16) + "…" + name.slice(-16) : name;
-    };
+    const truncateName = (name) => name && name.length > 35 ? name.slice(0,16) + "…" + name.slice(-16) : name || "";
 
     function resetFileBadge() {
       $fileBadge.style.display = "none";
+      $fileBadge.classList.remove("error");
       $fileIcon.textContent = "⏳";
       $fileName.textContent = "";
       attachments = [];
@@ -298,7 +287,8 @@
       const f = e.target.files && e.target.files[0];
       if (!f) return;
       $fileBadge.style.display = "flex";
-      $fileIcon.textContent = "⏳";
+      $fileBadge.classList.remove("error");
+      $fileIcon.textContent = "⏳"; // show hourglass while uploading
       $fileName.textContent = truncateName(f.name);
       $attachLbl.textContent = "Uploading…";
 
@@ -307,36 +297,46 @@
 
       try {
         const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const j = await r.json();
-        if (!j.ok) throw new Error(j.error || "Upload failed");
-        // Server returns only when status=processed
+        const j = await r.json().catch(()=>({ ok:false, error:"Bad JSON from /api/upload" }));
+        if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`);
+        if (!j.processed) throw new Error("File not processed in time, please retry.");
+
+        // Success UI — force green tick icon
+        $fileIcon.textContent = "✅";
+        $fileBadge.classList.remove("error");
+        $attachLbl.textContent = "📎 Attach another";
+
+        // Store for this turn
         fileIds = [j.file.id];
         attachments = [{ id: j.file.id, name: f.name }];
-        $fileIcon.textContent = "✅";  // green tick appearance via CSS color + this glyph
-        $attachLbl.textContent = "📎 Attach another";
+
       } catch (err) {
+        console.error("upload error", err);
+        // Error UI — show badge in red but no warning triangle after success
+        $fileBadge.classList.add("error");
         $fileIcon.textContent = "⚠️";
         $attachLbl.textContent = "📎 Attach";
-        console.error("upload error", err);
+        // keep the badge visible so users can clear or retry
       }
     });
 
-    $fileClear.addEventListener("click", () => {
+    document.getElementById("file-clear").addEventListener("click", () => {
       resetFileBadge();
       $attachLbl.textContent = "📎 Attach";
     });
 
     async function askStream(prompt) {
+      // If a badge is visible but not a green tick, block send (still processing or error)
+      if ($fileBadge.style.display !== "none" && $fileIcon.textContent !== "✅") {
+        activateChat();
+        const { content } = createMsg("assistant", "Talking Care Navigator", false);
+        content.innerHTML = `<em>File is still uploading/processing. Please wait or remove it and retry.</em>`;
+        return;
+      }
+
       activateChat();
-
-      // history push (user)
       history.push({ role: "user", content: prompt }); saveHistory();
-
-      // user bubble
       createMsg("user", "You").content.textContent = prompt;
-
-      // assistant bubble
       const { content: aContent } = createMsg("assistant", "Talking Care Navigator", true);
       aContent.innerHTML = `<em>Thinking… ⏳</em>`;
 
@@ -347,21 +347,13 @@
       const ac = new AbortController();
       currentAbort = ac;
 
-      // IMPORTANT: Disable send if upload still pending (icon not ✅ and fileBadge visible)
-      if ($fileBadge.style.display !== "none" && $fileIcon.textContent !== "✅") {
-        aContent.innerHTML = `<em>Still processing your file — please try again in a moment.</em>`;
-        setStatus("");
-        return;
-      }
-
-      // Build payload with attachments if present
+      // Build payload with attachments for this turn
       const payload = { userMessage: prompt, history };
-      if (fileIds.length > 0 && attachments.length > 0) {
+      if (fileIds.length) {
         payload.fileIds = fileIds.slice();
         payload.attachments = attachments.map(a => ({ id: a.id, name: a.name }));
       }
 
-      // Start stream
       let r;
       try {
         r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
@@ -371,57 +363,33 @@
           signal: ac.signal
         });
       } catch (e) {
-        aContent.innerHTML = `<span>⚠️ Request failed: ${e?.message || e}</span>`;
-        setStatus(""); currentAbort = null;
-        return;
+        aContent.innerHTML = `<span>⚠️ Request failed: ${e?.message || e}</span>`; setStatus(""); currentAbort = null; return;
       }
 
       if (!r.ok || !r.body) {
         let err = `HTTP ${r.status}`; try { err += ` ${await r.text()}`; } catch {}
-        aContent.innerHTML = `<span>⚠️ Stream failed: ${err}</span>`;
-        setStatus(""); currentAbort = null; return;
+        aContent.innerHTML = `<span>⚠️ Stream failed: ${err}</span>`; setStatus(""); currentAbort = null; return;
       }
 
       const reader = r.body.getReader();
       const decoder = new TextDecoder("utf-8");
 
-      const flushBlocks = (chunk) => {
-        buffer += chunk;
-        const blocks = buffer.split(/\n\n/);
-        buffer = blocks.pop();
-        for (const block of blocks) {
-          const lines = block.split(/\n/);
-          let event = "message"; const dataLines = [];
-          for (const line of lines) {
-            if (!line) continue;
-            if (line.startsWith(":")) continue;
-            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
-            if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
-          }
-          const raw = dataLines.join("\n");
-          handleEvent(event, raw);
-        }
-      };
-
-      function sanitizeBodyDelta(s) {
+      const sanitizeBodyDelta = (s) => {
         if (!s) return s;
         s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
         s = s.replace(/https?:\/\/\S+/g, "");
         s = s.replace(/\s?\[\d+\]/g, "");
         s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
         return s;
-      }
-      function stripInlineSources(s) {
-        if (!s) return s;
-        return s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
-      }
+      };
+      const stripInlineSources = (s) => s ? s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "") : s;
 
-      function handleEvent(event, raw) {
+      const handleEvent = (event, raw) => {
         if (event === "start") return;
 
         if (event === "error") {
-          try { aContent.innerHTML = `<span>⚠️ ${escapeHtml(JSON.stringify(JSON.parse(raw)))}</span>`; }
-          catch { aContent.innerHTML = `<span>⚠️ ${escapeHtml(raw)}</span>`; }
+          try { aContent.innerHTML = `<span>⚠️ ${JSON.stringify(JSON.parse(raw))}</span>`; }
+          catch { aContent.innerHTML = `<span>⚠️ ${raw}</span>`; }
           setStatus(""); return;
         }
 
@@ -433,7 +401,7 @@
             if (finalText) { history.push({ role: "assistant", content: finalText }); saveHistory(); }
             assistantTurnSaved = true;
           }
-          // Clear file UI/state AFTER successful send so we don't keep the badge around
+          // Clear file state after send so badge doesn’t linger
           resetFileBadge();
           $attachLbl.textContent = "📎 Attach";
           return;
@@ -446,11 +414,10 @@
             (d && d.delta && Array.isArray(d.delta.content))
               ? d.delta.content.map(c => (c.text && (c.type?.includes("output_text"))) ? c.text : "").join("")
               : (typeof d?.text_delta === "string" ? d.text_delta : "");
-
           if (deltaText) {
             if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); }
-            const cleaned = sanitizeBodyDelta(deltaText);
-            mdAccum += cleaned; renderMarkdown(mdAccum, aContent);
+            mdAccum += sanitizeBodyDelta(deltaText);
+            renderMarkdown(mdAccum, aContent);
           }
           return;
         }
@@ -464,39 +431,53 @@
             citations.push({ kind: "web", url: a.url, label: a.title || a.url });
           }
         }
-      }
+      };
+
+      const flushBlocks = (chunk) => {
+        buffer += chunk;
+        const blocks = buffer.split(/\n\n/);
+        buffer = blocks.pop();
+        for (const block of blocks) {
+          const lines = block.split(/\n/);
+          let event = "message";
+          const dataLines = [];
+          for (const line of lines) {
+            if (!line) continue;
+            if (line.startsWith(":")) continue;
+            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
+            if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
+          }
+          const raw = dataLines.join("\n");
+          handleEvent(event, raw);
+        }
+      };
 
       try {
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
           const chunk = decoder.decode(value, { stream: true });
-          if (chunk && !started) started = true;
           flushBlocks(chunk);
         }
       } catch (e) {
-        aContent.insertAdjacentHTML("beforeend", `<p>⚠️ Stream error: ${escapeHtml(e?.message || String(e))}</p>`);
+        aContent.insertAdjacentHTML("beforeend", `<p>⚠️ Stream error: ${e?.message || String(e)}</p>`);
       } finally {
         currentAbort = null; setStatus("");
       }
     }
 
-    function escapeHtml(str) {
-      return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;" }[ch]));
-    }
-
+    // events
     $send.addEventListener("click", () => {
       const p = ($in.value || "").trim();
       if (!p) return;
       askStream(p);
       $in.value = "";
     });
-    $in.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $send.click(); }
-    });
+    $in.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $send.click(); } });
     $clear.addEventListener("click", () => {
       if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
-      $chat.innerHTML = ""; $in.value = ""; setStatus(""); clearHistory();
+      $chat.innerHTML = ""; $in.value = ""; setStatus(""); 
+      try { sessionStorage.setItem("tc_history", "[]"); } catch {}
       document.getElementById("shell").classList.remove("chat-active");
       resetFileBadge(); $attachLbl.textContent = "📎 Attach";
     });
