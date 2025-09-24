@@ -8,13 +8,24 @@ export const config = {
 import Busboy from "busboy";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const CORS_ALLOW_ORIGIN = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
+const CORS_ALLOW_METHODS = "POST, OPTIONS";
+const CORS_ALLOW_HEADERS = "Content-Type";
+const CORS_MAX_AGE = "86400";
 
-function cors(res) {
-  res.setHeader("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN);
+// Allow both direct Vercel testing and Squarespace
+const ALLOWED_ORIGINS = [
+  "https://tc-assistant-proxy.vercel.app",
+  "https://www.talkingcare.uk"
+];
+
+function cors(res, origin = "") {
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
   res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", CORS_ALLOW_METHODS);
+  res.setHeader("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS);
+  res.setHeader("Access-Control-Max-Age", CORS_MAX_AGE);
 }
 
 function readMultipart(req) {
@@ -26,8 +37,8 @@ function readMultipart(req) {
     let fileMIME = "application/octet-stream";
 
     bb.on("file", (_fieldname, stream, filename, _encoding, mimetype) => {
-      console.log("📂 File event hit:", filename);
-      if (filename) fileName = filename;
+      console.log("📂 File event hit:", { filename, encoding: _encoding, mimeType: mimetype });
+      if (filename) fileName = typeof filename === "string" ? filename : String(filename);
       if (mimetype) fileMIME = mimetype;
       const chunks = [];
       stream.on("data", (d) => chunks.push(d));
@@ -43,11 +54,11 @@ function readMultipart(req) {
     });
 
     bb.on("finish", () => {
+      console.log("✅ File read complete:", { filename: fileName });
       if (!fileBuffer) {
         console.error("❌ No file buffer was populated.");
         return reject(new Error("No file uploaded"));
       }
-      console.log("✅ File read complete:", fileName);
       resolve({ fileBuffer, fileName, fileMIME });
     });
 
@@ -57,8 +68,10 @@ function readMultipart(req) {
 
 async function uploadToOpenAI({ fileBuffer, fileName, fileMIME }) {
   console.log("⬆️ Uploading to OpenAI...");
+  // Use File to ensure correct filename is preserved
+  const fileObj = new File([fileBuffer], fileName, { type: fileMIME });
   const form = new FormData();
-  form.append("file", new Blob([fileBuffer], { type: fileMIME }), fileName);
+  form.append("file", fileObj);
   form.append("purpose", "assistants");
 
   const r = await fetch("https://api.openai.com/v1/files", {
@@ -98,18 +111,17 @@ async function pollProcessed(fileId, timeoutMs = 45000, intervalMs = 800) {
 }
 
 export default async function handler(req, res) {
+  cors(res, req.headers.origin || "");
+
   if (req.method === "OPTIONS") {
-    cors(res);
     res.status(204).end();
     return;
   }
   if (req.method !== "POST") {
-    cors(res);
     res.setHeader("Allow", "POST, OPTIONS");
     return res.status(405).json({ ok: false, error: "Method Not Allowed" });
   }
   if (!OPENAI_API_KEY) {
-    cors(res);
     return res.status(500).json({ ok: false, error: "Server misconfig: OPENAI_API_KEY missing" });
   }
 
@@ -120,11 +132,9 @@ export default async function handler(req, res) {
 
     const { processed, meta } = await pollProcessed(fileId);
 
-    cors(res);
     return res.status(200).json({
       ok: true,
-      // 👇 add top-level file_id so the existing widget logic can use it
-      file_id: fileId,
+      file_id: fileId, // top-level for the widget
       processed,
       file: {
         id: fileId,
@@ -135,7 +145,6 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     console.error("❌ Upload error:", err);
-    cors(res);
     return res.status(500).json({ ok: false, error: err.message || "Upload handler failed" });
   }
 }
