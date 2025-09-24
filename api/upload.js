@@ -1,5 +1,6 @@
 // /api/upload.js
 // Robust file upload handler using Busboy and OpenAI Files API
+// Guardrails added: 20 MB file size cap, clear friendly errors.
 
 export const config = {
   api: { bodyParser: false },
@@ -12,12 +13,12 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const CORS_ALLOW_METHODS = "POST, OPTIONS";
 const CORS_ALLOW_HEADERS = "Content-Type";
 const CORS_MAX_AGE = "86400";
-
-// Allow both direct Vercel testing and Squarespace
 const ALLOWED_ORIGINS = [
   "https://tc-assistant-proxy.vercel.app",
   "https://www.talkingcare.uk"
 ];
+
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
 
 function cors(res, origin = "") {
   if (ALLOWED_ORIGINS.includes(origin)) {
@@ -32,13 +33,20 @@ function cors(res, origin = "") {
 function readMultipart(req) {
   console.log("👀 Entering readMultipart");
   return new Promise((resolve, reject) => {
-    const bb = Busboy({ headers: req.headers });
+    const bb = Busboy({ headers: req.headers, limits: { fileSize: MAX_UPLOAD_BYTES } });
     let fileBuffer = null;
     let fileName = "upload.bin";
     let fileMIME = "application/octet-stream";
+    let done = false;
+
+    const bail = (err) => {
+      if (done) return;
+      done = true;
+      reject(err);
+    };
 
     bb.on("file", (_fieldname, stream, filename, encoding, mimetype) => {
-      // Busboy sometimes gives filename as an object (Squarespace/iframes/proxies).
+      // Some proxies send filename as an object
       let resolvedName = "upload.bin";
       if (typeof filename === "string" && filename.trim()) {
         resolvedName = filename.trim();
@@ -58,21 +66,27 @@ function readMultipart(req) {
 
       const chunks = [];
       stream.on("data", (d) => chunks.push(d));
-      stream.on("limit", () => reject(new Error("File too large")));
+      stream.on("limit", () => bail(Object.assign(new Error("File too large (20 MB max)"), { code: "FILE_TOO_LARGE" })));
       stream.on("end", () => { fileBuffer = Buffer.concat(chunks); });
+      stream.on("error", (e) => bail(e));
     });
 
     bb.on("error", (err) => {
       console.error("❌ Busboy error:", err);
-      reject(err);
+      bail(err);
     });
 
     bb.on("finish", () => {
+      if (done) return;
       console.log("✅ File read complete:", { filename: fileName });
       if (!fileBuffer) {
         console.error("❌ No file buffer was populated.");
-        return reject(new Error("No file uploaded"));
+        return bail(new Error("No file uploaded"));
       }
+      if (fileBuffer.length > MAX_UPLOAD_BYTES) {
+        return bail(Object.assign(new Error("File too large (20 MB max)"), { code: "FILE_TOO_LARGE" }));
+      }
+      done = true;
       resolve({ fileBuffer, fileName, fileMIME });
     });
 
@@ -83,7 +97,6 @@ function readMultipart(req) {
 async function uploadToOpenAI({ fileBuffer, fileName, fileMIME }) {
   console.log("⬆️ Uploading to OpenAI...");
   const form = new FormData();
-  // Use Blob + filename param to preserve the original name
   form.append("file", new Blob([fileBuffer], { type: fileMIME }), fileName);
   form.append("purpose", "assistants");
 
@@ -147,7 +160,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       ok: true,
-      file_id: fileId, // top-level for the widget
+      file_id: fileId,
       processed,
       file: {
         id: fileId,
@@ -158,6 +171,11 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     console.error("❌ Upload error:", err);
-    return res.status(500).json({ ok: false, error: err.message || "Upload handler failed" });
+    // Friendly errors
+    const msg = err?.message || "Upload handler failed";
+    if (err?.code === "FILE_TOO_LARGE") {
+      return res.status(413).json({ ok: false, error: "File too large (20 MB max)" });
+    }
+    return res.status(500).json({ ok: false, error: msg });
   }
 }
