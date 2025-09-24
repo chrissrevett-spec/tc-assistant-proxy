@@ -1,27 +1,38 @@
 // /api/assistant.js
 //
-// Responses API + retrieval-first. Supports an optional per-turn uploaded file:
-// - We upload the file separately via /api/upload (purpose=assistants).
-// - Here we build a TEMP vector store, ingest that file, and put it FIRST
-//   in tool_resources.file_search.vector_store_ids for this turn.
+// Responses API + retrieval-first with optional per-turn uploaded file:
+// - Client uploads to /api/upload (purpose=assistants) and sends upload_file_id with the next turn.
+// - We create a TEMP vector store for that file and put it FIRST in file_search config.
+//
+// Key points:
+// - Per-tool config: tools: [{ type: "file_search", file_search: { vector_store_ids: [...] } }]
+// - NO `tool_resources` and NO `modalities` (API rejects them).
+// - Emits SSE info events for easier debugging.
 
 const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const OPENAI_ASSISTANT_ID     = process.env.OPENAI_ASSISTANT_ID || "";
-const OPENAI_VECTOR_STORE_ID  = process.env.OPENAI_VECTOR_STORE_ID || "";
+const OPENAI_VECTOR_STORE_ID  = process.env.OPENAI_VECTOR_STORE_ID || ""; // permanent library
 const ENABLE_WEB_SEARCH       = process.env.OPENAI_ENABLE_WEB_SEARCH === "1";
 
-const CORS_ALLOW_ORIGIN       = process.env.CORS_ALLOW_ORIGIN || "https://tc-assistant-proxy.vercel.app";
 const CORS_ALLOW_METHODS      = process.env.CORS_ALLOW_METHODS || "GET, POST, OPTIONS";
 const CORS_ALLOW_HEADERS      = process.env.CORS_ALLOW_HEADERS || "Content-Type, Accept";
 const CORS_MAX_AGE            = "86400";
 const DEBUG_SSE_LOG           = process.env.DEBUG_SSE_LOG === "1";
 
-if (!OPENAI_API_KEY) console.error("[assistant] Missing OPENAI_API_KEY");
-if (!OPENAI_VECTOR_STORE_ID) console.error("[assistant] Missing OPENAI_VECTOR_STORE_ID — retrieval cannot run with /responses+file_search");
+// Allow both direct Vercel testing and Squarespace
+const ALLOWED_ORIGINS = [
+  "https://tc-assistant-proxy.vercel.app",
+  "https://www.talkingcare.uk"
+];
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN);
+if (!OPENAI_API_KEY) console.error("[assistant] Missing OPENAI_API_KEY");
+if (!OPENAI_VECTOR_STORE_ID) console.error("[assistant] Missing OPENAI_VECTOR_STORE_ID — retrieval requires a base store");
+
+function setCors(res, origin = "") {
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", CORS_ALLOW_METHODS);
   res.setHeader("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS);
@@ -36,9 +47,7 @@ async function readBody(req) {
     req.setEncoding("utf8");
     req.on("data", (c) => (data += c));
     req.on("end", () => {
-      const t = (data || "").trim();
-      if (!t) return resolve({});
-      try { resolve(JSON.parse(t)); } catch { resolve({}); }
+      try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); }
     });
     req.on("error", reject);
   });
@@ -96,7 +105,7 @@ async function fetchAssistantInstructions() {
   }
 }
 
-function withGroundingPolicy(sys) {
+function withGroundingPolicy(sys, fileAttached = false) {
   const policy = `
 CRITICAL GROUNDING POLICY:
 Search the document library first using the file_search tool and base your answer on those documents.
@@ -106,7 +115,11 @@ Prefer short verbatim quotes for key definitions and include paragraph or sectio
 If nothing relevant is found in the library, say exactly: "No matching sources found in the library."
 Never answer purely from general knowledge without sources.
 `.trim();
-  return `${sys}\n\n${policy}`;
+
+  const uploadTightener = fileAttached ? `
+For this turn, a document was provided. Base your answer on the uploaded document first. If the uploaded document does not contain enough detail, then consult the permanent library. Do not use web search for this turn.`.trim() : "";
+
+  return [sys, policy, uploadTightener].filter(Boolean).join("\n\n");
 }
 
 function normalizeHistory(raw) {
@@ -180,41 +193,33 @@ async function createTempVectorStoreWithFile(fileId) {
 
 // Build a properly shaped Responses API request
 function buildResponsesRequest(historyArr, userMessage, sysInstructions, tempVectorStoreId = null, extra = {}) {
-  const tempHint = tempVectorStoreId
-    ? `\nUSER ATTACHMENT POLICY:\nA file was uploaded for this turn. Search the uploaded file's vector store FIRST before using the permanent library or the web. Prefer citing the uploaded file when answering this turn.\n`
-    : "";
-  const groundedSys = withGroundingPolicy(sysInstructions) + tempHint;
+  const groundedSys = withGroundingPolicy(sysInstructions, Boolean(tempVectorStoreId));
 
   const input = [{ role: "system", content: groundedSys }];
   for (const m of historyArr) input.push(m);
   if (userMessage) input.push({ role: "user", content: userMessage });
 
-  // Declare tools
-const vectorStoreIds = tempVectorStoreId
-  ? [tempVectorStoreId, OPENAI_VECTOR_STORE_ID].filter(Boolean)
-  : [OPENAI_VECTOR_STORE_ID].filter(Boolean);
+  // Vector stores: uploaded temp FIRST, then permanent library
+  const vectorStoreIds = tempVectorStoreId
+    ? [tempVectorStoreId, OPENAI_VECTOR_STORE_ID].filter(Boolean)
+    : [OPENAI_VECTOR_STORE_ID].filter(Boolean);
 
-const tools = [
-  { type: "file_search", file_search: { vector_store_ids: vectorStoreIds } }
-];
-if (ENABLE_WEB_SEARCH) tools.push({ type: "web_search" });
-
-const payload = {
-  model: OPENAI_MODEL,
-  input,
-  tools,
-  modalities: ["text"],
-  text: { format: "markdown", verbosity: "medium" },
-  ...extra,
-};
-
-  // If a temp upload is present and you want deterministic retrieval without web,
-  // keep web disabled unless explicitly enabled via env.
-  if (tempVectorStoreId && !ENABLE_WEB_SEARCH) {
-    payload.tools = [{ type: "file_search" }];
+  // Tools: per-tool config (no `tool_resources`, no `modalities`)
+  const tools = [
+    { type: "file_search", file_search: { vector_store_ids: vectorStoreIds } }
+  ];
+  if (ENABLE_WEB_SEARCH && !tempVectorStoreId) {
+    // Keep web search for normal turns only. Upload turns are library-only.
+    tools.push({ type: "web_search" });
   }
 
-  return payload;
+  return {
+    model: OPENAI_MODEL,
+    input,
+    tools,
+    text: { format: "markdown", verbosity: "medium" },
+    ...extra,
+  };
 }
 
 function extractTextFromResponse(resp) {
@@ -247,14 +252,15 @@ async function handleNonStreaming(userMessage, history, uploadFileId) {
   return { ok: true, text, usage };
 }
 
-async function handleStreaming(res, userMessage, history, uploadFileId) {
+async function handleStreaming(req, res, userMessage, history, uploadFileId) {
+  setCors(res, req.headers.origin || "");
+
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
-    // 🔧 fixed: removed stray quote that caused a syntax/runtime error
-    "Access-Control-Allow-Origin": CORS_ALLOW_ORIGIN,
+    "Access-Control-Allow-Origin": ALLOWED_ORIGINS.includes(req.headers.origin || "") ? (req.headers.origin || "") : "",
     "Access-Control-Allow-Methods": CORS_ALLOW_METHODS,
     "Access-Control-Allow-Headers": CORS_ALLOW_HEADERS,
   });
@@ -266,6 +272,7 @@ async function handleStreaming(res, userMessage, history, uploadFileId) {
   };
 
   send("start", { ok: true });
+
   const sys = await fetchAssistantInstructions();
 
   let tempVS = null;
@@ -278,7 +285,6 @@ async function handleStreaming(res, userMessage, history, uploadFileId) {
     }
   }
 
-  // Build payload once so we can log it on failure
   const payload = buildResponsesRequest(history, userMessage, sys, tempVS, { stream: true });
 
   const upstream = await fetch("https://api.openai.com/v1/responses", {
@@ -295,7 +301,6 @@ async function handleStreaming(res, userMessage, history, uploadFileId) {
   if (!upstream.ok || !upstream.body) {
     let errTxt = "";
     try { errTxt = await upstream.text(); } catch {}
-    // Surface as much context as possible to the client bubble
     send("error", { ok:false, step:"responses_stream", status: upstream.status, error: errTxt || "no-body", payload });
     try { res.end(); } catch {}
     return;
@@ -360,7 +365,7 @@ async function handleStreaming(res, userMessage, history, uploadFileId) {
 }
 
 export default async function handler(req, res) {
-  setCors(res);
+  setCors(res, req.headers.origin || "");
   if (req.method === "OPTIONS") return endPreflight(res);
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST, OPTIONS");
@@ -369,11 +374,11 @@ export default async function handler(req, res) {
 
   try {
     const body = await readBody(req);
-    const userMessage = (body.userMessage || "").toString().trim();
+    const userMessage   = (body.userMessage || "").toString().trim();
     const clientHistory = normalizeHistory(body.history || []);
-    const trimmedHistory = trimHistoryByChars(clientHistory, 8000);
-    const uploadFileId = (body.upload_file_id || "").toString().trim() || null;
-    const mode = (req.query.stream || "off").toString();
+    const trimmedHistory= trimHistoryByChars(clientHistory, 8000);
+    const uploadFileId  = (body.upload_file_id || "").toString().trim() || null;
+    const mode          = (req.query.stream || "off").toString();
 
     if (!userMessage) {
       return res.status(400).json({ ok:false, error: "Missing userMessage" });
@@ -383,7 +388,7 @@ export default async function handler(req, res) {
     }
 
     if (mode === "on") {
-      return await handleStreaming(res, userMessage, trimmedHistory, uploadFileId);
+      return await handleStreaming(req, res, userMessage, trimmedHistory, uploadFileId);
     } else {
       const out = await handleNonStreaming(userMessage, trimmedHistory, uploadFileId);
       return res.status(200).json(out);
