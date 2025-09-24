@@ -3,160 +3,172 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Talking Care Assistant</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Talking Care Widget</title>
   <style>
     body {
-      font-family: sans-serif;
+      font-family: Arial, sans-serif;
       margin: 0;
-      padding: 1rem;
+      padding: 0;
+      background: #f8f9fa;
+    }
+    .chat-container {
       display: flex;
       flex-direction: column;
+      max-width: 600px;
+      margin: 0 auto;
       height: 100vh;
     }
-    #chat {
+    .messages {
       flex: 1;
+      padding: 1rem;
       overflow-y: auto;
-      margin-bottom: 1rem;
+      background: white;
     }
     .message {
-      padding: 0.75rem;
       margin: 0.5rem 0;
-      border-radius: 0.5rem;
-      max-width: 80%;
+      padding: 0.75rem;
+      border-radius: 8px;
+      line-height: 1.4;
     }
-    .user { background: #DCF8C6; align-self: flex-end; }
-    .bot { background: #F1F0F0; align-self: flex-start; }
-    .file-name {
-      font-size: 0.8rem;
-      color: #666;
-      margin-top: 0.25rem;
-      word-break: break-all;
+    .user {
+      background: #dcf8c6;
+      align-self: flex-end;
     }
-    #input-area {
+    .assistant {
+      background: #f1f0f0;
+      align-self: flex-start;
+    }
+    .input-area {
       display: flex;
       flex-direction: column;
-      gap: 0.5rem;
-    }
-    #text-row {
-      display: flex;
-      gap: 0.5rem;
-    }
-    #user-input {
-      flex: 1;
       padding: 0.5rem;
+      border-top: 1px solid #ddd;
+      background: #fff;
     }
-    button {
-      padding: 0.5rem 1rem;
-    }
-    #file-status {
-      font-size: 0.85rem;
-      color: #333;
+    .file-preview {
       display: flex;
       align-items: center;
-      gap: 0.5rem;
+      font-size: 0.9rem;
+      color: #333;
+      margin-bottom: 0.3rem;
     }
-    .tick { color: green; }
-    .hidden { display: none; }
-    .truncate {
-      max-width: 180px;
-      white-space: nowrap;
+    .file-preview span {
       overflow: hidden;
       text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 80%;
+      display: inline-block;
+    }
+    .file-preview .tick {
+      color: green;
+      margin-left: 0.5rem;
+    }
+    .file-upload {
+      margin-bottom: 0.3rem;
+    }
+    .input-controls {
+      display: flex;
+      gap: 0.5rem;
+    }
+    .input-controls input[type="text"] {
+      flex: 1;
+      padding: 0.5rem;
+      font-size: 1rem;
+    }
+    .input-controls button {
+      padding: 0.5rem 1rem;
+      font-size: 1rem;
     }
   </style>
 </head>
 <body>
-  <div id="chat"></div>
-
-  <div id="input-area">
-    <div id="file-status" class="hidden"></div>
-    <div id="text-row">
-      <input id="user-input" placeholder="Ask a question..." />
-      <input type="file" id="file-upload" />
-      <button onclick="send()">Send</button>
+  <div class="chat-container">
+    <div class="messages" id="messages"></div>
+    <div class="input-area">
+      <div class="file-upload">
+        <input type="file" id="fileInput" />
+        <div class="file-preview" id="filePreview" style="display: none">
+          <span id="fileName"></span>
+          <span class="tick" id="fileStatus">✔️</span>
+        </div>
+      </div>
+      <div class="input-controls">
+        <input type="text" id="userInput" placeholder="Ask something..." />
+        <button onclick="sendMessage()">Send</button>
+      </div>
     </div>
   </div>
 
   <script>
-    const chat = document.getElementById('chat');
-    const userInput = document.getElementById('user-input');
-    const fileUpload = document.getElementById('file-upload');
-    const fileStatus = document.getElementById('file-status');
+    const messagesEl = document.getElementById("messages");
+    const userInput = document.getElementById("userInput");
+    const fileInput = document.getElementById("fileInput");
+    const filePreview = document.getElementById("filePreview");
+    const fileName = document.getElementById("fileName");
+    const fileStatus = document.getElementById("fileStatus");
 
-    let uploadedFile = null;
+    let uploadedFileId = null;
 
-    function appendMessage(content, sender = 'bot', fileName = '') {
-      const msg = document.createElement('div');
-      msg.className = `message ${sender}`;
-      msg.innerHTML = content;
-      if (fileName) {
-        const fileTag = document.createElement('div');
-        fileTag.className = 'file-name truncate';
-        fileTag.textContent = `📎 ${fileName}`;
-        msg.appendChild(fileTag);
-      }
-      chat.appendChild(msg);
-      chat.scrollTop = chat.scrollHeight;
-    }
-
-    fileUpload.addEventListener('change', async () => {
-      const file = fileUpload.files[0];
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files[0];
       if (!file) return;
 
-      fileStatus.classList.remove('hidden');
-      fileStatus.innerHTML = `⏳ Uploading <span class="truncate">${file.name}</span>...`;
+      filePreview.style.display = "flex";
+      fileName.textContent = file.name.length > 40 ? file.name.slice(0, 40) + "..." : file.name;
+      fileStatus.textContent = "⏳";
+      fileStatus.style.color = "orange";
 
-      const form = new FormData();
-      form.append('file', file);
+      const formData = new FormData();
+      formData.append("file", file);
 
-      try {
-        const res = await fetch('/api/upload', {
-          method: 'POST',
-          body: form
-        });
-
-        const json = await res.json();
-        if (!json.ok) throw new Error(json.error || "Upload failed");
-
-        uploadedFile = {
-          id: json.file.id,
-          name: file.name,
-        };
-
-        fileStatus.innerHTML = `✅ <span class="tick">Uploaded</span>: <span class="truncate">${file.name}</span>`;
-      } catch (err) {
-        fileStatus.innerHTML = `❌ Error: ${err.message}`;
-        uploadedFile = null;
+      const r = await fetch("/api/upload", {
+        method: "POST",
+        body: formData,
+      });
+      const data = await r.json();
+      if (data.ok && data.file?.id) {
+        uploadedFileId = data.file.id;
+        fileStatus.textContent = "✔️";
+        fileStatus.style.color = "green";
+      } else {
+        fileStatus.textContent = "❌";
+        fileStatus.style.color = "red";
       }
     });
 
-    async function send() {
-      const message = userInput.value.trim();
-      if (!message) return;
+    async function sendMessage() {
+      const text = userInput.value.trim();
+      if (!text) return;
 
-      appendMessage(message, 'user', uploadedFile?.name || '');
+      addMessage(text, "user");
+      userInput.value = "";
 
-      const payload = {
-        userMessage: message,
-        upload_file_id: uploadedFile?.id || null,
-        history: [], // Optional: you can track history here
-      };
+      if (uploadedFileId) {
+        addMessage("📎 Attached file: " + fileName.textContent, "user");
+        filePreview.style.display = "none";
+        fileInput.value = "";
+      }
 
-      const res = await fetch('/api/assistant?stream=off', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+      const r = await fetch("/api/assistant?stream=off", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userMessage: text,
+          upload_file_id: uploadedFileId || undefined,
+        }),
       });
+      const data = await r.json();
+      addMessage(data.text || "[no response]", "assistant");
+      uploadedFileId = null;
+    }
 
-      const json = await res.json();
-      appendMessage(json.text || '[No response]', 'bot');
-
-      // Reset
-      userInput.value = '';
-      fileUpload.value = '';
-      uploadedFile = null;
-      fileStatus.classList.add('hidden');
+    function addMessage(text, role) {
+      const div = document.createElement("div");
+      div.className = `message ${role}`;
+      div.textContent = text;
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
     }
   </script>
 </body>
