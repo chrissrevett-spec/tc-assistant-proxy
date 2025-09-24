@@ -2,12 +2,14 @@
 //
 // Responses API + retrieval-first with optional per-turn uploaded file:
 // - Client uploads to /api/upload (purpose=assistants) and sends upload_file_id with the next turn.
-// - We create a TEMP vector store for that file and put it FIRST in tools[0].vector_store_ids.
+// - We create a TEMP vector store for that file and (IMPORTANT) if a file is attached,
+//   we search ONLY that temp store for this turn (no permanent library, no web search).
 //
 // API shape (current):
-// tools: [{ type: "file_search", vector_store_ids: ["vs_tmp", "vs_perm"] }, { type: "web_search" }]
+// tools: [{ type: "file_search", vector_store_ids: ["vs_id", ...] }, { type: "web_search" }]
 // NO "tool_resources", NO "modalities".
 // text.format must be an object with type in: "text" | "json_object" | "json_schema".
+// We use { type: "text" } to avoid format errors.
 
 const OPENAI_API_KEY          = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL            = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -36,7 +38,7 @@ function setCors(res, origin = "") {
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", CORS_ALLOW_METHODS);
   res.setHeader("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS);
-  res.setHeader("Access-Control-Max-Age", CORS_MAX_AGE);
+  res.setHeader("Access-Control-Max-Age", CORS_MAX_Age);
 }
 function endPreflight(res){ res.statusCode = 204; res.end(); }
 
@@ -106,6 +108,7 @@ async function fetchAssistantInstructions() {
 }
 
 function withGroundingPolicy(sys, fileAttached = false) {
+  // Base policy for normal turns
   const policy = `
 CRITICAL GROUNDING POLICY:
 Search the document library first using the file_search tool and base your answer on those documents.
@@ -116,10 +119,14 @@ If nothing relevant is found in the library, say exactly: "No matching sources f
 Never answer purely from general knowledge without sources.
 `.trim();
 
-  const uploadTightener = fileAttached ? `
-For this turn, a document was provided. Base your answer on the uploaded document first. If the uploaded document does not contain enough detail, then consult the permanent library. Do not use web search for this turn.`.trim() : "";
+  // Tighter rule for upload turns:
+  // We will attach ONLY the temp store as a tool on these turns, so the instruction aligns with capabilities.
+  const uploadRule = fileAttached ? `
+For this turn, ONLY use the uploaded document via file_search. Do not consult the permanent library and do not use web search.
+If the uploaded document does not contain the answer, say exactly: "No matching sources found in the uploaded document."
+`.trim() : "";
 
-  return [sys, policy, uploadTightener].filter(Boolean).join("\n\n");
+  return [sys, policy, uploadRule].filter(Boolean).join("\n\n");
 }
 
 function normalizeHistory(raw) {
@@ -191,33 +198,32 @@ async function createTempVectorStoreWithFile(fileId) {
   throw new Error("Vector store ingestion timeout");
 }
 
-// Build a properly shaped Responses API request
+// Build a properly shaped Responses API request.
+// IMPORTANT: If tempVectorStoreId is present, we attach ONLY that store and NO web_search.
 function buildResponsesRequest(historyArr, userMessage, sysInstructions, tempVectorStoreId = null, extra = {}) {
-  const groundedSys = withGroundingPolicy(sysInstructions, Boolean(tempVectorStoreId));
+  const uploadTurn = Boolean(tempVectorStoreId);
+  const groundedSys = withGroundingPolicy(sysInstructions, uploadTurn);
 
   const input = [{ role: "system", content: groundedSys }];
   for (const m of historyArr) input.push(m);
   if (userMessage) input.push({ role: "user", content: userMessage });
 
-  // Vector stores: uploaded temp FIRST, then permanent library
-  const vectorStoreIds = tempVectorStoreId
-    ? [tempVectorStoreId, OPENAI_VECTOR_STORE_ID].filter(Boolean)
-    : [OPENAI_VECTOR_STORE_ID].filter(Boolean);
+  // Vector stores:
+  const tools = [];
 
-  // Tools: current API requires vector_store_ids directly on the tool
-  const tools = [
-    { type: "file_search", vector_store_ids: vectorStoreIds }
-  ];
-  if (ENABLE_WEB_SEARCH && !tempVectorStoreId) {
-    // Keep web search for normal turns only. Upload turns are library-only.
-    tools.push({ type: "web_search" });
+  if (uploadTurn) {
+    // 🔒 Upload turn: ONLY the temporary store (prevents accidental hits in your permanent library)
+    tools.push({ type: "file_search", vector_store_ids: [tempVectorStoreId] });
+  } else {
+    // Normal turns: permanent library, plus optional web_search
+    tools.push({ type: "file_search", vector_store_ids: [OPENAI_VECTOR_STORE_ID].filter(Boolean) });
+    if (ENABLE_WEB_SEARCH) tools.push({ type: "web_search" });
   }
 
   return {
     model: OPENAI_MODEL,
     input,
     tools,
-    // ✅ FIX: format.type must be one of: "text" | "json_object" | "json_schema"
     text: { format: { type: "text" }, verbosity: "medium" },
     ...extra,
   };
