@@ -33,7 +33,7 @@
       order: 2;
     }
 
-    /* Composer row — by default single row; wraps under a small-screen breakpoint */
+    /* Composer row — default single row; wraps on small screens */
     .inputrow {
       display: flex; gap: 8px; align-items: flex-start; flex-wrap: nowrap;
     }
@@ -48,7 +48,7 @@
     }
     textarea:focus { background: #f7f7f7; border-color: #ccc; outline: none; box-shadow: 0 0 0 2px rgba(0,0,0,0.04); }
 
-    /* Unified primary buttons */
+    /* Unified buttons */
     .ui-btn {
       display: inline-flex; align-items: center; justify-content: center; gap: 8px;
       height: 40px; padding: 0 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
@@ -60,14 +60,14 @@
     .ui-btn:hover { background: #f0f0f0; border-color: #ccc; }
     .ui-btn.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
 
-    /* Small-screen wrapping behaviour: textarea full-width on line 1; buttons wrap to line 2 */
+    /* Mobile wrapping: textarea full width on line 1; buttons wrap to line 2 */
     @media (max-width: 540px) {
       .inputrow { flex-wrap: wrap; }
       .inputrow textarea { flex: 1 1 100%; width: 100%; }
       .inputrow .ui-btn { margin-top: 8px; }
     }
 
-    /* Upload badge row (to avoid squashing textarea on long names) */
+    /* Upload badge row */
     .attach-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
     .attach-status {
       display: inline-flex; align-items: center; gap: 6px;
@@ -192,7 +192,7 @@
     const purifyUrl = "https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js";
     await import(purifyUrl);
 
-    // Your custom avatar image
+    // Custom avatar image
     const ASSISTANT_AVATAR_URL = "https://images.squarespace-cdn.com/content/66d7774bf0cbbe646aefb211/264b05cb-b865-404b-9ac9-cc7f77f15ce9/TRANSPARENCY+crop.png?content-type=image%2Fpng";
 
     const API_BASE = location.origin.replace(/\/$/, "");
@@ -310,7 +310,7 @@
       const list = document.createElement("ul");
       list.style.margin = "0";
       list.style.paddingLeft = "20px";
-      ;[...files, ...urls].forEach((c) => {
+      [...files, ...urls].forEach((c) => {
         const li = document.createElement("li");
         li.textContent = c.label;
         list.appendChild(li);
@@ -478,6 +478,48 @@
         }
       };
 
+      function rewriteAssistantText(s, { uploadTurn = false } = {}) {
+        if (!s) return s;
+
+        // Normalise punctuation variants
+        s = s.replace(/[’]/g, "'");
+
+        // Helper to choose replacement considering plurality
+        const repl = (plural, attach) => {
+          if (uploadTurn || attach) return plural ? "attached documents" : "attached document";
+          return plural ? "documents" : "document";
+        };
+
+        // Core rewrites (numerous variants)
+        const patterns = [
+          { re: /\bfiles?\s+you(?:'ve| have)?\s+uploaded\b/gi, fn: (m) => repl(true) },
+          { re: /\buploaded\s+files?\b/gi, fn: (m) => repl(true) },
+          { re: /\bthe\s+uploaded\s+files?\b/gi, fn: (m) => repl(true) },
+          { re: /\b(your\s+)?uploaded\s+document(s)?\b/gi, fn: (m, _y, s2) => repl(!!s2) },
+          { re: /\bdocuments?\s+you(?:'ve| have)?\s+uploaded\b/gi, fn: (m) => repl(true) },
+          { re: /\byour\s+upload(s)?\b/gi, fn: (m, s1) => repl(!!s1, true) },
+          { re: /\byour\s+(file|document)(s)?\b/gi, fn: (m, _what, s2) => repl(!!s2) },
+          // Subtler variants
+          { re: /\binfo(?:rmation)?\s+from\s+the\s+uploaded\s+(file|document)(s)?\b/gi, fn: (m, _w, s2) => `information from the ${repl(!!s2)}` },
+        ];
+        for (const { re, fn } of patterns) s = s.replace(re, fn);
+
+        // If NOT an upload turn, drop sentences that still mention uploads/attached
+        if (!uploadTurn) {
+          s = s.replace(/(?:^|\s)((If|Should)\s+you\s+need\s+[^.?!]*(uploaded|attached)[^.?!]*[.?!])/gi, " ");
+          s = s.replace(/(?:^|\s)(For\s+details[^.?!]*(uploaded|attached)[^.?!]*[.?!])/gi, " ");
+        }
+
+        // Clean inline URLs/footnotes and trailing Sources:
+        s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
+        s = s.replace(/https?:\/\/\S+/g, "");
+        s = s.replace(/\s?\[\d+\]/g, "");
+        s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
+
+        // Tidy spaces
+        return s.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n");
+      }
+
       function handleEvent(event, raw) {
         if (event === "start") return;
 
@@ -510,6 +552,12 @@
 
         if (event === "done" || event === "response.completed") {
           setStatus("");
+          // Final hardening pass (in case any text slipped through mid-stream)
+          const finalMd = rewriteAssistantText(mdAccum, { uploadTurn });
+          if (finalMd !== mdAccum) {
+            mdAccum = finalMd;
+            renderMarkdown(mdAccum, aContent);
+          }
           if (!sourcesAppended) {
             appendSources(aContent, citations);
             sourcesAppended = true;
@@ -536,7 +584,7 @@
 
           if (deltaText) {
             if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); }
-            const cleaned = sanitizeBodyDelta(deltaText, { uploadTurn });
+            const cleaned = rewriteAssistantText(deltaText, { uploadTurn });
             mdAccum += cleaned;
             renderMarkdown(mdAccum, aContent);
           }
@@ -574,26 +622,6 @@
       }
     }
 
-    function sanitizeBodyDelta(s, { uploadTurn = false } = {}) {
-      if (!s) return s;
-      // Strip inline URLs/footnotes and trailing Sources sections
-      s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
-      s = s.replace(/https?:\/\/\S+/g, "");
-      s = s.replace(/\s?\[\d+\]/g, "");
-      s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
-
-      // Phrase hardening — rewrite banned phrasing
-      const replAttached = uploadTurn ? "attached document" : "documents";
-      s = s.replace(/\bfiles?\s+you(?:['’]ve)?\s+uploaded\b/gi, uploadTurn ? "attached document(s)" : "documents");
-      s = s.replace(/\buploaded\s+files?\b/gi, replAttached + "s");
-      s = s.replace(/\byour\s+upload(?:s)?\b/gi, uploadTurn ? "the attached document(s)" : "documents");
-      s = s.replace(/\buploaded\s+document(?:s)?\b/gi, uploadTurn ? "attached document(s)" : "documents");
-      s = s.replace(/\byour\s+(file|document)(s)?\b/gi, (m, a, b) => (uploadTurn ? `the attached ${a}${b||""}` : `the ${a}${b||""}`));
-
-      // Tidy spaces
-      s = s.replace(/\s{2,}/g, " ");
-      return s;
-    }
     function stripInlineSources(s) {
       if (!s) return s;
       return s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
