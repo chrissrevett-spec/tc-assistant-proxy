@@ -478,52 +478,47 @@
         }
       };
 
-      // --- Replace your existing rewriteAssistantText with this version ---
-function rewriteAssistantText(s, { uploadTurn = false } = {}) {
-  if (!s) return s;
+      function rewriteAssistantText(s, { uploadTurn = false } = {}) {
+        if (!s) return s;
 
-  // Normalise punctuation
-  s = s.replace(/[’]/g, "'");
+        // Normalise punctuation variants
+        s = s.replace(/[’]/g, "'");
 
-  // Helpers
-  const has2p = (t) => /\b(you|your|you've|you have)\b/i.test(t);
-  const hasUploadish = (t) => /\b(upload|attached?|attachment|provide|provided|share|shared)\b/i.test(t);
-  const hasDocWord = (t) => /\b(documents?|files?|polic(y|ies)|pdfs?)\b/i.test(t);
-  const vagueRef = (t) => /\b(assist|help)\b/i.test(t) && /\b(them|it)\b/i.test(t);
+        // Helper to choose replacement considering plurality
+        const repl = (plural, attach) => {
+          if (uploadTurn || attach) return plural ? "attached documents" : "attached document";
+          return plural ? "documents" : "document";
+        };
 
-  if (uploadTurn) {
-    // Neutralise second-person phrasing into "the attached document(s)"
-    s = s
-      .replace(/\byou(?:'ve| have)?\s+uploaded\s+(?:some\s+)?(files?|documents?)\b/gi, "the attached $1")
-      .replace(/\byou\s+(?:attached|provided|shared)\s+(?:some\s+)?(files?|documents?)\b/gi, "the attached $1")
-      .replace(/\byour\s+(files?|documents?|policies?|pdfs?)\b/gi, "the attached $1")
-      .replace(/\bthe\s+uploaded\s+(files?|documents?)\b/gi, "the attached $1");
-  } else {
-    // On NON-upload turns: drop any sentence that mentions docs/files with second-person,
-    // and also drop vague "I can help with them/it" style follow-ups.
-    const sentences = s.split(/(?<=[.!?])\s+/).map(t => t.trim()).filter(Boolean);
-    const kept = sentences.filter(sent => {
-      const badSecondPersonDoc = has2p(sent) && (hasDocWord(sent) || hasUploadish(sent));
-      const badVague = vagueRef(sent) && (hasDocWord(sent) || hasUploadish(sent));
-      return !(badSecondPersonDoc || badVague);
-    });
-    s = kept.join(" ");
-  }
+        // Core rewrites (numerous variants)
+        const patterns = [
+          { re: /\bfiles?\s+you(?:'ve| have)?\s+uploaded\b/gi, fn: (m) => repl(true) },
+          { re: /\buploaded\s+files?\b/gi, fn: (m) => repl(true) },
+          { re: /\bthe\s+uploaded\s+files?\b/gi, fn: (m) => repl(true) },
+          { re: /\b(your\s+)?uploaded\s+document(s)?\b/gi, fn: (m, _y, s2) => repl(!!s2) },
+          { re: /\bdocuments?\s+you(?:'ve| have)?\s+uploaded\b/gi, fn: (m) => repl(true) },
+          { re: /\byour\s+upload(s)?\b/gi, fn: (m, s1) => repl(!!s1, true) },
+          { re: /\byour\s+(file|document)(s)?\b/gi, fn: (m, _what, s2) => repl(!!s2) },
+          // Subtler variants
+          { re: /\binfo(?:rmation)?\s+from\s+the\s+uploaded\s+(file|document)(s)?\b/gi, fn: (m, _w, s2) => `information from the ${repl(!!s2)}` },
+        ];
+        for (const { re, fn } of patterns) s = s.replace(re, fn);
 
-  // Light clean-up: strip inline links, raw URLs, numeric footnotes, trailing Sources blocks
-  s = s
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1")
-    .replace(/https?:\/\/\S+/g, "")
-    .replace(/\s?\[\d+\]/g, "")
-    .replace(/\n?^\s*Sources?:[\s\S]*$/im, "")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+        // If NOT an upload turn, drop sentences that still mention uploads/attached
+        if (!uploadTurn) {
+          s = s.replace(/(?:^|\s)((If|Should)\s+you\s+need\s+[^.?!]*(uploaded|attached)[^.?!]*[.?!])/gi, " ");
+          s = s.replace(/(?:^|\s)(For\s+details[^.?!]*(uploaded|attached)[^.?!]*[.?!])/gi, " ");
+        }
 
-  // Safety: never return empty
-  return s || "How may I help today?";
-}
+        // Clean inline URLs/footnotes and trailing Sources:
+        s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
+        s = s.replace(/https?:\/\/\S+/g, "");
+        s = s.replace(/\s?\[\d+\]/g, "");
+        s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
 
+        // Tidy spaces
+        return s.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n");
+      }
 
       function handleEvent(event, raw) {
         if (event === "start") return;
