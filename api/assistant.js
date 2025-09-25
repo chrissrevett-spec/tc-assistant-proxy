@@ -190,7 +190,8 @@ export default async function handler(req, res) {
       tool_choice: "auto",
       parallel_tool_calls: true,
       store: true,
-      response_format: { type: "text" } // <-- use text output
+      // NOTE: Responses API wants output format here:
+      text: { format: { type: "text" } }
     };
 
     const r = await fetch(`${OAI}/responses`, {
