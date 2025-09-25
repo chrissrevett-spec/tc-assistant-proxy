@@ -1,14 +1,6 @@
 // api/assistant.js
 export const config = { runtime: "nodejs" };
 
-/**
- * Streaming SSE proxy to OpenAI Responses API with strict turn logic:
- * - If body.upload_file_id is present => create a TEMP vector store and use ONLY that store.
- * - Else => use ONLY the permanent library vector store (TCN_LIBRARY_VECTOR_STORE_ID).
- * - Never combine temp + library in the same turn.
- * - On upload turns, we also push an `info` event so the widget can show the green banner.
- */
-
 const OAI = "https://api.openai.com/v1";
 const MODEL = process.env.TCN_MODEL || "gpt-4o-mini-2024-07-18";
 const LIBRARY_STORE_ID = process.env.TCN_LIBRARY_VECTOR_STORE_ID;
@@ -29,35 +21,35 @@ export default async function handler(req, res) {
     "Access-Control-Allow-Origin": "*",
   });
 
-  const writeSSE = (event, dataObj) => {
+  const sse = (event, data) => {
     try {
       res.write(`event: ${event}\n`);
-      res.write(`data: ${JSON.stringify(dataObj)}\n\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
     } catch {}
   };
 
-  // Read JSON body
+  // Parse body
   let body;
   try {
     const chunks = [];
     for await (const c of req) chunks.push(c);
     body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
   } catch {
-    writeSSE("error", { error: "Invalid JSON" });
+    sse("error", { error: "Invalid JSON" });
     res.end();
     return;
   }
 
   const { userMessage, history = [], upload_file_id } = body || {};
   if (!userMessage || typeof userMessage !== "string") {
-    writeSSE("error", { error: "Missing userMessage" });
+    sse("error", { error: "Missing userMessage" });
     res.end();
     return;
   }
 
-  writeSSE("start", { ok: true });
+  sse("start", { ok: true });
 
-  // ----- System instructions -----
+  // Base system policy
   const SYSTEM_BASE = [
     "You are Talking Care Navigator (TCN), an expert assistant for adult social care in England.",
     "Scope: CQC standards/regulations and relevant guidance (England only).",
@@ -73,31 +65,38 @@ export default async function handler(req, res) {
     "If the answer cannot be found in your sources, say so rather than speculating."
   ].join(" ");
 
-  // Build conversation input for Responses API
+  // Build Responses API input
   const input = [];
 
-  // Base system message
-  input.push({ role: "system", content: [{ type: "input_text", text: SYSTEM_BASE }] });
-
-  // History
-  for (const m of history) {
-    if (!m || !m.role || !m.content) continue;
-    input.push({ role: m.role, content: [{ type: "input_text", text: String(m.content) }] });
-  }
-
-  // Current user message
-  input.push({ role: "user", content: [{ type: "input_text", text: userMessage }] });
-
-  // Per-turn tool selection
-  let tools = [];
+  // Add per-turn routing instruction first (filled below)
   let extraSystem = "";
 
+  // Add base system
+  input.push({
+    role: "system",
+    content: [{ type: "input_text", text: SYSTEM_BASE }],
+  });
+
+  // Add prior turns — IMPORTANT: map content type by role
+  for (const m of history) {
+    if (!m || !m.role || m.content == null) continue;
+    const role = m.role === "assistant" ? "assistant" : (m.role === "user" ? "user" : "system");
+    const text = String(m.content);
+    const type = role === "assistant" ? "output_text" : "input_text";
+    input.push({ role, content: [{ type, text }] });
+  }
+
+  // Add current user message
+  input.push({ role: "user", content: [{ type: "input_text", text: userMessage }] });
+
+  // Tool routing
+  let tools = [];
   let tempStoreId = null;
   const isUploadTurn = Boolean(upload_file_id);
 
   try {
     if (isUploadTurn) {
-      // --- UPLOAD TURN: temp vector store ONLY ---
+      // TEMP VECTOR STORE (upload turn only)
       const vsResp = await fetch(`${OAI}/vector_stores`, {
         method: "POST",
         headers: {
@@ -106,14 +105,12 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify({ name: `tcn-temp-${Date.now()}` }),
       });
-      if (!vsResp.ok) {
-        const t = await vsResp.text().catch(() => "");
-        throw new Error(`Temp store create failed: ${t || vsResp.status}`);
-      }
+      if (!vsResp.ok) throw new Error(await vsResp.text());
+
       const vs = await vsResp.json();
       tempStoreId = vs.id;
 
-      // Attach the uploaded file
+      // Add uploaded file to temp store
       const addFileResp = await fetch(`${OAI}/vector_stores/${tempStoreId}/files`, {
         method: "POST",
         headers: {
@@ -122,66 +119,52 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify({ file_id: upload_file_id }),
       });
-      if (!addFileResp.ok) {
-        const t = await addFileResp.text().catch(() => "");
-        throw new Error(`Adding file to temp store failed: ${t || addFileResp.status}`);
-      }
+      if (!addFileResp.ok) throw new Error(await addFileResp.text());
       const added = await addFileResp.json();
-      const fileId = added?.file?.id || upload_file_id;
+      const addedId = added?.file?.id || upload_file_id;
 
-      // Poll indexing
+      // Wait for indexing
       const deadline = Date.now() + INGEST_TIMEOUT_MS;
-      let status = "in_progress";
-      let lastError = null;
       while (Date.now() < deadline) {
-        const st = await fetch(`${OAI}/vector_stores/${tempStoreId}/files/${fileId}`, {
+        const st = await fetch(`${OAI}/vector_stores/${tempStoreId}/files/${addedId}`, {
           headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
         });
-        if (!st.ok) {
-          const t = await st.text().catch(() => "");
-          throw new Error(`Status check failed: ${t || st.status}`);
-        }
+        if (!st.ok) throw new Error(await st.text());
         const info = await st.json();
-        status = info?.status || "in_progress";
-        lastError = info?.last_error || null;
-        if (status === "completed") break;
-        if (status === "failed" || status === "cancelled") {
-          throw new Error(lastError?.message || `Indexing ${status}`);
+        if (info?.status === "completed") break;
+        if (info?.status === "failed" || info?.status === "cancelled") {
+          throw new Error(info?.last_error?.message || `Indexing ${info?.status}`);
         }
-        await sleep(800);
+        await new Promise(r => setTimeout(r, 800));
       }
-      if (status !== "completed") throw new Error("Indexing timeout");
 
-      // Inform UI
-      writeSSE("info", { note: "temp_vector_store_ready", id: tempStoreId });
+      sse("info", { note: "temp_vector_store_ready", id: tempStoreId });
 
       tools = [{ type: "file_search", vector_store_ids: [tempStoreId] }];
-
       extraSystem =
         "For this turn, answer ONLY from the attached document. " +
-        "Do not use any external or library sources. " +
-        "Do not say 'files you uploaded' or refer to uploads; if you must refer to the source, call it 'the attached document'. " +
-        "If the answer is not in the attached document, say you can't find it in the attached document.";
+        "Do not use external sites or the library store. " +
+        "Do not say 'files you uploaded' — say 'the attached document'. " +
+        "If the answer is not in the attached document, say so.";
     } else {
-      // --- LIBRARY TURN: library store ONLY ---
+      // LIBRARY STORE (normal turn)
       if (!LIBRARY_STORE_ID) {
-        writeSSE("error", { error: "Missing TCN_LIBRARY_VECTOR_STORE_ID" });
+        sse("error", { error: "Missing TCN_LIBRARY_VECTOR_STORE_ID" });
         res.end();
         return;
       }
       tools = [{ type: "file_search", vector_store_ids: [LIBRARY_STORE_ID] }];
-
       extraSystem =
         "Use the Talking Care Navigator Library only. " +
-        "Do not reference uploads. " +
-        "Refer to sources as legislation/guidance names or 'the Talking Care Navigator Library' when appropriate.";
+        "Do not reference user uploads. " +
+        "Refer to sources by name (e.g., the guidance title) or as 'the Talking Care Navigator Library' when appropriate.";
     }
 
-    // Inject per-turn rule (as an additional system message)
+    // Prepend the per-turn rule
     input.unshift({ role: "system", content: [{ type: "input_text", text: extraSystem }] });
 
-    // --- Call OpenAI Responses API (streaming) ---
-    const oaiReq = {
+    // Responses API call (stream)
+    const reqBody = {
       model: MODEL,
       input,
       tools,
@@ -190,8 +173,7 @@ export default async function handler(req, res) {
       tool_choice: "auto",
       parallel_tool_calls: true,
       store: true,
-      // NOTE: Responses API wants output format here:
-      text: { format: { type: "text" } }
+      text: { format: { type: "text" } },
     };
 
     const r = await fetch(`${OAI}/responses`, {
@@ -200,17 +182,16 @@ export default async function handler(req, res) {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(oaiReq),
+      body: JSON.stringify(reqBody),
     });
 
     if (!r.ok || !r.body) {
       const txt = await r.text().catch(() => "");
-      writeSSE("error", { error: `OpenAI request failed: ${txt || r.status}` });
+      sse("error", { error: `OpenAI request failed: ${txt || r.status}` });
       res.end();
       return;
     }
 
-    // Pipe OpenAI SSE through
     const reader = r.body.getReader();
     const decoder = new TextDecoder("utf-8");
     while (true) {
@@ -219,20 +200,13 @@ export default async function handler(req, res) {
       res.write(decoder.decode(value));
     }
   } catch (err) {
-    if (Boolean(upload_file_id)) {
-      writeSSE("info", {
-        note: "temp_vector_store_failed",
-        error: err?.message || "We couldn't prepare your document for search.",
-      });
+    if (isUploadTurn) {
+      sse("info", { note: "temp_vector_store_failed", error: err?.message || "Indexing failed." });
     } else {
-      writeSSE("error", { error: err?.message || "Server error" });
+      sse("error", { error: err?.message || "Server error" });
     }
   } finally {
     res.write("event: done\ndata: [DONE]\n\n");
     res.end();
   }
-}
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
 }
