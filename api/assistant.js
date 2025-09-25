@@ -33,9 +33,7 @@ export default async function handler(req, res) {
     try {
       res.write(`event: ${event}\n`);
       res.write(`data: ${JSON.stringify(dataObj)}\n\n`);
-    } catch {
-      /* ignore */
-    }
+    } catch {}
   };
 
   // Read JSON body
@@ -44,7 +42,7 @@ export default async function handler(req, res) {
     const chunks = [];
     for await (const c of req) chunks.push(c);
     body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-  } catch (e) {
+  } catch {
     writeSSE("error", { error: "Invalid JSON" });
     res.end();
     return;
@@ -59,10 +57,7 @@ export default async function handler(req, res) {
 
   writeSSE("start", { ok: true });
 
-  // Build conversation input for Responses API
-  const input = [];
-
-  // System instructions (base)
+  // ----- System instructions -----
   const SYSTEM_BASE = [
     "You are Talking Care Navigator (TCN), an expert assistant for adult social care in England.",
     "Scope: CQC standards/regulations and relevant guidance (England only).",
@@ -75,18 +70,23 @@ export default async function handler(req, res) {
     "Refer to the knowledge corpus as the 'Talking Care Navigator Library'.",
     "Do NOT say 'files you uploaded', 'uploads', or address the end user as the bot creator.",
     "If asked 'who created you?', say: 'I was created by Chris Revett at Talking Care.'",
-    "If the answer cannot be found in your sources, say so rather than speculating.",
+    "If the answer cannot be found in your sources, say so rather than speculating."
   ].join(" ");
 
-  // History into input
-  input.push({ role: "system", content: [{ type: "text", text: SYSTEM_BASE }] });
+  // Build conversation input for Responses API
+  const input = [];
+
+  // Base system message
+  input.push({ role: "system", content: [{ type: "input_text", text: SYSTEM_BASE }] });
+
+  // History
   for (const m of history) {
     if (!m || !m.role || !m.content) continue;
-    input.push({ role: m.role, content: [{ type: "text", text: String(m.content) }] });
+    input.push({ role: m.role, content: [{ type: "input_text", text: String(m.content) }] });
   }
 
-  // Add the current user message
-  input.push({ role: "user", content: [{ type: "text", text: userMessage }] });
+  // Current user message
+  input.push({ role: "user", content: [{ type: "input_text", text: userMessage }] });
 
   // Per-turn tool selection
   let tools = [];
@@ -98,7 +98,6 @@ export default async function handler(req, res) {
   try {
     if (isUploadTurn) {
       // --- UPLOAD TURN: temp vector store ONLY ---
-      // 1) Create temp store
       const vsResp = await fetch(`${OAI}/vector_stores`, {
         method: "POST",
         headers: {
@@ -114,7 +113,7 @@ export default async function handler(req, res) {
       const vs = await vsResp.json();
       tempStoreId = vs.id;
 
-      // 2) Attach the uploaded file to the temp store
+      // Attach the uploaded file
       const addFileResp = await fetch(`${OAI}/vector_stores/${tempStoreId}/files`, {
         method: "POST",
         headers: {
@@ -130,7 +129,7 @@ export default async function handler(req, res) {
       const added = await addFileResp.json();
       const fileId = added?.file?.id || upload_file_id;
 
-      // 3) Poll indexing status (until completed or timeout)
+      // Poll indexing
       const deadline = Date.now() + INGEST_TIMEOUT_MS;
       let status = "in_progress";
       let lastError = null;
@@ -151,16 +150,13 @@ export default async function handler(req, res) {
         }
         await sleep(800);
       }
-      if (status !== "completed") {
-        throw new Error("Indexing timeout");
-      }
+      if (status !== "completed") throw new Error("Indexing timeout");
 
-      // 4) Inform the UI that temp store is ready
+      // Inform UI
       writeSSE("info", { note: "temp_vector_store_ready", id: tempStoreId });
 
       tools = [{ type: "file_search", vector_store_ids: [tempStoreId] }];
 
-      // Per-turn hard rule for uploads
       extraSystem =
         "For this turn, answer ONLY from the attached document. " +
         "Do not use any external or library sources. " +
@@ -181,8 +177,8 @@ export default async function handler(req, res) {
         "Refer to sources as legislation/guidance names or 'the Talking Care Navigator Library' when appropriate.";
     }
 
-    // Inject per-turn rule
-    input.unshift({ role: "system", content: [{ type: "text", text: extraSystem }] });
+    // Inject per-turn rule (as an additional system message)
+    input.unshift({ role: "system", content: [{ type: "input_text", text: extraSystem }] });
 
     // --- Call OpenAI Responses API (streaming) ---
     const oaiReq = {
@@ -194,7 +190,7 @@ export default async function handler(req, res) {
       tool_choice: "auto",
       parallel_tool_calls: true,
       store: true,
-      text: { verbosity: "medium", format: { type: "text" } },
+      response_format: { type: "text" } // <-- use text output
     };
 
     const r = await fetch(`${OAI}/responses`, {
@@ -213,7 +209,7 @@ export default async function handler(req, res) {
       return;
     }
 
-    // Pipe OpenAI SSE stream straight through to the client
+    // Pipe OpenAI SSE through
     const reader = r.body.getReader();
     const decoder = new TextDecoder("utf-8");
     while (true) {
@@ -222,8 +218,7 @@ export default async function handler(req, res) {
       res.write(decoder.decode(value));
     }
   } catch (err) {
-    // Tell the widget about temp store failure if this was an upload turn
-    if (isUploadTurn) {
+    if (Boolean(upload_file_id)) {
       writeSSE("info", {
         note: "temp_vector_store_failed",
         error: err?.message || "We couldn't prepare your document for search.",
@@ -232,7 +227,6 @@ export default async function handler(req, res) {
       writeSSE("error", { error: err?.message || "Server error" });
     }
   } finally {
-    // Graceful termination for SSE
     res.write("event: done\ndata: [DONE]\n\n");
     res.end();
   }
