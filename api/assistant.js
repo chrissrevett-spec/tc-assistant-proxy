@@ -1,317 +1,270 @@
-/**
- * /api/assistant.js
- * ------------------------------------------------------------
- * - Responses API (SSE streaming)
- * - Optional per-turn temp vector store for attached file
- * - Tool gating: disables file/web search for greetings/small-talk
- * - History mapped to correct content types (user: input_text, assistant: output_text)
- * - Phrasing guardrails to avoid "files you've uploaded"
- *
- * ENV:
- *   OPENAI_API_KEY                (required)
- *   OPENAI_MODEL                  (optional; default gpt-4o-mini-2024-07-18)
- *   PERMANENT_VECTOR_STORE_ID     (optional; your long-lived library vector store)
- */
+// api/assistant.js
+// Node/Next/Vercel serverless API route
+import OpenAI from "openai";
 
-export const config = { api: { bodyParser: false } };
+// ---------- Helpers ----------
 
-const OPENAI_API_BASE = "https://api.openai.com/v1";
-const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini-2024-07-18";
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-// ---------------- utils ----------------
-function readJsonBody(req) {
-  return new Promise((resolve, reject) => {
-    let raw = "";
-    req.on("data", (c) => (raw += c));
-    req.on("end", () => {
-      try { resolve(raw ? JSON.parse(raw) : {}); } catch (e) { reject(e); }
-    });
-    req.on("error", reject);
-  });
-}
-function sseWrite(res, event, objOrString) {
-  if (event) res.write(`event: ${event}\n`);
-  if (objOrString !== undefined) {
-    const data = typeof objOrString === "string" ? objOrString : JSON.stringify(objOrString);
-    res.write(`data: ${data}\n\n`);
-  } else {
-    res.write(`\n`);
-  }
-}
-function allowCors(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") { res.statusCode = 204; res.end(); return true; }
-  return false;
+function getQuery(req) {
+  // Next.js / Vercel provides req.query; fallback for plain Node
+  return req.query || Object.fromEntries(
+    (req.url?.split("?")[1] || "")
+      .split("&")
+      .filter(Boolean)
+      .map(kv => kv.split("=").map(decodeURIComponent))
+  );
 }
 
-// ---------------- greeting/small-talk gate ----------------
-const GREETING_RE = /^\s*(hi|hello|hey|hiya|yo|good\s+(morning|afternoon|evening)|afternoon|morning)\b/i;
-const SMALL_TALK_RE = /\b(how are you|who (are|made|created) you|who built you|what can you do|your name|help|hello there)\b/i;
-function shouldUseTools(userText, hasUploadThisTurn) {
-  if (hasUploadThisTurn) return true;
-  const t = (userText || "").trim();
-  if (GREETING_RE.test(t)) return false;
-  if (SMALL_TALK_RE.test(t)) return false;
-  return true;
-}
-function isGreetingLike(userText) {
-  const t = (userText || "").trim();
-  return GREETING_RE.test(t) || SMALL_TALK_RE.test(t);
+function parseJsonBody(req) {
+  // Next.js already parses JSON body into req.body (object)
+  if (req.body && typeof req.body === "object") return req.body;
+  try {
+    if (typeof req.body === "string") return JSON.parse(req.body);
+  } catch {}
+  return {};
 }
 
-// ---------------- system prompt ----------------
 const SYSTEM_PROMPT = `
-Internal Instructions: Adult social care best practice assistant (Talking Care Navigator)
+You are Talking Care Navigator, created by Chris Revett at Talking Care.
+Be warm, concise, and practical.
 
-You are an expert assistant for Care Quality Commission (CQC) standards/regulations and related policies, frameworks, guidance and legislation for adult social care services in England.
-
-Important phrasing rules:
-- Never say "files you uploaded", "your uploads", or address the user as the creator.
-- Refer to all documents collectively as the "Talking Care Navigator Library".
-- Only on the same turn that a user has attached a file, you may refer to it once as "the attached document".
-- For simple greetings or small talk, do not mention the library or any documents unless the user asks about them.
-
-Scope and boundaries:
-- Only provide guidance relevant to adult social care in England.
-- If a task is unrelated, give a light-touch response and explain it is outside your remit.
-- Do not give medical, clinical, or legal advice. Direct users to a suitably qualified professional or hello@talkingcare.uk.
-- Do not provide strategies to avoid or work around regulations. Promote compliance and best practice.
-- If asked about Scotland, Wales, or Northern Ireland, explain frameworks differ and are outside your remit.
-
-Safety and compliance:
-- If a query suggests abuse, neglect, or safeguarding risk, advise immediate escalation per safeguarding policy and contacting the local authority safeguarding team (or emergency services if urgent).
-- Do not request or process personal or sensitive information about service users or staff.
-- Users remain responsible for their own compliance. Do not guarantee compliance.
-
-Source use and referencing:
-- Document-first. Prefer primary sources (legislation.gov.uk, CQC/DHSC/NICE originals).
-- If you use the internet, say so and note content may not be authoritative.
-- If combining sources, distinguish library vs external.
-- Flag if a referenced item may be an older version.
-- If the user attached files in this turn, treat them as primary sources and cite them as such.
-
-Tone and communication:
-- Use plain UK English. Neutral, professional, helpful.
-- Provide step-by-step or bullet guidance where possible.
-- Adjust framing for directors (strategic), managers (operational compliance), support workers (clear practical steps).
-- When greeted (e.g., "Hi/hello/hey"), respond in kind and ask: "How may I assist you today?"
-
-Operational guardrails:
-- If the answer cannot be found in your sources, say so.
-- Use the internet only after internal sources; say when you do this.
-- Do not create or advise on contracts, legal submissions, or tribunal appeals; recommend human/legal support.
-- For grey areas or matters needing professional judgment, direct to hello@talkingcare.uk.
-- Note where frameworks are being replaced/updated.
-
-Attribution:
-- If asked who created you, respond: "I was created by Chris Revett at Talking Care."
-
-Reminder:
-- Avoid any phrasing that implies the user is the system creator or has uploaded files; use the terms above instead.
+Critical behaviour rules:
+1) DO NOT mention or imply “uploaded files”, “documents I see”, vector stores, or any file context unless the user’s current turn explicitly included an attachment AND the server banner says we’re answering from the attached document.
+2) For casual greetings or small talk, give a short, friendly reply and do not bring up documents or file analysis.
+3) If the user asks “who created you?” answer: “I was created by Chris Revett at Talking Care.”
+4) If asked to cite sources, list only the file titles or web page titles provided by the tool annotations (no raw URLs).
 `.trim();
 
-// ---------------- vector store helpers ----------------
-async function createVectorStore(name) {
-  const r = await fetch(`${OPENAI_API_BASE}/vector_stores`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ name }),
-    duplex: "half",
-  });
-  if (!r.ok) throw new Error(`VS create failed: ${await r.text()}`);
-  return r.json();
-}
-async function addFileToVectorStore(vsId, fileId) {
-  const r = await fetch(`${OPENAI_API_BASE}/vector_stores/${vsId}/files`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ file_id: fileId }),
-    duplex: "half",
-  });
-  if (!r.ok) throw new Error(`VS add file failed: ${await r.text()}`);
-  return r.json();
-}
-async function getVectorStoreFile(vsId, vsFileId) {
-  const r = await fetch(`${OPENAI_API_BASE}/vector_stores/${vsId}/files/${vsFileId}`, {
-    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-  });
-  if (!r.ok) throw new Error(`VS file status failed: ${await r.text()}`);
-  return r.json();
-}
-async function waitForFileIndexed(vsId, vsFileId, timeoutMs = 120000) {
-  const start = Date.now();
-  while (true) {
-    const f = await getVectorStoreFile(vsId, vsFileId);
-    if (f.status === "completed") return f;
-    if (f.status === "failed" || f.status === "cancelled") {
-      throw new Error(`Vector store indexing ${f.status}`);
-    }
-    if (Date.now() - start > timeoutMs) throw new Error("Vector store indexing timeout");
-    await new Promise((r) => setTimeout(r, 1000));
-  }
+function isGreeting(text = "") {
+  return /^[\s]*((hi|hello|hey|hiya)(\s+there)?|good\s+(morning|afternoon|evening))[\s!\.]*$/i.test(text);
 }
 
-// ---------------- history -> input mapping ----------------
+// Map prior chat turns into Responses API input schema
 function mapHistoryToInput(history = []) {
-  const input = [];
-  input.push({ role: "system", content: [{ type: "input_text", text: SYSTEM_PROMPT }] });
-  for (const turn of history) {
-    if (!turn || !turn.role || !turn.content) continue;
-    if (turn.role === "user") {
-      input.push({ role: "user", content: [{ type: "input_text", text: String(turn.content) }] });
-    } else if (turn.role === "assistant") {
-      input.push({ role: "assistant", content: [{ type: "output_text", text: String(turn.content) }] });
-    }
-  }
-  return input;
+  return history.slice(-12).map(turn => {
+    const role = (turn.role === "assistant") ? "assistant" : "user";
+    const type = (role === "assistant") ? "output_text" : "input_text";
+    return {
+      role,
+      content: [{ type, text: String(turn.content || "") }]
+    };
+  });
 }
 
-// ---------------- tool config (fixed) ----------------
-function buildToolConfig(userText, tempVectorStoreId) {
-  // Filter out empty/falsy IDs so we never send [""] or ["  "]
-  const storeIds = [tempVectorStoreId, process.env.PERMANENT_VECTOR_STORE_ID]
-    .filter((id) => typeof id === "string" ? id.trim().length > 0 : Boolean(id));
+// Build file_search tools; never return an empty vector_store_ids array
+function buildTools({ uploadVectorStoreId }) {
+  // IMPORTANT: this is your configured base library vector store id.
+  const baseVs = process.env.TCN_LIBRARY_VECTOR_STORE_ID || "";
+  const ids = [];
+  if (uploadVectorStoreId) ids.push(uploadVectorStoreId);
+  if (baseVs) ids.push(baseVs);
 
-  const allowTools = shouldUseTools(userText, Boolean(tempVectorStoreId));
   const tools = [];
-
-  if (allowTools) {
-    if (storeIds.length > 0) {
-      tools.push({ type: "file_search", vector_store_ids: storeIds, max_num_results: 20 });
-    }
-    // web_search can be used regardless of vector stores (if allowed)
-    tools.push({ type: "web_search" });
+  if (ids.length) {
+    tools.push({
+      type: "file_search",
+      vector_store_ids: ids,
+      max_num_results: 20,
+      ranking_options: { ranker: "auto", score_threshold: 0 }
+    });
   }
-
-  const tool_choice = tools.length > 0 ? "auto" : "none";
-  return { tools, tool_choice };
+  return { tools, hasFileSearch: ids.length > 0 };
 }
 
-// ---------------- handler ----------------
-export default async function handler(req, res) {
-  if (allowCors(req, res)) return;
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-  if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
-
-  let body;
-  try { body = await readJsonBody(req); }
-  catch (e) { return res.status(400).json({ error: `Invalid JSON: ${e?.message || e}` }); }
-
-  const { userMessage, history, upload_file_id } = body || {};
-  const text = (userMessage || "").toString();
-
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const streamOn = url.searchParams.get("stream") === "on";
-
-  // SSE headers (if streaming)
-  if (streamOn) {
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      "Access-Control-Allow-Origin": "*",
-    });
-    sseWrite(res, "start", { ok: true });
-  }
-
-  // Optional per-turn temp vector store when a file is attached this turn
-  let tempVSId = null;
-  if (upload_file_id) {
+// Create a temporary vector store from a single uploaded file id
+async function createTempVectorStoreFromFile(fileId) {
+  const name = `upload_${fileId.slice(-6)}_${Date.now()}`;
+  // Try GA API first; fall back to beta names if project is on older SDK
+  try {
+    const vs = await openai.vectorStores.create({ name });
+    await openai.vectorStores.files.create(vs.id, { file_id: fileId });
+    return vs.id;
+  } catch (e1) {
+    // Fallback to beta (older SDKs)
     try {
-      const vs = await createVectorStore("tcn-upload-turn");
-      tempVSId = vs.id;
-      const vsFile = await addFileToVectorStore(tempVSId, upload_file_id);
-      if (streamOn) sseWrite(res, "info", { note: "temp_vector_store_ready", id: tempVSId });
-      await waitForFileIndexed(tempVSId, vsFile.id);
-    } catch (e) {
-      if (streamOn) sseWrite(res, "info", { note: "temp_vector_store_failed", error: e?.message || String(e) });
-      tempVSId = null; // continue without file search
+      const vs = await openai.beta.vectorStores.create({ name });
+      await openai.beta.vectorStores.files.create(vs.id, { file_id: fileId });
+      return vs.id;
+    } catch (e2) {
+      const err = new Error(`Vector store create failed: ${e1?.message || e1}`);
+      err.cause = e1;
+      throw err;
     }
   }
+}
 
-  // Build input (add a tiny greeting shim so "hi" always gets a short reply)
-  const input = mapHistoryToInput(history);
-  if (isGreetingLike(text)) {
-    input.push({
-      role: "system",
-      content: [{ type: "input_text", text: "For this turn the user is greeting. Reply briefly and do not mention any documents or libraries." }],
-    });
-  }
-  input.push({ role: "user", content: [{ type: "input_text", text }] });
-
-  const { tools, tool_choice } = buildToolConfig(text, tempVSId);
+// Build the Responses API payload
+function buildPayload({ userMessage, history, tools, tool_choice }) {
+  const input = [
+    // System as first message
+    { role: "system", content: [{ type: "input_text", text: SYSTEM_PROMPT }] },
+    // Prior conversation
+    ...mapHistoryToInput(history),
+    // Current user turn
+    { role: "user", content: [{ type: "input_text", text: String(userMessage || "") }] }
+  ];
 
   const payload = {
-    model: MODEL,
+    model: "gpt-4o-mini-2024-07-18",
     input,
-    ...(tools.length > 0 ? { tools, tool_choice } : { tool_choice: "none" }),
-    text: { format: { type: "text" } },
-    temperature: 1.0,
-    store: true,
-    service_tier: "auto",
-    parallel_tool_calls: true,
+    // IMPORTANT: only include tools if we actually have some
+    ...(tools?.length ? { tools, tool_choice } : {}),
+    temperature: 1,
+    text: { format: { type: "text" }, verbosity: "medium" }
   };
 
-  // Non-streaming path
-  if (!streamOn) {
+  return payload;
+}
+
+function sseHeaders(res) {
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+}
+
+// ---------- Route Handler ----------
+
+export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "POST");
+    return res.status(405).json({ error: "Method Not Allowed" });
+  }
+
+  const query = getQuery(req);
+  const streamRequested =
+    String(query.stream || "").toLowerCase() === "on" ||
+    String(query.stream || "").toLowerCase() === "true";
+
+  const body = parseJsonBody(req);
+  const userMessage = String(body.userMessage || "");
+  const history = Array.isArray(body.history) ? body.history : [];
+  const uploadFileId = body.upload_file_id || null;
+
+  // If greeting, suppress file_search entirely
+  const greeting = isGreeting(userMessage);
+
+  // If a file id was provided this turn, build a one-off vector store
+  let tempVectorStoreId = null;
+  if (uploadFileId) {
     try {
-      const r = await fetch(`${OPENAI_API_BASE}/responses`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-        duplex: "half",
-      });
-      if (!r.ok) throw new Error(await r.text());
-      const json = await r.json();
-      return res.status(200).json(json);
-    } catch (e) {
-      return res.status(500).json({ error: `OpenAI request failed: ${e?.message || String(e)}` });
+      tempVectorStoreId = await createTempVectorStoreFromFile(uploadFileId);
+    } catch (err) {
+      if (streamRequested) {
+        // For stream, we announce the failure but continue with no file_search
+        sseHeaders(res);
+        res.write(`event: start\n`);
+        res.write(`data: ${JSON.stringify({ ok: true })}\n\n`);
+        res.write(`event: info\n`);
+        res.write(`data: ${JSON.stringify({ note: "temp_vector_store_failed", error: err?.message || String(err) })}\n\n`);
+        // Fall through to continue streaming a normal (no tools) response
+      } else {
+        // Non-stream: return a friendly error, but not a 500
+        return res.status(200).json({
+          error: { message: "We couldn't prepare your document for search this time. You can still ask a question without the file." }
+        });
+      }
     }
   }
 
-  // Streaming path
-  let upstream;
+  // Build tools with safe guarding (no empty vector_store_ids)
+  const { tools } = greeting
+    ? { tools: [] }
+    : buildTools({ uploadVectorStoreId: tempVectorStoreId });
+
+  const tool_choice = tools.length ? "auto" : "none";
+
+  // -------- Non-Streaming Path --------
+  if (!streamRequested) {
+    try {
+      const payload = buildPayload({ userMessage, history, tools, tool_choice });
+      const resp = await openai.responses.create(payload);
+      return res.status(200).json(resp);
+    } catch (err) {
+      const payload = {
+        error: `OpenAI request failed: ${safeStringify(err?.response?.data || err)}`,
+      };
+      return res.status(200).json(payload); // keep 200 so client UI shows it in-chat
+    }
+  }
+
+  // -------- Streaming Path (SSE) --------
   try {
-    upstream = await fetch(`${OPENAI_API_BASE}/responses`, {
+    sseHeaders(res);
+
+    // Start event (client has a watchdog for this)
+    res.write(`event: start\n`);
+    res.write(`data: ${JSON.stringify({ ok: true })}\n\n`);
+
+    // If we have a temp VS, announce it for the UI (green badge, etc)
+    if (tempVectorStoreId) {
+      res.write(`event: info\n`);
+      res.write(`data: ${JSON.stringify({ note: "temp_vector_store_ready", id: tempVectorStoreId })}\n\n`);
+    }
+
+    // Build payload for streaming
+    const payload = buildPayload({ userMessage, history, tools, tool_choice });
+
+    // Call the REST endpoint directly with stream=true and pipe its SSE to client
+    const upstream = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
       },
-      body: JSON.stringify(payload),
-      duplex: "half",
+      body: JSON.stringify({ ...payload, stream: true })
     });
-  } catch (e) {
-    sseWrite(res, "error", { error: `OpenAI request failed to send: ${e?.message || e}` });
-    if (!res.writableEnded) res.end();
-    return;
-  }
 
-  if (!upstream.ok || !upstream.body) {
-    let details = "";
-    try { details = await upstream.text(); } catch {}
-    sseWrite(res, "error", { error: `OpenAI request failed: ${details || `HTTP ${upstream.status}`}` });
-    if (!res.writableEnded) res.end();
-    return;
-  }
+    if (!upstream.ok || !upstream.body) {
+      let errTxt = "";
+      try { errTxt = await upstream.text(); } catch {}
+      const errorData = errTxt ? safeParse(errTxt) : { message: `HTTP ${upstream.status}` };
+      res.write(`event: error\n`);
+      res.write(`data: ${JSON.stringify(errorData)}\n\n`);
+      res.write(`event: done\n`);
+      res.write(`data: [DONE]\n\n`);
+      res.end();
+      return;
+    }
 
-  try {
-    for await (const chunk of upstream.body) res.write(chunk);
-  } catch (e) {
-    sseWrite(res, "error", { error: e?.message || String(e) });
-  } finally {
-    if (!res.writableEnded) res.end();
+    const reader = upstream.body.getReader();
+    const encoder = new TextDecoder("utf-8");
+
+    // Pipe all upstream SSE chunks through unchanged
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunkStr = encoder.decode(value, { stream: true });
+      // We simply forward upstream SSE lines as-is
+      res.write(chunkStr);
+    }
+
+    // Ensure a closing done event if upstream omitted it
+    res.write(`event: done\n`);
+    res.write(`data: [DONE]\n\n`);
+    res.end();
+  } catch (err) {
+    // Surface any server-side error as an SSE error event
+    sseHeaders(res);
+    res.write(`event: error\n`);
+    res.write(`data: ${JSON.stringify({
+      message: err?.message || "Stream failed",
+      code: err?.code || err?.response?.status || "stream_error"
+    })}\n\n`);
+    res.write(`event: done\n`);
+    res.write(`data: [DONE]\n\n`);
+    res.end();
   }
+}
+
+// ---------- Small utils ----------
+
+function safeStringify(obj) {
+  try { return JSON.stringify(obj); } catch { return String(obj); }
+}
+function safeParse(txt) {
+  try { return JSON.parse(txt); } catch { return { message: txt }; }
 }
