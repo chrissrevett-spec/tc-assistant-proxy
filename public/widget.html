@@ -33,7 +33,6 @@
       order: 2;
     }
 
-    /* Composer row — default single row; wraps on small screens */
     .inputrow {
       display: flex; gap: 8px; align-items: flex-start; flex-wrap: nowrap;
     }
@@ -48,7 +47,6 @@
     }
     textarea:focus { background: #f7f7f7; border-color: #ccc; outline: none; box-shadow: 0 0 0 2px rgba(0,0,0,0.04); }
 
-    /* Unified buttons */
     .ui-btn {
       display: inline-flex; align-items: center; justify-content: center; gap: 8px;
       height: 40px; padding: 0 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
@@ -60,14 +58,12 @@
     .ui-btn:hover { background: #f0f0f0; border-color: #ccc; }
     .ui-btn.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
 
-    /* Mobile wrapping: textarea full width on line 1; buttons wrap to line 2 */
     @media (max-width: 540px) {
       .inputrow { flex-wrap: wrap; }
       .inputrow textarea { flex: 1 1 100%; width: 100%; }
       .inputrow .ui-btn { margin-top: 8px; }
     }
 
-    /* Upload badge row */
     .attach-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
     .attach-status {
       display: inline-flex; align-items: center; gap: 6px;
@@ -80,7 +76,6 @@
     .attach-status.error { border-color: #e57373; background: #fff5f5; color: #b71c1c; }
     .attach-status .icon { font-size: 14px; }
 
-    /* Chat */
     .chat-wrap { display: none; }
     .chat {
       border: 1px solid #eee; background: #fff; border-radius: 12px;
@@ -130,7 +125,6 @@
     .bubble-content h1, .bubble-content h2, .bubble-content h3 { margin: 12px 0 6px; }
     .bubble-content ul, .bubble-content ol { margin: 8px 0 8px 20px; }
     .bubble-content blockquote { margin: 8px 0; padding: 8px 12px; background: #f7f7f7; border-left: 3px solid #ddd; border-radius: 6px; }
-
     .bubble-content table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 14px; }
     .bubble-content th, .bubble-content td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
     .bubble-content th { background: #f7f7f7; }
@@ -192,7 +186,9 @@
     const purifyUrl = "https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js";
     await import(purifyUrl);
 
-    // Custom avatar image
+    // ==== Markdown options (improves list breaks) ====
+    marked.setOptions({ gfm: true, breaks: true, mangle: false, headerIds: false });
+
     const ASSISTANT_AVATAR_URL = "https://images.squarespace-cdn.com/content/66d7774bf0cbbe646aefb211/264b05cb-b865-404b-9ac9-cc7f77f15ce9/TRANSPARENCY+crop.png?content-type=image%2Fpng";
 
     const API_BASE = location.origin.replace(/\/$/, "");
@@ -213,7 +209,6 @@
 
     const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
 
-    marked.setOptions({ mangle: false, headerIds: false });
     function setStatus(t){ $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
 
     // ---- Conversation history (client side) ----
@@ -221,483 +216,4 @@
     function saveHistory(){ try { sessionStorage.setItem("tc_history", JSON.stringify(history)); } catch {} }
     function clearHistory(){ history.length = 0; saveHistory(); }
 
-    function activateChat(){ if (!$shell.classList.contains("chat-active")) $shell.classList.add("chat-active"); }
-
-    function createMsg(role, headerText, withCopy=false){
-      const msg = document.createElement("div");
-      msg.className = `msg ${role}`;
-      const avatar = document.createElement("div");
-      avatar.className = "avatar";
-
-      if (role === "assistant" && ASSISTANT_AVATAR_URL) {
-        const img = document.createElement("img");
-        img.src = ASSISTANT_AVATAR_URL;
-        img.alt = "TCN";
-        img.onerror = () => { avatar.textContent = "📖"; };
-        avatar.appendChild(img);
-      } else {
-        avatar.textContent = role === "assistant" ? "📖" : "🙂";
-      }
-
-      const bubble = document.createElement("div");
-      bubble.className = "bubble";
-
-      const head = document.createElement("div");
-      head.className = "bubble-head";
-      head.textContent = headerText;
-
-      if (withCopy) {
-        const actions = document.createElement("div");
-        actions.className = "bubble-actions";
-        const copyBtn = document.createElement("button");
-        copyBtn.className = "copy-btn";
-        copyBtn.type = "button";
-        copyBtn.title = "Copy";
-        copyBtn.textContent = "📋 Copy";
-        const content = document.createElement("div");
-        content.className = "bubble-content";
-        copyBtn.addEventListener("click", () => {
-          const txt = content.innerText.trim();
-          navigator.clipboard.writeText(txt).then(() => {
-            copyBtn.textContent = "✅ Copied";
-            setTimeout(() => (copyBtn.textContent = "📋 Copy"), 1200);
-          });
-        });
-        actions.appendChild(copyBtn);
-        head.appendChild(actions);
-        bubble.appendChild(head);
-        bubble.appendChild(content);
-        msg.appendChild(avatar);
-        msg.appendChild(bubble);
-        $chat.appendChild(msg);
-        $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
-        return { msg, content, bubble };
-      } else {
-        const content = document.createElement("div");
-        content.className = "bubble-content";
-        bubble.appendChild(head);
-        bubble.appendChild(content);
-        msg.appendChild(avatar);
-        msg.appendChild(bubble);
-        $chat.appendChild(msg);
-        $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
-        return { msg, content, bubble };
-      }
-    }
-
-    function renderMarkdown(md, el) {
-      const html = marked.parse(md || "");
-      const safe = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
-      el.innerHTML = safe;
-      $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
-    }
-
-    function appendSources(containerEl, citations) {
-      if (!citations || citations.length === 0) return;
-      const seenFile = new Set(), seenURL = new Set();
-      const files = [], urls = [];
-      for (const c of citations) {
-        if (c.kind === "file") { if (!seenFile.has(c.id)) { seenFile.add(c.id); files.push(c); } }
-        if (c.kind === "web")  { if (!seenURL.has(c.url)) { seenURL.add(c.url); urls.push(c); } }
-      }
-      if (!files.length && !urls.length) return;
-      const src = document.createElement("div");
-      src.className = "sources";
-      const title = document.createElement("div");
-      title.className = "title";
-      title.textContent = "Sources:";
-      src.appendChild(title);
-      const list = document.createElement("ul");
-      list.style.margin = "0";
-      list.style.paddingLeft = "20px";
-      [...files, ...urls].forEach((c) => {
-        const li = document.createElement("li");
-        li.textContent = c.label;
-        list.appendChild(li);
-      });
-      src.appendChild(list);
-      containerEl.appendChild(src);
-      $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
-    }
-
-    let currentAbort = null;
-    let pendingUpload = { file_id: null, filename: "" };
-
-    // --- Intent helper (prevents doc chatter on greetings) ---
-    function inferIntent(userText) {
-      const t = (userText || "").trim().toLowerCase();
-
-      // Strong greeting/small-talk detection
-      const GREETING_RE = /^(hi|hello|hey|hiya|yo|sup|what'?s up|whats up|howdy|morning|good (?:morning|afternoon|evening)|how (?:are you|r u|ya)|how'?s it going)\b/;
-      if (GREETING_RE.test(t) || t.length <= 3) return "greeting";
-
-      // Light process/capability detection (kept minimal to avoid false positives)
-      const PROCESS_RE = /(can i upload|how (?:do i|to) (?:attach|upload)|what can you do|capabilit|help(?!.*me with)|how to use|how does (?:this|it) work)/;
-      if (PROCESS_RE.test(t)) return "process";
-
-      return "content";
-    }
-
-    // --- Upload UI handlers ---
-    document.getElementById("attach-btn").addEventListener("click", () => $fileInput.click());
-
-    $fileInput.addEventListener("change", async () => {
-      const file = $fileInput.files?.[0];
-      if (!file) return;
-
-      if (file.size > MAX_UPLOAD_BYTES) {
-        $attachStatus.style.display = "inline-flex";
-        $attachStatus.className = "attach-status error";
-        $attachIcon.textContent = "⚠️";
-        $attachName.textContent = "File too large (20 MB max)";
-        pendingUpload = { file_id: null, filename: "" };
-        return;
-      }
-
-      $attachStatus.style.display = "inline-flex";
-      $attachStatus.className = "attach-status pending";
-      $attachIcon.textContent = "⌛";
-      $attachName.textContent = file.name.length > 36 ? file.name.slice(0, 33) + "..." : file.name;
-
-      try {
-        const fd = new FormData();
-        fd.append("file", file);
-        const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
-        const data = await r.json().catch(() => ({}));
-        if (!r.ok || !data.ok || !data.file_id) throw new Error(data?.error || "Upload failed");
-
-        pendingUpload = { file_id: data.file_id, filename: file.name };
-        if (data.processed) {
-          $attachStatus.className = "attach-status ok";
-          $attachIcon.textContent = "✅";
-        } else {
-          $attachStatus.className = "attach-status pending";
-          $attachIcon.textContent = "⌛";
-          $attachName.textContent = "Processing… try your question in a moment";
-        }
-        $attachName.textContent = (file.name.length > 36 ? file.name.slice(0,33) + "..." : file.name);
-      } catch (e) {
-        $attachStatus.className = "attach-status error";
-        $attachIcon.textContent = "⚠️";
-        $attachName.textContent = e?.message || "Upload failed";
-        pendingUpload = { file_id: null, filename: "" };
-      }
-    });
-
-    // --- SSE streaming ---
-    async function askStream(prompt) {
-      activateChat();
-
-      history.push({ role: "user", content: prompt });
-      saveHistory();
-
-      const userMsg = createMsg("user", "You");
-      userMsg.content.textContent = prompt;
-
-      // Intent gate: short-circuit greetings/small-talk before touching uploads or the API
-      const intent = inferIntent(prompt);
-      if (intent === "greeting") {
-        const { content: aContent } = createMsg("assistant", "Talking Care Navigator", true);
-        aContent.textContent = "Hello! How may I assist you today?";
-        setStatus("");
-        return; // No API call, no file consumption
-      }
-
-      // Only now decide whether to use an uploaded file
-      let usedFileId = null;
-      let uploadTurn = false;
-      if (pendingUpload.file_id) {
-        usedFileId = pendingUpload.file_id;
-        uploadTurn = true;
-        const used = document.createElement("div");
-        used.className = "used-file-note";
-        used.innerHTML = `✅ Using: <strong>${(pendingUpload.filename.length > 36 ? pendingUpload.filename.slice(0,33) + "..." : pendingUpload.filename)}</strong>`;
-        userMsg.bubble.appendChild(used);
-
-        // Clear chip & selection
-        pendingUpload = { file_id: null, filename: "" };
-        $fileInput.value = "";
-        $attachStatus.style.display = "none";
-        $attachStatus.className = "attach-status pending";
-        $attachIcon.textContent = "⌛";
-        $attachName.textContent = "";
-      }
-
-      const { content: aContent, bubble: aBubble } = createMsg("assistant", "Talking Care Navigator", true);
-      aContent.innerHTML = `<em>Thinking… ⏳</em>`;
-
-      if (uploadTurn) {
-        const banner = document.createElement("div");
-        banner.className = "upload-banner";
-        banner.textContent = "Answer based only on the attached document.";
-        aBubble.appendChild(banner);
-      }
-
-      let buffer = "";
-      let started = false;
-      let firstDeltaSeen = false;
-      let mdAccum = "";
-      const citations = [];
-      let sourcesAppended = false;
-      let assistantTurnSaved = false;
-
-      setStatus("Thinking… ⏳");
-      const ac = new AbortController();
-      currentAbort = ac;
-
-      const watchdog = setTimeout(() => {
-        if (!started) {
-          aContent.innerHTML = `<span class="error-banner">⚠️ No stream started — check connectivity or CORS settings.</span>`;
-          setStatus("");
-        }
-      }, 10000);
-
-      const body = { userMessage: prompt, history };
-      if (usedFileId) body.upload_file_id = usedFileId;
-
-      let r;
-      try {
-        r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
-          body: JSON.stringify(body),
-          signal: ac.signal
-        });
-      } catch (e) {
-        clearTimeout(watchdog);
-        aContent.innerHTML = `<span class="error-banner">⚠️ Request failed: ${escapeHtml(e?.message || e)}</span>`;
-        setStatus("");
-        currentAbort = null;
-        return;
-      }
-
-      if (!r.ok || !r.body) {
-        clearTimeout(watchdog);
-        let err = `HTTP ${r.status}`;
-        try { err += ` ${await r.text()}`; } catch {}
-        aContent.innerHTML = `<span class="error-banner">⚠️ Stream failed: ${escapeHtml(err)}</span>`;
-        setStatus("");
-        currentAbort = null;
-        return;
-      }
-
-      const reader = r.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-
-      const flushBlocks = (chunk) => {
-        buffer += chunk;
-        const blocks = buffer.split(/\n\n/);
-        buffer = blocks.pop();
-        for (const block of blocks) {
-          const lines = block.split(/\n/);
-          let event = "message";
-          const dataLines = [];
-          for (const line of lines) {
-            if (!line) continue;
-            if (line.startsWith(":")) continue;
-            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
-            if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
-          }
-          const raw = dataLines.join("\n");
-          handleEvent(event, raw);
-        }
-      };
-
-      // Hardened rewriter
-      function rewriteAssistantText(s, { uploadTurn = false, intent = "content" } = {}) {
-        if (!s) return s;
-
-        // Normalise punctuation
-        s = s.replace(/[’]/g, "'");
-
-        // If the user intent was greeting or process, remove any source/file/library chatter
-        if (intent === "greeting" || intent === "process") {
-          s = s
-            .split(/(?<=[.?!])\s+/)
-            .filter(sent => !/\b(upload|uploaded|attach|attached|attachment|file|files|document|documents|library|vector\s*store)\b/i.test(sent))
-            .join(" ");
-        }
-
-        // Helper for replacement wording
-        const repl = (plural, attach) => {
-          if (uploadTurn || attach) return plural ? "attached documents" : "attached document";
-          return plural ? "documents" : "document";
-        };
-
-        // Wide net: common + tricky variants
-        const patterns = [
-          // "files you've uploaded", "documents you've uploaded"
-          { re: /\b(files?|documents?)\s+you(?:'ve| have)?\s+uploaded\b/gi, fn: (m, x) => repl(/s$/i.test(x)) },
-          // "you've uploaded (some) files/documents"
-          { re: /\byou(?:'ve| have)?\s+uploaded\s+(?:some\s+)?(files?|documents?)\b/gi, fn: (m, x) => repl(/s$/i.test(x)) },
-          // "your upload(s)"
-          { re: /\byour\s+uploads?\b/gi, fn: () => repl(true, true) },
-          // "uploaded files", "uploaded documents"
-          { re: /\buploaded\s+(files?|documents?)\b/gi, fn: (m, x) => repl(/s$/i.test(x)) },
-          // "the uploaded files/documents"
-          { re: /\bthe\s+uploaded\s+(files?|documents?)\b/gi, fn: (m, x) => "the " + repl(/s$/i.test(x)) },
-          // "your file/document(s)"
-          { re: /\byour\s+(file|document)(s)?\b/gi, fn: (m, _one, s2) => repl(!!s2) },
-          // "information from the uploaded file(s)/document(s)"
-          { re: /\binfo(?:rmation)?\s+from\s+the\s+uploaded\s+(file|document)(s)?\b/gi, fn: (m, _w, s2) => `information from the ${repl(!!s2)}` },
-          // Generic “the documents” opener used as inventory
-          { re: /\b(the|these)\s+documents\b/gi, fn: (m) => uploadTurn ? m : "the sources" },
-        ];
-
-        for (const { re, fn } of patterns) s = s.replace(re, fn);
-
-        // If NOT an upload turn, drop remaining sentences that still leak upload/attach/vector store
-        if (!uploadTurn) {
-          s = s
-            .split(/(?<=[.?!])\s+/)
-            .filter(sent => !/\b(upload|uploaded|attach|attached|attachment|file|files|vector\s*store)\b/i.test(sent))
-            .join(" ");
-        }
-
-        // Clean inline URLs/footnotes and trailing "Sources:"
-        s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
-        s = s.replace(/https?:\/\/\S+/g, "");
-        s = s.replace(/\s?\[\d+\]/g, "");
-        s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
-
-        // Tidy spacing
-        return s.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n");
-      }
-
-      function handleEvent(event, raw) {
-        if (event === "start") return;
-
-        if (event === "info") {
-          try {
-            const obj = JSON.parse(raw);
-            if (obj?.note === "temp_vector_store_failed") {
-              const errMsg = (obj?.error || "We couldn't prepare your document for search. Please try uploading again.");
-              const banner = document.createElement("div");
-              banner.className = "error-banner";
-              banner.textContent = `⚠️ ${errMsg}`;
-              aBubble.appendChild(banner);
-              if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
-              setStatus("");
-            }
-          } catch {}
-          return;
-        }
-
-        if (event === "error") {
-          try {
-            const obj = JSON.parse(raw);
-            aContent.innerHTML = `<span class="error-banner">⚠️ ${escapeHtml(JSON.stringify(obj))}</span>`;
-          } catch {
-            aContent.innerHTML = `<span class="error-banner">⚠️ ${escapeHtml(raw)}</span>`;
-          }
-          setStatus("");
-          return;
-        }
-
-        if (event === "done" || event === "response.completed") {
-          setStatus("");
-          // Final hardening pass
-          const finalMd = rewriteAssistantText(mdAccum, { uploadTurn, intent });
-          if (finalMd !== mdAccum) {
-            mdAccum = finalMd;
-            renderMarkdown(mdAccum, aContent);
-          }
-          if (!sourcesAppended) {
-            appendSources(aContent, citations);
-            sourcesAppended = true;
-          }
-          if (!assistantTurnSaved) {
-            const finalText = stripInlineSources(mdAccum).trim();
-            if (finalText) {
-              history.push({ role: "assistant", content: finalText });
-              saveHistory();
-            }
-            assistantTurnSaved = true;
-          }
-          return;
-        }
-
-        if (event.endsWith(".delta")) {
-          let d;
-          try { d = JSON.parse(raw); } catch { d = null; }
-          const deltaText =
-            (d && typeof d.delta === "string") ? d.delta :
-            (d && d.delta && Array.isArray(d.delta.content))
-              ? d.delta.content.map(c => (c.text && (c.type?.includes("output_text"))) ? c.text : "").join("")
-              : (typeof d?.text_delta === "string" ? d.text_delta : "");
-
-          if (deltaText) {
-            if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); }
-            const cleaned = rewriteAssistantText(deltaText, { uploadTurn, intent });
-            mdAccum += cleaned;
-            renderMarkdown(mdAccum, aContent);
-          }
-          return;
-        }
-
-        if (event.includes("annotation") || event.includes("citation")) {
-          let a;
-          try {
-            const obj = JSON.parse(raw);
-            a = obj?.annotation || obj?.data || obj;
-          } catch { a = null; }
-          if (!a) return;
-          if (a.type === "file_citation" && a.file_id) {
-            citations.push({ kind: "file", id: a.file_id, label: a.filename || a.file_id });
-          } else if ((a.type === "web_citation" || a.url) && a.url) {
-            citations.push({ kind: "web", url: a.url, label: a.title || a.url });
-          }
-        }
-      }
-
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          if (chunk && !started) { started = true; clearTimeout(watchdog); }
-          flushBlocks(chunk);
-        }
-      } catch (e) {
-        aContent.insertAdjacentHTML("beforeend", `<p class="error-banner">⚠️ Stream error: ${escapeHtml(e?.message || String(e))}</p>`);
-      } finally {
-        currentAbort = null;
-        setStatus("");
-      }
-    }
-
-    function stripInlineSources(s) {
-      if (!s) return s;
-      return s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
-    }
-    function escapeHtml(str) {
-      return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;"," >":"&gt;","\"":"&quot;","'":"&#039;" }[ch]));
-    }
-
-    // Events
-    document.getElementById("tc-ask-stream").addEventListener("click", () => {
-      const p = ($in.value || "").trim();
-      if (!p) return;
-      askStream(p);
-      $in.value = "";
-    });
-    $in.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("tc-ask-stream").click(); }
-    });
-    document.getElementById("tc-clear").addEventListener("click", () => {
-      if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
-      $chat.innerHTML = "";
-      $in.value = "";
-      setStatus("");
-      clearHistory();
-      $shell.classList.remove("chat-active");
-      pendingUpload = { file_id: null, filename: "" };
-      $fileInput.value = "";
-      $attachStatus.style.display = "none";
-      $attachStatus.className = "attach-status pending";
-      $attachIcon.textContent = "⌛";
-      $attachName.textContent = "";
-    });
-  </script>
-</body>
-</html>
+    function activateChat(){ if
