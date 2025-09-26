@@ -34,9 +34,7 @@
     }
 
     /* Composer row — default single row; wraps on small screens */
-    .inputrow {
-      display: flex; gap: 8px; align-items: flex-start; flex-wrap: nowrap;
-    }
+    .inputrow { display: flex; gap: 8px; align-items: flex-start; flex-wrap: nowrap; }
 
     .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
 
@@ -192,7 +190,7 @@
     const purifyUrl = "https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js";
     await import(purifyUrl);
 
-    // ==== Markdown options ====
+    // Markdown settings
     marked.setOptions({ gfm: true, breaks: true, mangle: false, headerIds: false });
 
     const ASSISTANT_AVATAR_URL = "https://images.squarespace-cdn.com/content/66d7774bf0cbbe646aefb211/264b05cb-b865-404b-9ac9-cc7f77f15ce9/TRANSPARENCY+crop.png?content-type=image%2Fpng";
@@ -366,7 +364,13 @@
     function isGreeting(text) {
       if (!text) return false;
       const t = text.trim().toLowerCase();
-      return /^(hi|hello|hey|hiya|howdy|yo|sup|whats up|what's up|good (morning|afternoon|evening))\b/.test(t);
+      return (
+        /^(hi|hello|hey|hiya|heya|howdy|yo|sup)\b/.test(t) ||
+        /^(good (morning|afternoon|evening))\b/.test(t) ||
+        /^(what('|’)s up|whats up|what is up)\b/.test(t) ||
+        /^(how are (you|u|ya)|how's it going|hows it going|how are things)\b/.test(t) ||
+        /^(what('|’)s going on|whats going on|what is going on)\b/.test(t)
+      );
     }
 
     // --- SSE streaming ---
@@ -422,7 +426,9 @@
       let buffer = "";
       let started = false;
       let firstDeltaSeen = false;
-      let mdAccum = "";
+
+      // Accumulate RAW markdown during stream; rewrite only ONCE at the end
+      let mdRaw = "";
       const citations = [];
       let sourcesAppended = false;
       let assistantTurnSaved = false;
@@ -484,69 +490,47 @@
             if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
             if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
           }
-           // some SDKs embed JSON directly in 'data:' segments; join and parse in handlers
           const raw = dataLines.join("\n");
           handleEvent(event, raw);
         }
       };
 
-      function rewriteAssistantText(s, { uploadTurn = false } = {}) {
+      // Final-only rewrite (no chunk tampering)
+      function finalRewrite(s, { uploadTurn = false } = {}) {
         if (!s) return s;
-
-        // Normalise punctuation variants
         s = s.replace(/[’]/g, "'");
 
-        // Split into sentences (very light heuristic)
-        const sentences = s.split(/(?<=[.!?])\s+(?=[A-Z0-9"'])/);
+        // Drop inline markdown links and bare URLs
+        s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1")
+             .replace(/https?:\/\/\S+/g, "");
 
-        // Phrases that must never appear when not an upload turn
-        const banned = [
-          /\bfiles?\s+you(?:'ve| have)?\s+uploaded\b/i,
-          /\byour\s+upload(s)?\b/i,
-          /\buploaded\s+(file|document)(s)?\b/i,
-          /\byour\s+(file|document)(s)?\b/i,
-          /\bfrom\s+the\s+uploaded\s+(file|document)(s)?\b/i,
-          /\bthe\s+uploaded\s+(file|document)(s)?\b/i
-        ];
+        // Remove any trailing inline Sources: block (widget appends its own)
+        s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
 
-        // Safe replacement when it IS an upload turn
-        const safeReplacePairs = [
-          [/\bfiles?\s+you(?:'ve| have)?\s+uploaded\b/gi, "attached documents"],
-          [/\buploaded\s+files?\b/gi, "attached documents"],
-          [/\bthe\s+uploaded\s+files?\b/gi, "the attached documents"],
-          [/\buploaded\s+document(s)?\b/gi, (_m, s2) => s2 ? "attached documents" : "attached document"],
-          [/\byour\s+upload(s)?\b/gi, (_m, s1) => s1 ? "attached documents" : "attached document"],
-          [/\byour\s+(file|document)(s)?\b/gi, (_m, _w, s2) => s2 ? "attached documents" : "attached document"],
-          [/\bfrom\s+the\s+uploaded\s+(file|document)(s)?\b/gi, (_m, _w, s2) => `from the ${s2 ? "attached documents" : "attached document"}`],
-          [/\bthe\s+uploaded\s+(file|document)(s)?\b/gi, (_m, _w, s2) => `the ${s2 ? "attached documents" : "attached document"}`],
-        ];
+        if (!uploadTurn) {
+          // Remove whole sentences that mention uploads/files
+          const sentenceRe = /(^|[.!?]\s+)([^.!?]*\b(uploaded|your\s+(file|document)s?|files?\s+you(?:'ve| have)?\s+uploaded|your\s+uploads?)\b[^.!?]*[.!?])/gi;
+          s = s.replace(sentenceRe, (m, lead, sent) => lead); // drop the offending sentence
+        } else {
+          // Gentle phrasing normalisation when it WAS an upload turn
+          const pairs = [
+            [/\bfiles?\s+you(?:'ve| have)?\s+uploaded\b/gi, "attached documents"],
+            [/\buploaded\s+files?\b/gi, "attached documents"],
+            [/\bthe\s+uploaded\s+files?\b/gi, "the attached documents"],
+            [/\buploaded\s+document(s)?\b/gi, (_m, s2) => s2 ? "attached documents" : "attached document"],
+            [/\byour\s+upload(s)?\b/gi, (_m, s1) => s1 ? "attached documents" : "attached document"],
+            [/\byour\s+(file|document)(s)?\b/gi, (_m, _w, s2) => s2 ? "attached documents" : "attached document"],
+            [/\bfrom\s+the\s+uploaded\s+(file|document)(s)?\b/gi, (_m, _w, s2) => `from the ${s2 ? "attached documents" : "attached document"}`],
+            [/\bthe\s+uploaded\s+(file|document)(s)?\b/gi, (_m, _w, s2) => `the ${s2 ? "attached documents" : "attached document"}`],
+          ];
+          for (const [re, rep] of pairs) {
+            s = s.replace(re, typeof rep === "function" ? rep : rep);
+          }
+        }
 
-        const cleanedSentences = sentences
-          .map((sent) => {
-            // Remove inline URLs & "Sources:" blocks inside sentences
-            let out = sent.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1")
-                          .replace(/https?:\/\/\S+/g, "");
-
-            if (uploadTurn) {
-              // Apply safe replacements only in upload turns
-              for (const [re, replacement] of safeReplacePairs) {
-                out = out.replace(re, typeof replacement === "function" ? replacement : replacement);
-              }
-              return out;
-            } else {
-              // If banned phrase exists in a non-upload turn, drop the whole sentence
-              if (banned.some((re) => re.test(out))) return "";
-              return out;
-            }
-          })
-          .filter(Boolean);
-
-        let outText = cleanedSentences.join(" ").replace(/[ \t]{2,}/g, " ");
-
-        // Strip any trailing inline "Sources:" section entirely (widget appends sources separately)
-        outText = outText.replace(/\n?^\s*Sources?:[\s\S]*$/im, "").trim();
-
-        return outText;
+        // Tidy spaces/line breaks
+        s = s.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+        return s;
       }
 
       function handleEvent(event, raw) {
@@ -563,9 +547,6 @@
               aBubble.appendChild(banner);
               if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
               setStatus("");
-            }
-            if (obj?.note === "temp_vector_store_ready") {
-              // no-op UI here; upload chip already shows success
             }
           } catch {}
           return;
@@ -584,28 +565,18 @@
 
         if (event === "done" || event === "response.completed") {
           setStatus("");
-          // Final hardening pass
-          const finalMd = rewriteAssistantText(mdAccum, { uploadTurn });
-          if (finalMd !== mdAccum) {
-            mdAccum = finalMd;
-            renderMarkdown(mdAccum, aContent);
-          }
-          if (!sourcesAppended) {
-            appendSources(aContent, citations);
-            sourcesAppended = true;
-          }
+          // Final pass: rewrite once safely, then render and append sources
+          const finalMd = finalRewrite(mdRaw, { uploadTurn });
+          renderMarkdown(finalMd, aContent);
+          appendSources(aContent, citations);
           if (!assistantTurnSaved) {
-            const finalText = stripInlineSources(mdAccum).trim();
-            if (finalText) {
-              history.push({ role: "assistant", content: finalText });
-              saveHistory();
-            }
+            history.push({ role: "assistant", content: finalMd });
+            saveHistory();
             assistantTurnSaved = true;
           }
           return;
         }
 
-        // Stream deltas
         if (event.endsWith(".delta")) {
           let d;
           try { d = JSON.parse(raw); } catch { d = null; }
@@ -617,9 +588,8 @@
 
           if (deltaText) {
             if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); }
-            const cleaned = rewriteAssistantText(deltaText, { uploadTurn });
-            mdAccum += cleaned;
-            renderMarkdown(mdAccum, aContent);
+            mdRaw += deltaText;               // accumulate raw text (spaces preserved)
+            renderMarkdown(mdRaw, aContent);  // render raw during stream
           }
           return;
         }
@@ -641,6 +611,8 @@
       }
 
       try {
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder("utf-8");
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
@@ -656,10 +628,6 @@
       }
     }
 
-    function stripInlineSources(s) {
-      if (!s) return s;
-      return s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
-    }
     function escapeHtml(str) {
       return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;" }[ch]));
     }
