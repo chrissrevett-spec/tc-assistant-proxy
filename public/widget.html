@@ -33,7 +33,6 @@
       order: 2;
     }
 
-    /* Composer row */
     .inputrow { display: flex; gap: 8px; align-items: flex-start; flex-wrap: nowrap; }
 
     .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
@@ -46,7 +45,6 @@
     }
     textarea:focus { background: #f7f7f7; border-color: #ccc; outline: none; box-shadow: 0 0 0 2px rgba(0,0,0,0.04); }
 
-    /* Buttons */
     .ui-btn {
       display: inline-flex; align-items: center; justify-content: center; gap: 8px;
       height: 40px; padding: 0 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
@@ -64,7 +62,6 @@
       .inputrow .ui-btn { margin-top: 8px; }
     }
 
-    /* Upload status */
     .attach-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
     .attach-status {
       display: inline-flex; align-items: center; gap: 6px;
@@ -77,7 +74,6 @@
     .attach-status.error { border-color: #e57373; background: #fff5f5; color: #b71c1c; }
     .attach-status .icon { font-size: 14px; }
 
-    /* Chat */
     .chat-wrap { display: none; }
     .chat {
       border: 1px solid #eee; background: #fff; border-radius: 12px;
@@ -189,12 +185,11 @@
     const purifyUrl = "https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js";
     await import(purifyUrl);
 
-    // Markdown settings
     marked.setOptions({ gfm: true, breaks: true, mangle: false, headerIds: false });
 
     const ASSISTANT_AVATAR_URL = "https://images.squarespace-cdn.com/content/66d7774bf0cbbe646aefb211/264b05cb-b865-404b-9ac9-cc7f77f15ce9/TRANSPARENCY+crop.png?content-type=image%2Fpng";
-
     const API_BASE = location.origin.replace(/\/$/, "");
+
     const $shell   = document.getElementById("shell");
     const $chat    = document.getElementById("chat");
     const $chatwrap= document.getElementById("chatwrap");
@@ -212,6 +207,7 @@
 
     const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
 
+    marked.setOptions({ mangle: false, headerIds: false });
     function setStatus(t){ $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
 
     // ---- Conversation history (client side) ----
@@ -366,16 +362,17 @@
       return (
         /^(hi|hello|hey|hiya|heya|howdy|yo|sup|oi oi)\b/.test(t) ||
         /^(good (morning|afternoon|evening))\b/.test(t) ||
-        /^(what('|’)s up|whats up|what is up)\b/.test(t) ||
-        /^(how are (you|u|ya)|how's it going|hows it going|how are things)\b/.test(t) ||
-        /^(what('|’)s going on|whats going on|what is going on)\b/.test(t)
+        /^(what('|’)?s up|whats up|what is up)\b/.test(t) ||
+        /^(how are (you|u|ya)|how('|’)?s it going|hows it going|how are things|you ok\??)\b/.test(t) ||
+        /^(top of the morning( to ya)?)\b/.test(t) ||
+        /(wassup|whatup|whaddup|wazzup)\b/.test(t)
       );
     }
 
     function isHostileSmallTalk(text) {
       if (!text) return false;
       const t = text.trim().toLowerCase();
-      return /^(fuck|f\*+k|cunt|bastard|this is sh(i|!|1)t(e)?)[\s!,.]?$/i.test(t);
+      return /^(fuck( you)?|cunt|bastard|this is sh(i|!|1)t(e)?)!?$/.test(t);
     }
 
     // --- SSE streaming ---
@@ -407,16 +404,18 @@
 
       // Handle attached file (for THIS turn only)
       let usedFileId = null;
+      let usedFilename = "";
       let uploadTurn = false;
       if (pendingUpload.file_id) {
         usedFileId = pendingUpload.file_id;
+        usedFilename = pendingUpload.filename || "";
         uploadTurn = true;
         const used = document.createElement("div");
         used.className = "used-file-note";
-        used.innerHTML = `✅ Using: <strong>${(pendingUpload.filename.length > 36 ? pendingUpload.filename.slice(0,33) + "..." : pendingUpload.filename)}</strong>`;
+        used.innerHTML = `✅ Using: <strong>${(usedFilename.length > 36 ? usedFilename.slice(0,33) + "..." : usedFilename)}</strong>`;
         userMsg.bubble.appendChild(used);
 
-        // Clear chip & selection
+        // Clear chip & selection (so the next turn is clean)
         pendingUpload = { file_id: null, filename: "" };
         $fileInput.value = "";
         $attachStatus.style.display = "none";
@@ -515,13 +514,17 @@
         s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1")
              .replace(/https?:\/\/\S+/g, "");
 
-        // Remove trailing inline Sources: block (widget appends its own)
+        // Remove any inline "Sources:" the model added (widget will append its own)
         s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
 
         if (!uploadTurn) {
-          const sentenceRe = /(^|[.!?]\s+)([^.!?]*\b(uploaded|your\s+(file|document)s?|files?\s+you(?:'ve| have)?\s+uploaded|your\s+uploads?)\b[^.!?]*[.!?])/gi;
-          s = s.replace(sentenceRe, (m, lead) => lead);
+          // Remove any sentence that references uploads/files/documents or pronoun-only references to “them”
+          const sentenceRe = /(^|[.!?]\s+)([^.!?]*\b(uploaded|uploads?|your\s+(file|document)s?|files?\s+you(?:'ve| have)?\s+uploaded|documents?\s+you(?:'ve| have)?\s+uploaded|the\s+documents|these\s+documents|those\s+documents|assist (you|u) with them|help (you|u) with them|regarding them|about them)\b[^.!?]*[.!?])/gi;
+          s = s.replace(sentenceRe, (m, lead) => lead || " ");
+          // Tidy double spaces created by removals
+          s = s.replace(/[ \t]{2,}/g, " ");
         } else {
+          // Normalize phrasing when we DO have an upload
           const pairs = [
             [/\bfiles?\s+you(?:'ve| have)?\s+uploaded\b/gi, "attached documents"],
             [/\buploaded\s+files?\b/gi, "attached documents"],
@@ -535,8 +538,8 @@
           for (const [re, rep] of pairs) s = s.replace(re, typeof rep === "function" ? rep : rep);
         }
 
-        return s.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim();
-        }
+        return s.replace(/\n{3,}/g, "\n\n").trim();
+      }
 
       function handleEvent(event, raw) {
         if (event === "start") return;
@@ -572,10 +575,19 @@
           setStatus("");
           const finalMd = finalRewrite(mdRaw, { uploadTurn });
           renderMarkdown(finalMd, aContent);
-          if (!sourcesAppended) {
+
+          // Append captured citations (if any)
+          if (!sourcesAppended && citations.length) {
             appendSources(aContent, citations);
             sourcesAppended = true;
           }
+
+          // Fallback: if this was an upload turn but no citation events arrived, show the filename as a Source
+          if (!sourcesAppended && uploadTurn && usedFilename) {
+            appendSources(aContent, [{ kind: "file", id: "upload", label: usedFilename }]);
+            sourcesAppended = true;
+          }
+
           if (!assistantTurnSaved) {
             history.push({ role: "assistant", content: finalMd });
             saveHistory();
@@ -595,7 +607,7 @@
 
           if (deltaText) {
             if (!started) { started = true; clearTimeout(watchdog); }
-            mdRaw += deltaText;               // accumulate raw text (spaces preserved)
+            mdRaw += deltaText;               // accumulate raw text (no mid-stream rewriting)
             renderMarkdown(mdRaw, aContent);  // render raw during stream
           }
           return;
