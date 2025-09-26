@@ -33,7 +33,7 @@
       order: 2;
     }
 
-    /* Composer row — default single row; wraps on small screens */
+    /* Composer row */
     .inputrow { display: flex; gap: 8px; align-items: flex-start; flex-wrap: nowrap; }
 
     .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
@@ -46,7 +46,7 @@
     }
     textarea:focus { background: #f7f7f7; border-color: #ccc; outline: none; box-shadow: 0 0 0 2px rgba(0,0,0,0.04); }
 
-    /* Unified buttons */
+    /* Buttons */
     .ui-btn {
       display: inline-flex; align-items: center; justify-content: center; gap: 8px;
       height: 40px; padding: 0 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
@@ -58,14 +58,13 @@
     .ui-btn:hover { background: #f0f0f0; border-color: #ccc; }
     .ui-btn.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
 
-    /* Mobile wrapping: textarea full width on line 1; buttons wrap to line 2 */
     @media (max-width: 540px) {
       .inputrow { flex-wrap: wrap; }
       .inputrow textarea { flex: 1 1 100%; width: 100%; }
       .inputrow .ui-btn { margin-top: 8px; }
     }
 
-    /* Upload badge row */
+    /* Upload status */
     .attach-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
     .attach-status {
       display: inline-flex; align-items: center; gap: 6px;
@@ -365,12 +364,18 @@
       if (!text) return false;
       const t = text.trim().toLowerCase();
       return (
-        /^(hi|hello|hey|hiya|heya|howdy|yo|sup)\b/.test(t) ||
+        /^(hi|hello|hey|hiya|heya|howdy|yo|sup|oi oi)\b/.test(t) ||
         /^(good (morning|afternoon|evening))\b/.test(t) ||
         /^(what('|’)s up|whats up|what is up)\b/.test(t) ||
         /^(how are (you|u|ya)|how's it going|hows it going|how are things)\b/.test(t) ||
         /^(what('|’)s going on|whats going on|what is going on)\b/.test(t)
       );
+    }
+
+    function isHostileSmallTalk(text) {
+      if (!text) return false;
+      const t = text.trim().toLowerCase();
+      return /^(fuck|f\*+k|cunt|bastard|this is sh(i|!|1)t(e)?)[\s!,.]?$/i.test(t);
     }
 
     // --- SSE streaming ---
@@ -384,11 +389,18 @@
       const userMsg = createMsg("user", "You");
       userMsg.content.textContent = prompt;
 
-      // Client-side greeting short-circuit (no server call, avoids any doc chatter)
+      // Client-side greeting/hostile small-talk short-circuit (no server call)
       if (isGreeting(prompt)) {
         const { content: aContent } = createMsg("assistant", "Talking Care Navigator", true);
         renderMarkdown("Hello! How may I assist you today?", aContent);
         history.push({ role: "assistant", content: "Hello! How may I assist you today?" });
+        saveHistory();
+        return;
+      }
+      if (isHostileSmallTalk(prompt)) {
+        const { content: aContent } = createMsg("assistant", "Talking Care Navigator", true);
+        renderMarkdown("I’m here to help with adult social care in England. How can I assist you today?", aContent);
+        history.push({ role: "assistant", content: "I’m here to help with adult social care in England. How can I assist you today?" });
         saveHistory();
         return;
       }
@@ -423,10 +435,6 @@
         aBubble.appendChild(banner);
       }
 
-      let buffer = "";
-      let started = false;
-      let firstDeltaSeen = false;
-
       // Accumulate RAW markdown during stream; rewrite only ONCE at the end
       let mdRaw = "";
       const citations = [];
@@ -437,6 +445,7 @@
       const ac = new AbortController();
       currentAbort = ac;
 
+      let started = false;
       const watchdog = setTimeout(() => {
         if (!started) {
           aContent.innerHTML = `<span class="error-banner">⚠️ No stream started — check connectivity or CORS settings.</span>`;
@@ -473,8 +482,10 @@
         return;
       }
 
+      // Create ONE reader (fixes the locking error)
       const reader = r.body.getReader();
       const decoder = new TextDecoder("utf-8");
+      let buffer = "";
 
       const flushBlocks = (chunk) => {
         buffer += chunk;
@@ -495,24 +506,22 @@
         }
       };
 
-      // Final-only rewrite (no chunk tampering)
+      // Final-only rewrite
       function finalRewrite(s, { uploadTurn = false } = {}) {
         if (!s) return s;
         s = s.replace(/[’]/g, "'");
 
-        // Drop inline markdown links and bare URLs
+        // Drop inline markdown links & bare URLs
         s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1")
              .replace(/https?:\/\/\S+/g, "");
 
-        // Remove any trailing inline Sources: block (widget appends its own)
+        // Remove trailing inline Sources: block (widget appends its own)
         s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
 
         if (!uploadTurn) {
-          // Remove whole sentences that mention uploads/files
           const sentenceRe = /(^|[.!?]\s+)([^.!?]*\b(uploaded|your\s+(file|document)s?|files?\s+you(?:'ve| have)?\s+uploaded|your\s+uploads?)\b[^.!?]*[.!?])/gi;
-          s = s.replace(sentenceRe, (m, lead, sent) => lead); // drop the offending sentence
+          s = s.replace(sentenceRe, (m, lead) => lead);
         } else {
-          // Gentle phrasing normalisation when it WAS an upload turn
           const pairs = [
             [/\bfiles?\s+you(?:'ve| have)?\s+uploaded\b/gi, "attached documents"],
             [/\buploaded\s+files?\b/gi, "attached documents"],
@@ -523,15 +532,11 @@
             [/\bfrom\s+the\s+uploaded\s+(file|document)(s)?\b/gi, (_m, _w, s2) => `from the ${s2 ? "attached documents" : "attached document"}`],
             [/\bthe\s+uploaded\s+(file|document)(s)?\b/gi, (_m, _w, s2) => `the ${s2 ? "attached documents" : "attached document"}`],
           ];
-          for (const [re, rep] of pairs) {
-            s = s.replace(re, typeof rep === "function" ? rep : rep);
-          }
+          for (const [re, rep] of pairs) s = s.replace(re, typeof rep === "function" ? rep : rep);
         }
 
-        // Tidy spaces/line breaks
-        s = s.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim();
-        return s;
-      }
+        return s.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+        }
 
       function handleEvent(event, raw) {
         if (event === "start") return;
@@ -565,10 +570,12 @@
 
         if (event === "done" || event === "response.completed") {
           setStatus("");
-          // Final pass: rewrite once safely, then render and append sources
           const finalMd = finalRewrite(mdRaw, { uploadTurn });
           renderMarkdown(finalMd, aContent);
-          appendSources(aContent, citations);
+          if (!sourcesAppended) {
+            appendSources(aContent, citations);
+            sourcesAppended = true;
+          }
           if (!assistantTurnSaved) {
             history.push({ role: "assistant", content: finalMd });
             saveHistory();
@@ -587,7 +594,7 @@
               : (typeof d?.text_delta === "string" ? d.text_delta : "");
 
           if (deltaText) {
-            if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); }
+            if (!started) { started = true; clearTimeout(watchdog); }
             mdRaw += deltaText;               // accumulate raw text (spaces preserved)
             renderMarkdown(mdRaw, aContent);  // render raw during stream
           }
@@ -611,8 +618,6 @@
       }
 
       try {
-        const reader = r.body.getReader();
-        const decoder = new TextDecoder("utf-8");
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
@@ -623,6 +628,7 @@
       } catch (e) {
         aContent.insertAdjacentHTML("beforeend", `<p class="error-banner">⚠️ Stream error: ${escapeHtml(e?.message || String(e))}</p>`);
       } finally {
+        clearTimeout(watchdog);
         currentAbort = null;
         setStatus("");
       }
