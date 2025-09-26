@@ -2,18 +2,17 @@
   "name": "tc-assistant-proxy",
   "version": "1.0.0",
   "private": true,
-  "description": "Talking Care Navigator – static widget + serverless API routes",
+  "description": "Talking Care Navigator proxy",
+  "main": "api/assistant.js",
   "license": "MIT",
-  "type": "commonjs",
   "engines": {
-    "node": ">=18.17"
+    "node": ">=18"
   },
   "scripts": {
-    "dev": "vercel dev",
-    "build": "echo \"Nothing to build\"",
-    "deploy": "vercel --prod"
+    "start": "node api/assistant.js",
+    "dev": "node api/assistant.js"
   },
   "dependencies": {
-    "busboy": "^1.6.0"
+    "openai": "^4.58.0"
   }
 }
