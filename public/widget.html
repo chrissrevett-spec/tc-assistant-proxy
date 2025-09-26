@@ -130,15 +130,6 @@
     .bubble-content tr:nth-child(even) td { background: #fcfcfc; }
 
     .sources { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444; }
-
-    .used-file-note, .upload-banner, .error-banner {
-      display: inline-flex; align-items: center; gap: 6px;
-      font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid #ddd; background: #FAFAFA;
-      margin-top: 6px;
-    }
-    .used-file-note { border-color: #4caf50; background: #f2fff2; color: #256f2a; }
-    .upload-banner { border-color: #4caf50; background: #f2fff2; color: #256f2a; }
-    .error-banner { border-color: #e57373; background: #fff5f5; color: #b71c1c; }
   </style>
 </head>
 <body>
@@ -173,10 +164,7 @@
 
   <script>
     if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
-    window.addEventListener('DOMContentLoaded', () => {
-      window.scrollTo(0, 0);
-      setTimeout(() => window.scrollTo(0, 0), 0);
-    });
+    window.addEventListener('DOMContentLoaded', () => { window.scrollTo(0, 0); setTimeout(() => window.scrollTo(0, 0), 0); });
     window.addEventListener('pageshow', (e) => { if (e.persisted) window.scrollTo(0, 0); });
   </script>
 
@@ -192,7 +180,6 @@
 
     const $shell   = document.getElementById("shell");
     const $chat    = document.getElementById("chat");
-    const $chatwrap= document.getElementById("chatwrap");
     const $inputbar= document.getElementById("inputbar");
     const $in      = document.getElementById("tc-input");
     const $send    = document.getElementById("tc-ask-stream");
@@ -207,65 +194,47 @@
 
     const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
 
-    marked.setOptions({ mangle: false, headerIds: false });
     function setStatus(t){ $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
+    function activateChat(){ if (!$shell.classList.contains("chat-active")) $shell.classList.add("chat-active"); }
 
-    // ---- Conversation history (client side) ----
+    // Conversation history (client side)
     const history = (() => { try { return JSON.parse(sessionStorage.getItem("tc_history") || "[]"); } catch { return []; } })();
     function saveHistory(){ try { sessionStorage.setItem("tc_history", JSON.stringify(history)); } catch {} }
     function clearHistory(){ history.length = 0; saveHistory(); }
 
-    function activateChat(){ if (!$shell.classList.contains("chat-active")) $shell.classList.add("chat-active"); }
-
     function createMsg(role, headerText, withCopy=false){
       const msg = document.createElement("div");
       msg.className = `msg ${role}`;
-      const avatar = document.createElement("div");
-      avatar.className = "avatar";
+      const avatar = document.createElement("div"); avatar.className = "avatar";
 
       if (role === "assistant" && ASSISTANT_AVATAR_URL) {
         const img = document.createElement("img");
-        img.src = ASSISTANT_AVATAR_URL;
-        img.alt = "TCN";
+        img.src = ASSISTANT_AVATAR_URL; img.alt = "TCN";
         img.onerror = () => { avatar.textContent = "📖"; };
         avatar.appendChild(img);
       } else {
         avatar.textContent = role === "assistant" ? "📖" : "🙂";
       }
 
-      const bubble = document.createElement("div");
-      bubble.className = "bubble";
-
-      const head = document.createElement("div");
-      head.className = "bubble-head";
-      head.textContent = headerText;
-
-      const content = document.createElement("div");
-      content.className = "bubble-content";
+      const bubble = document.createElement("div"); bubble.className = "bubble";
+      const head = document.createElement("div"); head.className = "bubble-head"; head.textContent = headerText;
+      const content = document.createElement("div"); content.className = "bubble-content";
 
       if (withCopy) {
-        const actions = document.createElement("div");
-        actions.className = "bubble-actions";
+        const actions = document.createElement("div"); actions.className = "bubble-actions";
         const copyBtn = document.createElement("button");
-        copyBtn.className = "copy-btn";
-        copyBtn.type = "button";
-        copyBtn.title = "Copy";
-        copyBtn.textContent = "📋 Copy";
+        copyBtn.className = "copy-btn"; copyBtn.type = "button"; copyBtn.title = "Copy"; copyBtn.textContent = "📋 Copy";
         copyBtn.addEventListener("click", () => {
           const txt = content.innerText.trim();
           navigator.clipboard.writeText(txt).then(() => {
-            copyBtn.textContent = "✅ Copied";
-            setTimeout(() => (copyBtn.textContent = "📋 Copy"), 1200);
+            copyBtn.textContent = "✅ Copied"; setTimeout(() => (copyBtn.textContent = "📋 Copy"), 1200);
           });
         });
-        actions.appendChild(copyBtn);
-        head.appendChild(actions);
+        actions.appendChild(copyBtn); head.appendChild(actions);
       }
 
-      bubble.appendChild(head);
-      bubble.appendChild(content);
-      msg.appendChild(avatar);
-      msg.appendChild(bubble);
+      bubble.appendChild(head); bubble.appendChild(content);
+      msg.appendChild(avatar); msg.appendChild(bubble);
       $chat.appendChild(msg);
       $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
       return { msg, content, bubble };
@@ -294,12 +263,9 @@
       title.textContent = "Sources:";
       src.appendChild(title);
       const list = document.createElement("ul");
-      list.style.margin = "0";
-      list.style.paddingLeft = "20px";
+      list.style.margin = "0"; list.style.paddingLeft = "20px";
       [...files, ...urls].forEach((c) => {
-        const li = document.createElement("li");
-        li.textContent = c.label;
-        list.appendChild(li);
+        const li = document.createElement("li"); li.textContent = c.label; list.appendChild(li);
       });
       src.appendChild(list);
       containerEl.appendChild(src);
@@ -309,9 +275,8 @@
     let currentAbort = null;
     let pendingUpload = { file_id: null, filename: "" };
 
-    // --- Upload UI handlers ---
-    document.getElementById("attach-btn").addEventListener("click", () => $fileInput.click());
-
+    // Upload UI
+    $attachBtn.addEventListener("click", () => $fileInput.click());
     $fileInput.addEventListener("change", async () => {
       const file = $fileInput.files?.[0];
       if (!file) return;
@@ -331,22 +296,20 @@
       $attachName.textContent = file.name.length > 36 ? file.name.slice(0, 33) + "..." : file.name;
 
       try {
-        const fd = new FormData();
-        fd.append("file", file);
+        const fd = new FormData(); fd.append("file", file);
         const r = await fetch(`${API_BASE}/api/upload`, { method: "POST", body: fd });
         const data = await r.json().catch(() => ({}));
         if (!r.ok || !data.ok || !data.file_id) throw new Error(data?.error || "Upload failed");
 
         pendingUpload = { file_id: data.file_id, filename: file.name };
         if (data.processed) {
-          $attachStatus.className = "attach-status ok";
-          $attachIcon.textContent = "✅";
+          $attachStatus.className = "attach-status ok"; $attachIcon.textContent = "✅";
         } else {
           $attachStatus.className = "attach-status pending";
           $attachIcon.textContent = "⌛";
           $attachName.textContent = "Processing… try your question in a moment";
+          $attachName.textContent = (file.name.length > 36 ? file.name.slice(0,33) + "..." : file.name);
         }
-        $attachName.textContent = (file.name.length > 36 ? file.name.slice(0,33) + "..." : file.name);
       } catch (e) {
         $attachStatus.className = "attach-status error";
         $attachIcon.textContent = "⚠️";
@@ -355,67 +318,21 @@
       }
     });
 
-    // --- Intent helpers (client side) ---
-    function isGreeting(text) {
-      if (!text) return false;
-      const t = text.trim().toLowerCase();
-      return (
-        /^(hi|hello|hey|hiya|heya|howdy|yo|sup|oi oi)\b/.test(t) ||
-        /^(good (morning|afternoon|evening))\b/.test(t) ||
-        /^(what('|’)?s up|whats up|what is up)\b/.test(t) ||
-        /^(how are (you|u|ya)|how('|’)?s it going|hows it going|how are things|you ok\??)\b/.test(t) ||
-        /^(top of the morning( to ya)?)\b/.test(t) ||
-        /(wassup|whatup|whaddup|wazzup)\b/.test(t)
-      );
-    }
-
-    function isHostileSmallTalk(text) {
-      if (!text) return false;
-      const t = text.trim().toLowerCase();
-      return /^(fuck( you)?|cunt|bastard|this is sh(i|!|1)t(e)?)!?$/.test(t);
-    }
-
-    // --- SSE streaming ---
+    // SSE ask
     async function askStream(prompt) {
       activateChat();
 
-      // Save user turn
       history.push({ role: "user", content: prompt });
       saveHistory();
 
       const userMsg = createMsg("user", "You");
       userMsg.content.textContent = prompt;
 
-      // Client-side greeting/hostile small-talk short-circuit (no server call)
-      if (isGreeting(prompt)) {
-        const { content: aContent } = createMsg("assistant", "Talking Care Navigator", true);
-        renderMarkdown("Hello! How may I assist you today?", aContent);
-        history.push({ role: "assistant", content: "Hello! How may I assist you today?" });
-        saveHistory();
-        return;
-      }
-      if (isHostileSmallTalk(prompt)) {
-        const { content: aContent } = createMsg("assistant", "Talking Care Navigator", true);
-        renderMarkdown("I’m here to help with adult social care in England. How can I assist you today?", aContent);
-        history.push({ role: "assistant", content: "I’m here to help with adult social care in England. How can I assist you today?" });
-        saveHistory();
-        return;
-      }
-
-      // Handle attached file (for THIS turn only)
-      let usedFileId = null;
-      let usedFilename = "";
-      let uploadTurn = false;
+      // Prepare request body (attach file if present for THIS turn)
+      const body = { userMessage: prompt, history };
       if (pendingUpload.file_id) {
-        usedFileId = pendingUpload.file_id;
-        usedFilename = pendingUpload.filename || "";
-        uploadTurn = true;
-        const used = document.createElement("div");
-        used.className = "used-file-note";
-        used.innerHTML = `✅ Using: <strong>${(usedFilename.length > 36 ? usedFilename.slice(0,33) + "..." : usedFilename)}</strong>`;
-        userMsg.bubble.appendChild(used);
-
-        // Clear chip & selection (so the next turn is clean)
+        body.upload_file_id = pendingUpload.file_id;
+        // clear selection after consuming it (no extra UI text)
         pendingUpload = { file_id: null, filename: "" };
         $fileInput.value = "";
         $attachStatus.style.display = "none";
@@ -427,22 +344,13 @@
       const { content: aContent, bubble: aBubble } = createMsg("assistant", "Talking Care Navigator", true);
       aContent.innerHTML = `<em>Thinking… ⏳</em>`;
 
-      if (uploadTurn) {
-        const banner = document.createElement("div");
-        banner.className = "upload-banner";
-        banner.textContent = "Answer based only on the attached document.";
-        aBubble.appendChild(banner);
-      }
-
-      // Accumulate RAW markdown during stream; rewrite only ONCE at the end
-      let mdRaw = "";
+      let mdAccum = "";
       const citations = [];
       let sourcesAppended = false;
       let assistantTurnSaved = false;
 
       setStatus("Thinking… ⏳");
-      const ac = new AbortController();
-      currentAbort = ac;
+      const ac = new AbortController(); currentAbort = ac;
 
       let started = false;
       const watchdog = setTimeout(() => {
@@ -451,9 +359,6 @@
           setStatus("");
         }
       }, 10000);
-
-      const body = { userMessage: prompt, history };
-      if (usedFileId) body.upload_file_id = usedFileId;
 
       let r;
       try {
@@ -466,9 +371,7 @@
       } catch (e) {
         clearTimeout(watchdog);
         aContent.innerHTML = `<span class="error-banner">⚠️ Request failed: ${escapeHtml(e?.message || e)}</span>`;
-        setStatus("");
-        currentAbort = null;
-        return;
+        setStatus(""); currentAbort = null; return;
       }
 
       if (!r.ok || !r.body) {
@@ -476,12 +379,10 @@
         let err = `HTTP ${r.status}`;
         try { err += ` ${await r.text()}`; } catch {}
         aContent.innerHTML = `<span class="error-banner">⚠️ Stream failed: ${escapeHtml(err)}</span>`;
-        setStatus("");
-        currentAbort = null;
-        return;
+        setStatus(""); currentAbort = null; return;
       }
 
-      // Create ONE reader (fixes the locking error)
+      // Single reader (avoid locked-stream error)
       const reader = r.body.getReader();
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
@@ -505,58 +406,11 @@
         }
       };
 
-      // Final-only rewrite
-      function finalRewrite(s, { uploadTurn = false } = {}) {
-        if (!s) return s;
-        s = s.replace(/[’]/g, "'");
-
-        // Drop inline markdown links & bare URLs
-        s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1")
-             .replace(/https?:\/\/\S+/g, "");
-
-        // Remove any inline "Sources:" the model added (widget will append its own)
-        s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
-
-        if (!uploadTurn) {
-          // Remove any sentence that references uploads/files/documents or pronoun-only references to “them”
-          const sentenceRe = /(^|[.!?]\s+)([^.!?]*\b(uploaded|uploads?|your\s+(file|document)s?|files?\s+you(?:'ve| have)?\s+uploaded|documents?\s+you(?:'ve| have)?\s+uploaded|the\s+documents|these\s+documents|those\s+documents|assist (you|u) with them|help (you|u) with them|regarding them|about them)\b[^.!?]*[.!?])/gi;
-          s = s.replace(sentenceRe, (m, lead) => lead || " ");
-          // Tidy double spaces created by removals
-          s = s.replace(/[ \t]{2,}/g, " ");
-        } else {
-          // Normalize phrasing when we DO have an upload
-          const pairs = [
-            [/\bfiles?\s+you(?:'ve| have)?\s+uploaded\b/gi, "attached documents"],
-            [/\buploaded\s+files?\b/gi, "attached documents"],
-            [/\bthe\s+uploaded\s+files?\b/gi, "the attached documents"],
-            [/\buploaded\s+document(s)?\b/gi, (_m, s2) => s2 ? "attached documents" : "attached document"],
-            [/\byour\s+upload(s)?\b/gi, (_m, s1) => s1 ? "attached documents" : "attached document"],
-            [/\byour\s+(file|document)(s)?\b/gi, (_m, _w, s2) => s2 ? "attached documents" : "attached document"],
-            [/\bfrom\s+the\s+uploaded\s+(file|document)(s)?\b/gi, (_m, _w, s2) => `from the ${s2 ? "attached documents" : "attached document"}`],
-            [/\bthe\s+uploaded\s+(file|document)(s)?\b/gi, (_m, _w, s2) => `the ${s2 ? "attached documents" : "attached document"}`],
-          ];
-          for (const [re, rep] of pairs) s = s.replace(re, typeof rep === "function" ? rep : rep);
-        }
-
-        return s.replace(/\n{3,}/g, "\n\n").trim();
-      }
-
       function handleEvent(event, raw) {
         if (event === "start") return;
 
         if (event === "info") {
-          try {
-            const obj = JSON.parse(raw);
-            if (obj?.note === "temp_vector_store_failed") {
-              const errMsg = (obj?.error || "We couldn't prepare your document for search. Please try uploading again.");
-              const banner = document.createElement("div");
-              banner.className = "error-banner";
-              banner.textContent = `⚠️ ${errMsg}`;
-              aBubble.appendChild(banner);
-              if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
-              setStatus("");
-            }
-          } catch {}
+          // purely informational; ignore or surface if you want
           return;
         }
 
@@ -567,38 +421,27 @@
           } catch {
             aContent.innerHTML = `<span class="error-banner">⚠️ ${escapeHtml(raw)}</span>`;
           }
-          setStatus("");
-          return;
+          setStatus(""); return;
         }
 
         if (event === "done" || event === "response.completed") {
           setStatus("");
-          const finalMd = finalRewrite(mdRaw, { uploadTurn });
-          renderMarkdown(finalMd, aContent);
-
-          // Append captured citations (if any)
+          renderMarkdown(mdAccum, aContent);
           if (!sourcesAppended && citations.length) {
             appendSources(aContent, citations);
             sourcesAppended = true;
           }
-
-          // Fallback: if this was an upload turn but no citation events arrived, show the filename as a Source
-          if (!sourcesAppended && uploadTurn && usedFilename) {
-            appendSources(aContent, [{ kind: "file", id: "upload", label: usedFilename }]);
-            sourcesAppended = true;
-          }
-
           if (!assistantTurnSaved) {
-            history.push({ role: "assistant", content: finalMd });
+            history.push({ role: "assistant", content: mdAccum.trim() });
             saveHistory();
             assistantTurnSaved = true;
           }
           return;
         }
 
+        // Text deltas (append raw, no rewrites)
         if (event.endsWith(".delta")) {
-          let d;
-          try { d = JSON.parse(raw); } catch { d = null; }
+          let d; try { d = JSON.parse(raw); } catch { d = null; }
           const deltaText =
             (d && typeof d.delta === "string") ? d.delta :
             (d && d.delta && Array.isArray(d.delta.content))
@@ -607,19 +450,16 @@
 
           if (deltaText) {
             if (!started) { started = true; clearTimeout(watchdog); }
-            mdRaw += deltaText;               // accumulate raw text (no mid-stream rewriting)
-            renderMarkdown(mdRaw, aContent);  // render raw during stream
+            mdAccum += deltaText;
+            renderMarkdown(mdAccum, aContent);
           }
           return;
         }
 
-        // Capture citations/annotations
+        // Optional: capture citations if the API emits them
         if (event.includes("annotation") || event.includes("citation")) {
           let a;
-          try {
-            const obj = JSON.parse(raw);
-            a = obj?.annotation || obj?.data || obj;
-          } catch { a = null; }
+          try { const obj = JSON.parse(raw); a = obj?.annotation || obj?.data || obj; } catch { a = null; }
           if (!a) return;
           if (a.type === "file_citation" && a.file_id) {
             citations.push({ kind: "file", id: a.file_id, label: a.filename || a.file_id });
