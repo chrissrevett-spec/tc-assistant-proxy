@@ -1,214 +1,168 @@
 // api/assistant.js
-// Node/Next/Vercel serverless API route
+// Vercel/Next.js Serverless (Node runtime) – SSE proxy to OpenAI Responses API
 import OpenAI from "openai";
 
-// ---------- Helpers ----------
+export const config = { runtime: "nodejs" };
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+// ---------- small utils ----------
 function getQuery(req) {
-  // Next.js / Vercel provides req.query; fallback for plain Node
-  return req.query || Object.fromEntries(
-    (req.url?.split("?")[1] || "")
-      .split("&")
-      .filter(Boolean)
-      .map(kv => kv.split("=").map(decodeURIComponent))
+  if (req.query) return req.query;
+  const qs = (req.url?.split("?")[1] || "");
+  return Object.fromEntries(
+    qs.split("&").filter(Boolean).map(kv => kv.split("=").map(decodeURIComponent))
   );
 }
-
-function parseJsonBody(req) {
-  // Next.js already parses JSON body into req.body (object)
+function jsonBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
-  try {
-    if (typeof req.body === "string") return JSON.parse(req.body);
-  } catch {}
-  return {};
+  try { return JSON.parse(req.body || "{}"); } catch { return {}; }
 }
-
-const SYSTEM_PROMPT = `
-You are Talking Care Navigator, created by Chris Revett at Talking Care.
-Be warm, concise, and practical.
-
-Critical behaviour rules:
-1) DO NOT mention or imply “uploaded files”, “documents I see”, vector stores, or any file context unless the user’s current turn explicitly included an attachment AND the server banner says we’re answering from the attached document.
-2) For casual greetings or small talk, give a short, friendly reply and do not bring up documents or file analysis.
-3) If the user asks “who created you?” answer: “I was created by Chris Revett at Talking Care.”
-4) If asked to cite sources, list only the file titles or web page titles provided by the tool annotations (no raw URLs).
-`.trim();
-
-function isGreeting(text = "") {
-  return /^[\s]*((hi|hello|hey|hiya)(\s+there)?|good\s+(morning|afternoon|evening))[\s!\.]*$/i.test(text);
-}
-
-// Map prior chat turns into Responses API input schema
-function mapHistoryToInput(history = []) {
-  return history.slice(-12).map(turn => {
-    const role = (turn.role === "assistant") ? "assistant" : "user";
-    const type = (role === "assistant") ? "output_text" : "input_text";
-    return {
-      role,
-      content: [{ type, text: String(turn.content || "") }]
-    };
-  });
-}
-
-// Build file_search tools; never return an empty vector_store_ids array
-function buildTools({ uploadVectorStoreId }) {
-  // IMPORTANT: this is your configured base library vector store id.
-  const baseVs = process.env.TCN_LIBRARY_VECTOR_STORE_ID || "";
-  const ids = [];
-  if (uploadVectorStoreId) ids.push(uploadVectorStoreId);
-  if (baseVs) ids.push(baseVs);
-
-  const tools = [];
-  if (ids.length) {
-    tools.push({
-      type: "file_search",
-      vector_store_ids: ids,
-      max_num_results: 20,
-      ranking_options: { ranker: "auto", score_threshold: 0 }
-    });
-  }
-  return { tools, hasFileSearch: ids.length > 0 };
-}
-
-// Create a temporary vector store from a single uploaded file id
-async function createTempVectorStoreFromFile(fileId) {
-  const name = `upload_${fileId.slice(-6)}_${Date.now()}`;
-  // Try GA API first; fall back to beta names if project is on older SDK
-  try {
-    const vs = await openai.vectorStores.create({ name });
-    await openai.vectorStores.files.create(vs.id, { file_id: fileId });
-    return vs.id;
-  } catch (e1) {
-    // Fallback to beta (older SDKs)
-    try {
-      const vs = await openai.beta.vectorStores.create({ name });
-      await openai.beta.vectorStores.files.create(vs.id, { file_id: fileId });
-      return vs.id;
-    } catch (e2) {
-      const err = new Error(`Vector store create failed: ${e1?.message || e1}`);
-      err.cause = e1;
-      throw err;
-    }
-  }
-}
-
-// Build the Responses API payload
-function buildPayload({ userMessage, history, tools, tool_choice }) {
-  const input = [
-    // System as first message
-    { role: "system", content: [{ type: "input_text", text: SYSTEM_PROMPT }] },
-    // Prior conversation
-    ...mapHistoryToInput(history),
-    // Current user turn
-    { role: "user", content: [{ type: "input_text", text: String(userMessage || "") }] }
-  ];
-
-  const payload = {
-    model: "gpt-4o-mini-2024-07-18",
-    input,
-    // IMPORTANT: only include tools if we actually have some
-    ...(tools?.length ? { tools, tool_choice } : {}),
-    temperature: 1,
-    text: { format: { type: "text" }, verbosity: "medium" }
-  };
-
-  return payload;
-}
-
 function sseHeaders(res) {
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("Access-Control-Allow-Origin", "*");
 }
+function safeStringify(v){ try { return JSON.stringify(v); } catch { return String(v); } }
+function safeParse(v){ try { return JSON.parse(v); } catch { return { message: v }; } }
 
-// ---------- Route Handler ----------
+// ---------- prompt behaviour ----------
+const SYSTEM_PROMPT = `
+You are Talking Care Navigator, created by Chris Revett at Talking Care.
+Be warm, concise, and practical.
 
-export default async function handler(req, res) {
+Critical behaviour rules:
+1) DO NOT mention or imply “uploaded files”, “documents I see”, vector stores, or any file context unless the current turn included an attachment and the UI banner states we’re answering from the attached document.
+2) For greetings/small talk, reply briefly and do not bring up files.
+3) If asked “who created you?”, say: “I was created by Chris Revett at Talking Care.”
+4) If asked for sources, list only file titles/page titles from annotations (no raw URLs).
+`.trim();
+
+function isGreeting(s=""){
+  return /^[\s]*((hi|hello|hey|hiya)(\s+there)?|good\s+(morning|afternoon|evening))[\s!\.]*$/i.test(s);
+}
+function mapHistory(history=[]){
+  return history.slice(-12).map(t => {
+    const role = t.role === "assistant" ? "assistant" : "user";
+    const type = role === "assistant" ? "output_text" : "input_text";
+    return { role, content: [{ type, text: String(t.content || "") }] };
+  });
+}
+
+async function createTempVectorStoreFromFile(fileId){
+  const name = `upload_${fileId.slice(-6)}_${Date.now()}`;
+  // Try modern path; fall back to beta.* for older SDKs
+  try {
+    const vs = await openai.vectorStores.create({ name });
+    await openai.vectorStores.files.create(vs.id, { file_id: fileId });
+    return vs.id;
+  } catch (e1) {
+    try {
+      const vs = await openai.beta.vectorStores.create({ name });
+      await openai.beta.vectorStores.files.create(vs.id, { file_id: fileId });
+      return vs.id;
+    } catch (e2) {
+      const err = new Error(e2?.message || e1?.message || "Vector store create failed");
+      err.cause = e2 || e1;
+      throw err;
+    }
+  }
+}
+
+function buildTools({ uploadVsId, greeting }){
+  if (greeting) return { tools: [], hasFileSearch: false };
+  const base = process.env.TCN_LIBRARY_VECTOR_STORE_ID || "";
+  const ids = [];
+  if (uploadVsId) ids.push(uploadVsId);
+  if (base) ids.push(base);
+  if (!ids.length) return { tools: [], hasFileSearch: false };
+  return {
+    tools: [{
+      type: "file_search",
+      vector_store_ids: ids,
+      max_num_results: 20,
+      ranking_options: { ranker: "auto", score_threshold: 0 }
+    }],
+    hasFileSearch: true
+  };
+}
+
+function buildPayload({ userMessage, history, tools, tool_choice }){
+  const input = [
+    { role: "system", content: [{ type: "input_text", text: SYSTEM_PROMPT }] },
+    ...mapHistory(history),
+    { role: "user", content: [{ type: "input_text", text: String(userMessage || "") }] }
+  ];
+  const payload = {
+    model: "gpt-4o-mini-2024-07-18",
+    input,
+    ...(tools?.length ? { tools, tool_choice } : {}),
+    temperature: 1,
+    text: { format: { type: "text" }, verbosity: "medium" }
+  };
+  return payload;
+}
+
+// ---------- handler ----------
+export default async function handler(req, res){
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
     return res.status(405).json({ error: "Method Not Allowed" });
   }
 
-  const query = getQuery(req);
-  const streamRequested =
-    String(query.stream || "").toLowerCase() === "on" ||
-    String(query.stream || "").toLowerCase() === "true";
+  const q = getQuery(req);
+  const stream = String(q.stream || "").toLowerCase() === "on" || String(q.stream || "").toLowerCase() === "true";
+  const body = jsonBody(req);
 
-  const body = parseJsonBody(req);
   const userMessage = String(body.userMessage || "");
   const history = Array.isArray(body.history) ? body.history : [];
   const uploadFileId = body.upload_file_id || null;
-
-  // If greeting, suppress file_search entirely
   const greeting = isGreeting(userMessage);
 
-  // If a file id was provided this turn, build a one-off vector store
-  let tempVectorStoreId = null;
+  // Prepare temp VS if upload supplied this turn
+  let tempVsId = null, tempVsFailed = false, tempVsError = "";
   if (uploadFileId) {
-    try {
-      tempVectorStoreId = await createTempVectorStoreFromFile(uploadFileId);
-    } catch (err) {
-      if (streamRequested) {
-        // For stream, we announce the failure but continue with no file_search
-        sseHeaders(res);
-        res.write(`event: start\n`);
-        res.write(`data: ${JSON.stringify({ ok: true })}\n\n`);
-        res.write(`event: info\n`);
-        res.write(`data: ${JSON.stringify({ note: "temp_vector_store_failed", error: err?.message || String(err) })}\n\n`);
-        // Fall through to continue streaming a normal (no tools) response
-      } else {
-        // Non-stream: return a friendly error, but not a 500
-        return res.status(200).json({
-          error: { message: "We couldn't prepare your document for search this time. You can still ask a question without the file." }
-        });
-      }
-    }
+    try { tempVsId = await createTempVectorStoreFromFile(uploadFileId); }
+    catch (e) { tempVsFailed = true; tempVsError = e?.message || String(e); }
   }
 
-  // Build tools with safe guarding (no empty vector_store_ids)
-  const { tools } = greeting
-    ? { tools: [] }
-    : buildTools({ uploadVectorStoreId: tempVectorStoreId });
-
+  const { tools } = buildTools({ uploadVsId: tempVsId, greeting });
   const tool_choice = tools.length ? "auto" : "none";
 
-  // -------- Non-Streaming Path --------
-  if (!streamRequested) {
+  // ---------- non-stream ----------
+  if (!stream) {
     try {
       const payload = buildPayload({ userMessage, history, tools, tool_choice });
       const resp = await openai.responses.create(payload);
+      if (tempVsFailed) {
+        return res.status(200).json({ ...resp, note: { type: "temp_vector_store_failed", message: tempVsError } });
+      }
       return res.status(200).json(resp);
     } catch (err) {
-      const payload = {
-        error: `OpenAI request failed: ${safeStringify(err?.response?.data || err)}`,
-      };
-      return res.status(200).json(payload); // keep 200 so client UI shows it in-chat
+      return res.status(200).json({ error: `OpenAI request failed: ${safeStringify(err?.response?.data || err)}` });
     }
   }
 
-  // -------- Streaming Path (SSE) --------
+  // ---------- stream (SSE) ----------
+  sseHeaders(res);
+
+  // single start event
+  res.write(`event: start\n`);
+  res.write(`data: ${JSON.stringify({ ok: true })}\n\n`);
+
+  // status about temp VS AFTER start
+  if (tempVsId) {
+    res.write(`event: info\n`);
+    res.write(`data: ${JSON.stringify({ note: "temp_vector_store_ready", id: tempVsId })}\n\n`);
+  } else if (tempVsFailed) {
+    res.write(`event: info\n`);
+    res.write(`data: ${JSON.stringify({ note: "temp_vector_store_failed", error: tempVsError })}\n\n`);
+  }
+
   try {
-    sseHeaders(res);
-
-    // Start event (client has a watchdog for this)
-    res.write(`event: start\n`);
-    res.write(`data: ${JSON.stringify({ ok: true })}\n\n`);
-
-    // If we have a temp VS, announce it for the UI (green badge, etc)
-    if (tempVectorStoreId) {
-      res.write(`event: info\n`);
-      res.write(`data: ${JSON.stringify({ note: "temp_vector_store_ready", id: tempVectorStoreId })}\n\n`);
-    }
-
-    // Build payload for streaming
     const payload = buildPayload({ userMessage, history, tools, tool_choice });
 
-    // Call the REST endpoint directly with stream=true and pipe its SSE to client
     const upstream = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
@@ -219,52 +173,56 @@ export default async function handler(req, res) {
     });
 
     if (!upstream.ok || !upstream.body) {
-      let errTxt = "";
-      try { errTxt = await upstream.text(); } catch {}
-      const errorData = errTxt ? safeParse(errTxt) : { message: `HTTP ${upstream.status}` };
+      let txt = "";
+      try { txt = await upstream.text(); } catch {}
+      const data = txt ? safeParse(txt) : { message: `HTTP ${upstream.status}` };
       res.write(`event: error\n`);
-      res.write(`data: ${JSON.stringify(errorData)}\n\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
       res.write(`event: done\n`);
       res.write(`data: [DONE]\n\n`);
-      res.end();
-      return;
+      return res.end();
     }
 
-    const reader = upstream.body.getReader();
-    const encoder = new TextDecoder("utf-8");
+    const bodyStream = upstream.body;
 
-    // Pipe all upstream SSE chunks through unchanged
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunkStr = encoder.decode(value, { stream: true });
-      // We simply forward upstream SSE lines as-is
-      res.write(chunkStr);
+    // Web Streams case (has getReader)
+    if (typeof bodyStream?.getReader === "function") {
+      const reader = bodyStream.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        res.write(decoder.decode(value, { stream: true }));
+      }
+    }
+    // Node Readable case
+    else if (typeof bodyStream?.on === "function") {
+      await new Promise((resolve, reject) => {
+        bodyStream.on("data", chunk => res.write(chunk));
+        bodyStream.on("end", resolve);
+        bodyStream.on("error", reject);
+      });
+    }
+    // Fallback (no body)
+    else {
+      // nothing to forward
     }
 
-    // Ensure a closing done event if upstream omitted it
     res.write(`event: done\n`);
     res.write(`data: [DONE]\n\n`);
     res.end();
   } catch (err) {
-    // Surface any server-side error as an SSE error event
-    sseHeaders(res);
-    res.write(`event: error\n`);
-    res.write(`data: ${JSON.stringify({
-      message: err?.message || "Stream failed",
-      code: err?.code || err?.response?.status || "stream_error"
-    })}\n\n`);
-    res.write(`event: done\n`);
-    res.write(`data: [DONE]\n\n`);
-    res.end();
+    // best-effort error event
+    try {
+      res.write(`event: error\n`);
+      res.write(`data: ${JSON.stringify({ message: err?.message || "Stream failed", code: err?.code || "stream_error" })}\n\n`);
+      res.write(`event: done\n`);
+      res.write(`data: [DONE]\n\n`);
+      res.end();
+    } catch {
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Stream failed to start", detail: err?.message || String(err) });
+      }
+    }
   }
-}
-
-// ---------- Small utils ----------
-
-function safeStringify(obj) {
-  try { return JSON.stringify(obj); } catch { return String(obj); }
-}
-function safeParse(txt) {
-  try { return JSON.parse(txt); } catch { return { message: txt }; }
 }
