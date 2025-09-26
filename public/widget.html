@@ -323,6 +323,21 @@
     let currentAbort = null;
     let pendingUpload = { file_id: null, filename: "" };
 
+    // --- Intent helper (prevents doc chatter on greetings) ---
+    function inferIntent(userText) {
+      const t = (userText || "").trim().toLowerCase();
+
+      // Strong greeting/small-talk detection
+      const GREETING_RE = /^(hi|hello|hey|hiya|yo|sup|what'?s up|whats up|howdy|morning|good (?:morning|afternoon|evening)|how (?:are you|r u|ya)|how'?s it going)\b/;
+      if (GREETING_RE.test(t) || t.length <= 3) return "greeting";
+
+      // Light process/capability detection (kept minimal to avoid false positives)
+      const PROCESS_RE = /(can i upload|how (?:do i|to) (?:attach|upload)|what can you do|capabilit|help(?!.*me with)|how to use|how does (?:this|it) work)/;
+      if (PROCESS_RE.test(t)) return "process";
+
+      return "content";
+    }
+
     // --- Upload UI handlers ---
     document.getElementById("attach-btn").addEventListener("click", () => $fileInput.click());
 
@@ -379,6 +394,16 @@
       const userMsg = createMsg("user", "You");
       userMsg.content.textContent = prompt;
 
+      // Intent gate: short-circuit greetings/small-talk before touching uploads or the API
+      const intent = inferIntent(prompt);
+      if (intent === "greeting") {
+        const { content: aContent } = createMsg("assistant", "Talking Care Navigator", true);
+        aContent.textContent = "Hello! How may I assist you today?";
+        setStatus("");
+        return; // No API call, no file consumption
+      }
+
+      // Only now decide whether to use an uploaded file
       let usedFileId = null;
       let uploadTurn = false;
       if (pendingUpload.file_id) {
@@ -404,7 +429,7 @@
       if (uploadTurn) {
         const banner = document.createElement("div");
         banner.className = "upload-banner";
-        banner.textContent = "Answer based only on your attached document.";
+        banner.textContent = "Answer based only on the attached document.";
         aBubble.appendChild(banner);
       }
 
@@ -478,45 +503,64 @@
         }
       };
 
-      function rewriteAssistantText(s, { uploadTurn = false } = {}) {
+      // Hardened rewriter
+      function rewriteAssistantText(s, { uploadTurn = false, intent = "content" } = {}) {
         if (!s) return s;
 
-        // Normalise punctuation variants
+        // Normalise punctuation
         s = s.replace(/[’]/g, "'");
 
-        // Helper to choose replacement considering plurality
+        // If the user intent was greeting or process, remove any source/file/library chatter
+        if (intent === "greeting" || intent === "process") {
+          s = s
+            .split(/(?<=[.?!])\s+/)
+            .filter(sent => !/\b(upload|uploaded|attach|attached|attachment|file|files|document|documents|library|vector\s*store)\b/i.test(sent))
+            .join(" ");
+        }
+
+        // Helper for replacement wording
         const repl = (plural, attach) => {
           if (uploadTurn || attach) return plural ? "attached documents" : "attached document";
           return plural ? "documents" : "document";
         };
 
-        // Core rewrites (numerous variants)
+        // Wide net: common + tricky variants
         const patterns = [
-          { re: /\bfiles?\s+you(?:'ve| have)?\s+uploaded\b/gi, fn: (m) => repl(true) },
-          { re: /\buploaded\s+files?\b/gi, fn: (m) => repl(true) },
-          { re: /\bthe\s+uploaded\s+files?\b/gi, fn: (m) => repl(true) },
-          { re: /\b(your\s+)?uploaded\s+document(s)?\b/gi, fn: (m, _y, s2) => repl(!!s2) },
-          { re: /\bdocuments?\s+you(?:'ve| have)?\s+uploaded\b/gi, fn: (m) => repl(true) },
-          { re: /\byour\s+upload(s)?\b/gi, fn: (m, s1) => repl(!!s1, true) },
-          { re: /\byour\s+(file|document)(s)?\b/gi, fn: (m, _what, s2) => repl(!!s2) },
-          // Subtler variants
+          // "files you've uploaded", "documents you've uploaded"
+          { re: /\b(files?|documents?)\s+you(?:'ve| have)?\s+uploaded\b/gi, fn: (m, x) => repl(/s$/i.test(x)) },
+          // "you've uploaded (some) files/documents"
+          { re: /\byou(?:'ve| have)?\s+uploaded\s+(?:some\s+)?(files?|documents?)\b/gi, fn: (m, x) => repl(/s$/i.test(x)) },
+          // "your upload(s)"
+          { re: /\byour\s+uploads?\b/gi, fn: () => repl(true, true) },
+          // "uploaded files", "uploaded documents"
+          { re: /\buploaded\s+(files?|documents?)\b/gi, fn: (m, x) => repl(/s$/i.test(x)) },
+          // "the uploaded files/documents"
+          { re: /\bthe\s+uploaded\s+(files?|documents?)\b/gi, fn: (m, x) => "the " + repl(/s$/i.test(x)) },
+          // "your file/document(s)"
+          { re: /\byour\s+(file|document)(s)?\b/gi, fn: (m, _one, s2) => repl(!!s2) },
+          // "information from the uploaded file(s)/document(s)"
           { re: /\binfo(?:rmation)?\s+from\s+the\s+uploaded\s+(file|document)(s)?\b/gi, fn: (m, _w, s2) => `information from the ${repl(!!s2)}` },
+          // Generic “the documents” opener used as inventory
+          { re: /\b(the|these)\s+documents\b/gi, fn: (m) => uploadTurn ? m : "the sources" },
         ];
+
         for (const { re, fn } of patterns) s = s.replace(re, fn);
 
-        // If NOT an upload turn, drop sentences that still mention uploads/attached
+        // If NOT an upload turn, drop remaining sentences that still leak upload/attach/vector store
         if (!uploadTurn) {
-          s = s.replace(/(?:^|\s)((If|Should)\s+you\s+need\s+[^.?!]*(uploaded|attached)[^.?!]*[.?!])/gi, " ");
-          s = s.replace(/(?:^|\s)(For\s+details[^.?!]*(uploaded|attached)[^.?!]*[.?!])/gi, " ");
+          s = s
+            .split(/(?<=[.?!])\s+/)
+            .filter(sent => !/\b(upload|uploaded|attach|attached|attachment|file|files|vector\s*store)\b/i.test(sent))
+            .join(" ");
         }
 
-        // Clean inline URLs/footnotes and trailing Sources:
+        // Clean inline URLs/footnotes and trailing "Sources:"
         s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1");
         s = s.replace(/https?:\/\/\S+/g, "");
         s = s.replace(/\s?\[\d+\]/g, "");
         s = s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
 
-        // Tidy spaces
+        // Tidy spacing
         return s.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n");
       }
 
@@ -552,8 +596,8 @@
 
         if (event === "done" || event === "response.completed") {
           setStatus("");
-          // Final hardening pass (in case any text slipped through mid-stream)
-          const finalMd = rewriteAssistantText(mdAccum, { uploadTurn });
+          // Final hardening pass
+          const finalMd = rewriteAssistantText(mdAccum, { uploadTurn, intent });
           if (finalMd !== mdAccum) {
             mdAccum = finalMd;
             renderMarkdown(mdAccum, aContent);
@@ -584,7 +628,7 @@
 
           if (deltaText) {
             if (!firstDeltaSeen) { firstDeltaSeen = true; setStatus(""); }
-            const cleaned = rewriteAssistantText(deltaText, { uploadTurn });
+            const cleaned = rewriteAssistantText(deltaText, { uploadTurn, intent });
             mdAccum += cleaned;
             renderMarkdown(mdAccum, aContent);
           }
@@ -627,7 +671,7 @@
       return s.replace(/\n?^\s*Sources?:[\s\S]*$/im, "");
     }
     function escapeHtml(str) {
-      return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;" }[ch]));
+      return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;"," >":"&gt;","\"":"&quot;","'":"&#039;" }[ch]));
     }
 
     // Events
