@@ -25,7 +25,7 @@ function corsHeaders(origin) {
     "Access-Control-Allow-Methods": "POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Accept, Authorization",
     "Access-Control-Max-Age": "86400",
-    "Vary": "Origin",
+    Vary: "Origin",
   };
 }
 
@@ -42,7 +42,7 @@ function startSSE(res, origin) {
   const h = {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
-    "Connection": "keep-alive",
+    Connection: "keep-alive",
     ...corsHeaders(origin),
   };
   res.writeHead(200, h);
@@ -65,6 +65,7 @@ function clampHistory(raw = [], maxTurns = 10) {
   return raw.slice(Math.max(0, raw.length - maxTurns));
 }
 
+// IMPORTANT: assistant turns must be "output_text" (not "input_text")
 function toResponsesInput(systemText, hist, userText) {
   const input = [];
   if (systemText) {
@@ -75,11 +76,17 @@ function toResponsesInput(systemText, hist, userText) {
   }
   for (const m of hist) {
     if (!m || !m.role || !m.content) continue;
-    const role = m.role === "assistant" ? "assistant" : "user";
-    input.push({
-      role,
-      content: [{ type: "input_text", text: String(m.content) }],
-    });
+    if (m.role === "assistant") {
+      input.push({
+        role: "assistant",
+        content: [{ type: "output_text", text: String(m.content) }],
+      });
+    } else {
+      input.push({
+        role: "user",
+        content: [{ type: "input_text", text: String(m.content) }],
+      });
+    }
   }
   input.push({
     role: "user",
@@ -121,14 +128,14 @@ async function pumpOpenAIStream(openai, payload, res) {
     const stream = await openai.responses.stream(payload);
 
     if (typeof stream.on === "function") {
-      // Generic event pump
       stream.on("event", (event) => {
-        try { sseEvent(res, event.type || "message", event); } catch {}
+        try {
+          sseEvent(res, event.type || "message", event);
+        } catch {}
       });
       stream.on("error", (err) => {
         sseEvent(res, "error", { message: err?.message || String(err) });
       });
-      // Wait until finished
       await stream.done().catch((err) => {
         sseEvent(res, "error", { message: err?.message || String(err) });
       });
@@ -137,7 +144,7 @@ async function pumpOpenAIStream(openai, payload, res) {
       return;
     }
 
-    // Older builds may expose async iterator when using .stream()
+    // Async iterator fallback
     if (typeof stream[Symbol.asyncIterator] === "function") {
       for await (const event of stream) {
         sseEvent(res, event?.type || "message", event);
@@ -146,7 +153,8 @@ async function pumpOpenAIStream(openai, payload, res) {
       res.end();
       return;
     }
-    // As an extra fallback, try the web ReadableStream variant
+
+    // Web ReadableStream fallback if present
     if (typeof stream.toReadableStream === "function") {
       const readable = stream.toReadableStream();
       readable.on("data", (chunk) => res.write(chunk));
@@ -163,7 +171,7 @@ async function pumpOpenAIStream(openai, payload, res) {
     }
   }
 
-  // Final universal fallback: create(stream: true) and iterate
+  // Universal fallback: create(stream: true)
   const iter = await openai.responses.create({ ...payload, stream: true });
   for await (const event of iter) {
     sseEvent(res, event?.type || "message", event);
