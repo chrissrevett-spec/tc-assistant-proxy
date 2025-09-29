@@ -130,6 +130,16 @@
     .bubble-content tr:nth-child(even) td { background: #fcfcfc; }
 
     .sources { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444; }
+
+    /* ---- Added: confirmation chips/banners ---- */
+    .used-file-note, .upload-banner, .error-banner {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid #ddd; background: #FAFAFA;
+      margin-top: 6px;
+    }
+    .used-file-note { border-color: #4caf50; background: #f2fff2; color: #256f2a; }
+    .upload-banner { border-color: #4caf50; background: #f2fff2; color: #256f2a; }
+    .error-banner { border-color: #e57373; background: #fff5f5; color: #b71c1c; }
   </style>
 </head>
 <body>
@@ -330,190 +340,7 @@
 
       // Prepare request body (attach file if present for THIS turn)
       const body = { userMessage: prompt, history };
-      if (pendingUpload.file_id) {
-        body.upload_file_id = pendingUpload.file_id;
-        // clear selection after consuming it (no extra UI text)
-        pendingUpload = { file_id: null, filename: "" };
-        $fileInput.value = "";
-        $attachStatus.style.display = "none";
-        $attachStatus.className = "attach-status pending";
-        $attachIcon.textContent = "⌛";
-        $attachName.textContent = "";
-      }
 
-      const { content: aContent, bubble: aBubble } = createMsg("assistant", "Talking Care Navigator", true);
-      aContent.innerHTML = `<em>Thinking… ⏳</em>`;
-
-      let mdAccum = "";
-      const citations = [];
-      let sourcesAppended = false;
-      let assistantTurnSaved = false;
-
-      setStatus("Thinking… ⏳");
-      const ac = new AbortController(); currentAbort = ac;
-
-      let started = false;
-      const watchdog = setTimeout(() => {
-        if (!started) {
-          aContent.innerHTML = `<span class="error-banner">⚠️ No stream started — check connectivity or CORS settings.</span>`;
-          setStatus("");
-        }
-      }, 10000);
-
-      let r;
-      try {
-        r = await fetch(`${API_BASE}/api/assistant?stream=on`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
-          body: JSON.stringify(body),
-          signal: ac.signal
-        });
-      } catch (e) {
-        clearTimeout(watchdog);
-        aContent.innerHTML = `<span class="error-banner">⚠️ Request failed: ${escapeHtml(e?.message || e)}</span>`;
-        setStatus(""); currentAbort = null; return;
-      }
-
-      if (!r.ok || !r.body) {
-        clearTimeout(watchdog);
-        let err = `HTTP ${r.status}`;
-        try { err += ` ${await r.text()}`; } catch {}
-        aContent.innerHTML = `<span class="error-banner">⚠️ Stream failed: ${escapeHtml(err)}</span>`;
-        setStatus(""); currentAbort = null; return;
-      }
-
-      // Single reader (avoid locked-stream error)
-      const reader = r.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let buffer = "";
-
-      const flushBlocks = (chunk) => {
-        buffer += chunk;
-        const blocks = buffer.split(/\n\n/);
-        buffer = blocks.pop();
-        for (const block of blocks) {
-          const lines = block.split(/\n/);
-          let event = "message";
-          const dataLines = [];
-          for (const line of lines) {
-            if (!line) continue;
-            if (line.startsWith(":")) continue;
-            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
-            if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
-          }
-          const raw = dataLines.join("\n");
-          handleEvent(event, raw);
-        }
-      };
-
-      function handleEvent(event, raw) {
-        if (event === "start") return;
-
-        if (event === "info") {
-          // purely informational; ignore or surface if you want
-          return;
-        }
-
-        if (event === "error") {
-          try {
-            const obj = JSON.parse(raw);
-            aContent.innerHTML = `<span class="error-banner">⚠️ ${escapeHtml(JSON.stringify(obj))}</span>`;
-          } catch {
-            aContent.innerHTML = `<span class="error-banner">⚠️ ${escapeHtml(raw)}</span>`;
-          }
-          setStatus(""); return;
-        }
-
-        if (event === "done" || event === "response.completed") {
-          setStatus("");
-          renderMarkdown(mdAccum, aContent);
-          if (!sourcesAppended && citations.length) {
-            appendSources(aContent, citations);
-            sourcesAppended = true;
-          }
-          if (!assistantTurnSaved) {
-            history.push({ role: "assistant", content: mdAccum.trim() });
-            saveHistory();
-            assistantTurnSaved = true;
-          }
-          return;
-        }
-
-        // Text deltas (append raw, no rewrites)
-        if (event.endsWith(".delta")) {
-          let d; try { d = JSON.parse(raw); } catch { d = null; }
-          const deltaText =
-            (d && typeof d.delta === "string") ? d.delta :
-            (d && d.delta && Array.isArray(d.delta.content))
-              ? d.delta.content.map(c => (c.text && (c.type?.includes("output_text"))) ? c.text : "").join("")
-              : (typeof d?.text_delta === "string" ? d.text_delta : "");
-
-          if (deltaText) {
-            if (!started) { started = true; clearTimeout(watchdog); }
-            mdAccum += deltaText;
-            renderMarkdown(mdAccum, aContent);
-          }
-          return;
-        }
-
-        // Optional: capture citations if the API emits them
-        if (event.includes("annotation") || event.includes("citation")) {
-          let a;
-          try { const obj = JSON.parse(raw); a = obj?.annotation || obj?.data || obj; } catch { a = null; }
-          if (!a) return;
-          if (a.type === "file_citation" && a.file_id) {
-            citations.push({ kind: "file", id: a.file_id, label: a.filename || a.file_id });
-          } else if ((a.type === "web_citation" || a.url) && a.url) {
-            citations.push({ kind: "web", url: a.url, label: a.title || a.url });
-          }
-        }
-      }
-
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          if (chunk && !started) { started = true; clearTimeout(watchdog); }
-          flushBlocks(chunk);
-        }
-      } catch (e) {
-        aContent.insertAdjacentHTML("beforeend", `<p class="error-banner">⚠️ Stream error: ${escapeHtml(e?.message || String(e))}</p>`);
-      } finally {
-        clearTimeout(watchdog);
-        currentAbort = null;
-        setStatus("");
-      }
-    }
-
-    function escapeHtml(str) {
-      return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;" }[ch]));
-    }
-
-    // Events
-    document.getElementById("tc-ask-stream").addEventListener("click", () => {
-      const p = ($in.value || "").trim();
-      if (!p) return;
-      askStream(p);
-      $in.value = "";
-    });
-    $in.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("tc-ask-stream").click(); }
-    });
-    document.getElementById("tc-clear").addEventListener("click", () => {
-      if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
-      $chat.innerHTML = "";
-      $in.value = "";
-      setStatus("");
-      clearHistory();
-      $shell.classList.remove("chat-active");
-      pendingUpload = { file_id: null, filename: "" };
-      $fileInput.value = "";
-      $attachStatus.style.display = "none";
-      $attachStatus.className = "attach-status pending";
-      $attachIcon.textContent = "⌛";
-      $attachName.textContent = "";
-    });
-  </script>
-</body>
-</html>
+      // Capture-and-show upload confirmation
+      let usedFileId = null;
+      let usedFilename =
