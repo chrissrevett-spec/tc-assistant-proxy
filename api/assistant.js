@@ -1,6 +1,6 @@
 // /api/assistant.js — Vercel serverless (CommonJS)
 //
-// Clean version: no phrasing/censoring logic; relies solely on your System Instructions.
+// Clean version: relies solely on your System Instructions via the top-level `instructions` field.
 // - Upload turn: create temp vector store, attach uploaded file, wait until indexed, include as file_search
 // - No upload: optionally include library store if TCN_LIBRARY_VECTOR_STORE_ID is set
 // - Streams SSE to the client; on failure, falls back to non-stream and emits SSE events
@@ -10,13 +10,13 @@
 // - TCN_LIBRARY_VECTOR_STORE_ID     (optional; library store id)
 // - TCN_ALLOWED_ORIGIN              (optional; default https://www.talkingcare.uk)
 // - TCN_MODEL                       (optional; default gpt-4o-mini-2024-07-18)
-// - TCN_SYSTEM_INSTRUCTIONS         (optional; if set, sent as the single System message)
+// - TCN_SYSTEM_INSTRUCTIONS         (optional; if set, sent in top-level `instructions`)
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const LIBRARY_VS_ID = process.env.TCN_LIBRARY_VECTOR_STORE_ID || "";
 const ALLOWED_ORIGIN = process.env.TCN_ALLOWED_ORIGIN || "https://www.talkingcare.uk";
 const MODEL = process.env.TCN_MODEL || "gpt-4o-mini-2024-07-18";
-const SYS = process.env.TCN_SYSTEM_INSTRUCTIONS || ""; // your canonical system prompt text
+const SYS = process.env.TCN_SYSTEM_INSTRUCTIONS || ""; // canonical system prompt text
 
 function setCORS(res) {
   res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
@@ -140,18 +140,15 @@ module.exports = async (req, res) => {
       return res.end(JSON.stringify({ error: "Missing userMessage" }));
     }
 
-    // Build input (system ONLY if provided via env)
-    const input = [];
-    if (SYS && typeof SYS === "string" && SYS.trim().length) {
-      input.push({ role: "system", content: [{ type: "input_text", text: SYS }] });
-    }
-    input.push(...mapHistory(history || []));
-    input.push({ role: "user", content: [{ type: "input_text", text: userMessage }] });
+    // Build input — NO system role here; system instructions go into top-level `instructions`
+    const input = [
+      ...mapHistory(history || []),
+      { role: "user", content: [{ type: "input_text", text: userMessage }] }
+    ];
 
     // Tools (vector stores)
     const uploadTurn = !!upload_file_id;
     let tools = [];
-    let tool_choice = "auto";
     let tempVS = null;
 
     if (uploadTurn) {
@@ -172,8 +169,9 @@ module.exports = async (req, res) => {
     const payload = {
       model: MODEL,
       input,
+      instructions: SYS && SYS.trim() ? SYS : undefined, // ← top-level system instructions
       tools,
-      tool_choice,
+      tool_choice: tools.length ? "auto" : "none",
       temperature: 1,
       text: { format: { type: "text" }, verbosity: "medium" },
       top_p: 1,
