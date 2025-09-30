@@ -5,7 +5,7 @@
 // - Else: fall back to MODEL only (no system text in code)
 // - Upload turn: create temp vector store, attach uploaded file, wait until indexed, include as file_search
 // - No upload: optionally include library store if TCN_LIBRARY_VECTOR_STORE_ID is set
-// - Streams SSE to the client; on failure, falls back to non-stream and emits SSE events
+// - Streams SSE to the client; if no text deltas arrive, does a non-stream fallback and emits text before completing.
 //
 // Env:
 // - OPENAI_API_KEY                  (required)
@@ -27,7 +27,7 @@ function setCORS(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
-// ---- SSE helpers ----
+// ---- SSE helpers (our outgoing SSE to the widget) ----
 function sseHead(res) {
   if (res.headersSent) return;
   res.writeHead(200, {
@@ -142,7 +142,7 @@ module.exports = async (req, res) => {
       return res.end(JSON.stringify({ error: "Missing userMessage" }));
     }
 
-    // Build input (no system text here — Assistant holds instructions)
+    // Build input (Assistant holds instructions)
     const input = [
       ...mapHistory(history || []),
       { role: "user", content: [{ type: "input_text", text: userMessage }] }
@@ -169,11 +169,13 @@ module.exports = async (req, res) => {
       tools = [{ type: "file_search", vector_store_ids: [LIBRARY_VS_ID] }]; // site library (optional)
     }
 
-    // Payload: prefer Assistant (instructions/tools come from it); else fall back to model
     const payloadBase = {
       input,
       tools,
       tool_choice,
+      // nudge toward text output
+      modalities: ["text"],
+      text: { format: { type: "text" }, verbosity: "medium" },
       temperature: 1,
       top_p: 1,
       truncation: "disabled",
@@ -183,7 +185,7 @@ module.exports = async (req, res) => {
       ? { ...payloadBase, assistant_id: ASSISTANT_ID }
       : { ...payloadBase, model: MODEL };
 
-    // Non-stream
+    // Non-stream fast path
     if (!wantStream) {
       const r = await oi("/v1/responses", { method: "POST", body: payload, stream: false });
       const txt = await r.text();
@@ -195,7 +197,7 @@ module.exports = async (req, res) => {
       return res.end(txt);
     }
 
-    // Stream
+    // Streaming with inspection: parse upstream SSE so we can detect text deltas.
     if (!res.headersSent) {
       sseHead(res);
       sseEvent(res, "start", { ok: true });
@@ -229,19 +231,109 @@ module.exports = async (req, res) => {
       return sseDone(res);
     }
 
-    // Pipe SSE through
+    // Parse upstream SSE blocks and re-emit them, tracking whether any text delta arrived.
     const reader = streamResp.body.getReader();
     const decoder = new TextDecoder();
+
+    let buf = "";
+    let sawTextDelta = false;
+    let completedEmittedUpstream = false;
+
+    async function emitFallbackIfNeeded() {
+      if (sawTextDelta) return;
+      // Non-stream fallback to fetch the final text
+      const r = await oi("/v1/responses", { method: "POST", body: payload, stream: false });
+      const txt = await r.text();
+      if (!r.ok) {
+        sseEvent(res, "error", { message: `Fallback fetch failed: ${txt}` });
+        return;
+      }
+      try {
+        const obj = JSON.parse(txt);
+        const out = (obj?.output || []).find(o => o.type === "message");
+        const text = (out?.content || []).map(c => c.type === "output_text" ? (c.text || "") : "").join("");
+        if (text && text.trim()) {
+          sseEvent(res, "response.output_text.delta", { delta: text });
+          sawTextDelta = true;
+        }
+      } catch (e) {
+        sseEvent(res, "error", { message: `Fallback parse error: ${String(e?.message || e)}` });
+      }
+    }
+
+    function handleSSEBlock(block) {
+      // Parse a single SSE block into {event, data}
+      const lines = block.split(/\n/);
+      let event = "message";
+      const dataLines = [];
+      for (const line of lines) {
+        if (!line) continue;
+        if (line.startsWith(":")) continue;
+        if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
+        if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
+      }
+      const raw = dataLines.join("\n");
+
+      // Track text deltas; forward everything except hold 'response.completed' until we know if fallback is needed
+      if (event.endsWith(".delta")) {
+        // We can try parse to check it's a text delta, but simpler: mark when event is exactly output_text
+        if (event === "response.output_text.delta") {
+          sawTextDelta = true;
+        }
+        // Re-emit upstream delta
+        try {
+          const parsed = JSON.parse(raw);
+          sseEvent(res, event, parsed);
+        } catch {
+          sseEvent(res, event, raw);
+        }
+        return;
+      }
+
+      if (event === "response.completed") {
+        completedEmittedUpstream = true;
+        // We'll emit this later after optional fallback.
+        return;
+      }
+
+      // Forward other events transparently
+      try {
+        const parsed = JSON.parse(raw);
+        sseEvent(res, event, parsed);
+      } catch {
+        sseEvent(res, event, raw);
+      }
+    }
+
     try {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        if (value) res.write(decoder.decode(value));
+        if (!value) continue;
+
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split(/\n\n/);
+        buf = parts.pop(); // keep tail
+
+        for (const block of parts) {
+          if (!block.trim()) continue;
+          handleSSEBlock(block);
+        }
       }
     } catch (e) {
       sseEvent(res, "error", { message: `Stream error: ${String(e?.message || e)}` });
     } finally {
-      sseEvent(res, "response.completed", { done: true });
+      // If upstream completed but we never saw any text, fetch fallback
+      if (!sawTextDelta) {
+        try { await emitFallbackIfNeeded(); } catch {}
+      }
+      // Now we can emit completed & close
+      if (completedEmittedUpstream === false) {
+        // ensure the client gets a completion signal even if upstream didn't send it after our fallback
+        sseEvent(res, "response.completed", { done: true });
+      } else {
+        sseEvent(res, "response.completed", { done: true });
+      }
       sseDone(res);
     }
   } catch (err) {
