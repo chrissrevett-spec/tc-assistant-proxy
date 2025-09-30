@@ -1,22 +1,24 @@
 // /api/assistant.js — Vercel serverless (CommonJS)
 //
-// Clean version: relies solely on your System Instructions via the top-level `instructions` field.
-// - Upload turn: create temp vector store, attach uploaded file, wait until indexed, include as file_search
-// - No upload: optionally include library store if TCN_LIBRARY_VECTOR_STORE_ID is set
-// - Streams SSE to the client; on failure, falls back to non-stream and emits SSE events
+// Uses your System Instructions from env in TWO places for reliability:
+//   1) top-level `instructions`
+//   2) a first message with role: "system"
+// Upload turn: temp vector store -> wait indexed -> include as file_search
+// No upload: include library store if TCN_LIBRARY_VECTOR_STORE_ID is set
+// Streams SSE to client; falls back to non-stream on error
 //
 // Env:
 // - OPENAI_API_KEY                  (required)
 // - TCN_LIBRARY_VECTOR_STORE_ID     (optional; library store id)
 // - TCN_ALLOWED_ORIGIN              (optional; default https://www.talkingcare.uk)
 // - TCN_MODEL                       (optional; default gpt-4o-mini-2024-07-18)
-// - TCN_SYSTEM_INSTRUCTIONS         (optional; if set, sent in top-level `instructions`)
+// - TCN_SYSTEM_INSTRUCTIONS         (optional; system prompt text)
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const LIBRARY_VS_ID = process.env.TCN_LIBRARY_VECTOR_STORE_ID || "";
 const ALLOWED_ORIGIN = process.env.TCN_ALLOWED_ORIGIN || "https://www.talkingcare.uk";
 const MODEL = process.env.TCN_MODEL || "gpt-4o-mini-2024-07-18";
-const SYS = process.env.TCN_SYSTEM_INSTRUCTIONS || ""; // canonical system prompt text
+const SYS = (process.env.TCN_SYSTEM_INSTRUCTIONS || "").trim();
 
 function setCORS(res) {
   res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
@@ -126,7 +128,7 @@ module.exports = async (req, res) => {
       wantStream = u.searchParams.get("stream") === "on";
     } catch {}
 
-    // Parse body
+    // Parse body (JSON once)
     const bodyBuf = await new Promise((resolve, reject) => {
       const chunks = [];
       req.on("data", c => chunks.push(c));
@@ -140,11 +142,13 @@ module.exports = async (req, res) => {
       return res.end(JSON.stringify({ error: "Missing userMessage" }));
     }
 
-    // Build input — NO system role here; system instructions go into top-level `instructions`
-    const input = [
-      ...mapHistory(history || []),
-      { role: "user", content: [{ type: "input_text", text: userMessage }] }
-    ];
+    // Build input; include a SYSTEM message explicitly (plus top-level instructions below)
+    const input = [];
+    if (SYS) {
+      input.push({ role: "system", content: [{ type: "input_text", text: SYS }] });
+    }
+    input.push(...mapHistory(history || []));
+    input.push({ role: "user", content: [{ type: "input_text", text: userMessage }] });
 
     // Tools (vector stores)
     const uploadTurn = !!upload_file_id;
@@ -154,22 +158,29 @@ module.exports = async (req, res) => {
     if (uploadTurn) {
       tempVS = await createTempVS("TCN temp (this turn)");
       const vsFileId = await addFileToVS(tempVS, upload_file_id);
+
       if (wantStream) {
         sseHead(res);
         sseEvent(res, "start", { ok: true });
         sseEvent(res, "info", { note: "temp_vector_store_created", id: tempVS });
       }
+
       await waitVSFileReady(tempVS, vsFileId);
-      if (wantStream) sseEvent(res, "info", { note: "temp_vector_store_ready", id: tempVS });
+
+      if (wantStream) {
+        sseEvent(res, "info", { note: "temp_vector_store_ready", id: tempVS });
+      }
+
       tools = [{ type: "file_search", vector_store_ids: [tempVS] }];
     } else if (LIBRARY_VS_ID) {
       tools = [{ type: "file_search", vector_store_ids: [LIBRARY_VS_ID] }];
     }
 
+    // Payload: includes top-level `instructions` too
     const payload = {
       model: MODEL,
       input,
-      instructions: SYS && SYS.trim() ? SYS : undefined, // ← top-level system instructions
+      instructions: SYS || undefined, // top-level system instructions
       tools,
       tool_choice: tools.length ? "auto" : "none",
       temperature: 1,
@@ -178,6 +189,20 @@ module.exports = async (req, res) => {
       truncation: "disabled",
       store: true
     };
+
+    // If streaming, send a silent config ping so you can confirm env wiring (widget ignores `info`)
+    if (wantStream && !res.headersSent) {
+      sseHead(res);
+      sseEvent(res, "start", { ok: true });
+      sseEvent(res, "info", {
+        note: "config",
+        model: MODEL,
+        has_sys: Boolean(SYS),
+        sys_len: SYS.length,
+        tools_count: tools.length,
+        has_library: Boolean(LIBRARY_VS_ID)
+      });
+    }
 
     // Non-stream
     if (!wantStream) {
@@ -192,11 +217,6 @@ module.exports = async (req, res) => {
     }
 
     // Stream
-    if (!res.headersSent) {
-      sseHead(res);
-      sseEvent(res, "start", { ok: true });
-    }
-
     let streamResp;
     try {
       streamResp = await oi("/v1/responses", { method: "POST", body: { ...payload, stream: true }, stream: true });
@@ -235,7 +255,6 @@ module.exports = async (req, res) => {
         if (value) res.write(decoder.decode(value));
       }
     } catch (e) {
-      // Finish gracefully
       sseEvent(res, "error", { message: `Stream error: ${String(e?.message || e)}` });
     } finally {
       sseEvent(res, "response.completed", { done: true });
