@@ -1,11 +1,8 @@
 // /api/assistant.js — Vercel serverless (CommonJS)
 //
-// Adds a small dynamic “policy shim” before your Assistant's instructions:
-// - UK English
-// - Identity & creator lines
-// - Meta/greeting behaviour (no file talk)
-// - Upload awareness for THIS turn (never claim uploads when none)
-// The shim states it overrides conflicts. Everything else remains as-is.
+// Adds:
+// 1) Dynamic policy shim (UK English, identity, meta rules, upload wording).
+// 2) Server-side INTENT GATE for greetings/meta so we never mention docs on those turns.
 //
 // Env:
 // - OPENAI_API_KEY               (required)
@@ -126,7 +123,7 @@ function buildPolicyShim(uploadTurn) {
     "- If asked who you are: start with “I am Talking Care Navigator…”",
     "- Only if specifically asked about technology: you may add “I use OpenAI’s models under the hood.”",
     "",
-    "Meta/greetings (e.g., hi/hello/how are you?/who are you?/who created you?/what can you do?):",
+    "Meta/greetings (e.g., hi/hello/how are you?/who are you?/who created you?/what can you do?/what is your purpose?):",
     "- Do NOT run search or cite sources.",
     "- Do NOT mention documents, files, uploads, a library, sources, or tooling.",
     "- Keep it brief and helpful. Preferred greeting: “Hello! How may I assist you today?”",
@@ -135,6 +132,54 @@ function buildPolicyShim(uploadTurn) {
     "- If NO: you must NOT refer to any uploads, files or documents being uploaded.",
     "- If YES: if you need to reference it, call it “the attached document” (never “your upload” / “file you uploaded”).",
   ].join("\n");
+}
+
+// ---- Intent gate (server-side, before OpenAI)
+function classifyIntent(text) {
+  const t = (text || "").trim().toLowerCase();
+  if (!t) return null;
+
+  // greetings / small talk
+  if (/^(hi|hello|hey|hiya|howdy|yo|good (morning|afternoon|evening))\b/.test(t)) return "greeting";
+  if (/^(how(('|’)?s)? it going|how are (you|u)|you ok\??)/.test(t)) return "greeting";
+
+  // meta / identity / creator / purpose / capability
+  if (/\bwho (are|r) (you|u)\b/.test(t)) return "who";
+  if (/\bwho (made|created|built) (you|u)\b|\bwho owns you\b|\bowner\b/.test(t)) return "creator";
+  if (/\bwhat (is|’s|'s) your purpose\b|\bwhy (were you created|do you exist)\b/.test(t)) return "purpose";
+  if (/\bwhat can (you|u) do\b|\bhow can (you|u) help\b|\bexamples? of (how|what) (you|u) can do\b/.test(t)) return "capability";
+
+  // process / how to use
+  if (/\bhow (do|to) (i|we) (use|work with) (you|this)\b|\bcan i upload\b|\bhow to upload\b/.test(t)) return "process";
+
+  return null;
+}
+
+function cannedReply(kind) {
+  // All UK English; no doc mentions.
+  switch (kind) {
+    case "greeting":
+      return "Hello! How may I assist you today?";
+    case "who":
+      return "I am Talking Care Navigator, here to help with adult social care in England. How may I assist you today?";
+    case "creator":
+      return "I was created by Chris Revett at Talking Care. How may I assist you today?";
+    case "purpose":
+      return "My purpose is to provide practical, regulation-aligned guidance for adult social care in England. How may I assist you today?";
+    case "capability":
+      return [
+        "I can help with:",
+        "• Clear explanations of regulations and guidance (England).",
+        "• Practical checklists and step-by-step actions.",
+        "• Summaries and plain-English clarifications.",
+        "• Drafting notes for audits, supervision and everyday good practice.",
+        "• Signposting when specialist or legal advice is needed.",
+      ].join("\n");
+    case "process":
+      return "You can ask questions in plain English. If needed, you can attach a document and I’ll base my answer on the attached document for that turn.";
+    default:
+      return null;
+  }
 }
 
 module.exports = async (req, res) => {
@@ -162,6 +207,38 @@ module.exports = async (req, res) => {
     if (!userMessage || typeof userMessage !== "string") {
       res.statusCode = 400; return res.end(JSON.stringify({ error: "Missing userMessage" }));
     }
+
+    // ---------- INTENT GATE: intercept meta/greetings/process ----------
+    const intent = classifyIntent(userMessage);
+    if (intent) {
+      const reply = cannedReply(intent);
+      if (wantStream) {
+        sseHead(res);
+        sseEvent(res, "start", { ok: true });
+        sseEvent(res, "info", { note: "intent_gate", kind: intent });
+        sseEvent(res, "response.output_text.delta", { delta: reply });
+        sseEvent(res, "response.completed", { done: true });
+        sseDone(res);
+        return;
+      } else {
+        // Minimal non-stream JSON shaped like /v1/responses
+        res.setHeader("Content-Type", "application/json");
+        return res.end(JSON.stringify({
+          id: "resp_local_intent_gate",
+          object: "response",
+          status: "completed",
+          model: FALLBACK_MODEL,
+          output: [{
+            id: "msg_local",
+            type: "message",
+            status: "completed",
+            role: "assistant",
+            content: [{ type: "output_text", text: reply }]
+          }]
+        }));
+      }
+    }
+    // -------------------------------------------------------------------
 
     // --- Fetch Assistant + resolve model/instructions
     let assistant = null, asstText = "", resolvedModel = FALLBACK_MODEL;
