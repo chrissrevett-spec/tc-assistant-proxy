@@ -1,12 +1,10 @@
 // /api/assistant.js — Vercel serverless (CommonJS)
 //
-// Intent gate + tool gating + careful streaming sanitizer:
+// Intent gate + tool gating + streaming sanitizer + tool usage telemetry
 // - Meta/low-signal => canned UK-English reply. NO tools.
-// - Content => fetch Assistant(v2), merge shim + assistant instructions, tools only when appropriate.
-// - Streaming sanitizer:
-//     * Rewrites "files you've uploaded" / inventory chatter.
-//     * Does NOT touch "Sources:" blocks (citations remain).
-//     * Never enumerates filenames from the store.
+// - Content => Assistant(v2) + shim + library tool (and temp VS on upload turn).
+// - Sanitizer preserves "Sources:" blocks across chunks, suppresses upload-inventory chatter only.
+// - Emits SSE "info" -> { note: "tools_summary", used_file_search, library_candidate, upload_turn }.
 //
 // Env:
 // - OPENAI_API_KEY               (required)
@@ -124,19 +122,6 @@ function isLowSignal(message) {
   return false;
 }
 
-// ---- Content-ish detector (governs tool inclusion)
-// IMPORTANT: no longer treats "any question mark" as content — only domain signals
-function isContentish(message) {
-  const t = (message || "").toLowerCase();
-  const keywords = [
-    "regulation","care act","statutory guidance","cqc","quality statements","kloe",
-    "dols","mca","policy","procedure","audit","checklist","safeguard","inspection",
-    "compliance","risk assessment","capacity","duty of candour","provider","registered manager",
-    "reg ","reg.","section ","schedule "
-  ];
-  return keywords.some(k => t.includes(k));
-}
-
 // ---- Intent gate (server-side)
 function classifyIntent(text) {
   const t = (text || "").trim().toLowerCase();
@@ -240,23 +225,20 @@ function buildPolicyShim(uploadTurn) {
     "- If NO: you must NOT refer to uploads, files or documents being uploaded.",
     "- If YES and you need to reference it: call it “the attached document” (never “your upload” / “file you uploaded”).",
     "",
-    "Never list or enumerate filenames or document titles from a store/inventory. Provide citations only when relevant to a content answer.",
+    "When you use the Talking Care Navigator Library or an attached document to answer, add a final section titled “Sources:” and list the document titles you relied on. Once you start a “Sources:” section, do not remove it.",
+    "Never list or enumerate filenames as an inventory. Provide only the minimal citations needed for the answer.",
   ].join("\n");
 }
 
-// ---- Streaming sanitizer with tiny state (per request)
+// ---- Streaming sanitizer with state (per request)
 function makeSanitizer({ uploadTurn }) {
-  // state lives across streamed chunks
-  const state = { suppressList: false };
+  const state = { suppressList: false, inSources: false };
 
   function neutraliseUploadPhrasing(txt) {
-    // broad neutralisation of "files you've uploaded" & friends
     let s = txt;
 
-    // normalise curly quotes: we’ll match both variants
     const up = "(?:you(?:'|’)?ve|you have) uploaded";
 
-    // global rewrites when we must not talk about uploads
     if (!uploadTurn) {
       s = s.replace(new RegExp(`\\b(files|documents)\\s+${up}\\b`, "gi"), "documents");
       s = s.replace(new RegExp(`\\b${up}\\b`, "gi"), "you add an attached document for this turn");
@@ -268,32 +250,41 @@ function makeSanitizer({ uploadTurn }) {
       s = s.replace(/\bfiles\s+you\s+uploaded\b/gi, "documents");
     }
 
-    // trigger inventory suppression when model starts listing uploads
+    // detect start of inventory phrasing
     if (/\b(here (are|is) (the )?(files|documents).*(uploaded|attached)|you (?:have|(?:'|’)??ve) uploaded)\b/i.test(s)) {
       state.suppressList = true;
+    }
+
+    // detect entering a Sources block in this delta
+    if (/^\s*sources?\s*:\s*$/im.test(s) || /\bSources:\s*$/i.test(s)) {
+      state.inSources = true;
+      state.suppressList = false; // ensure no suppression inside Sources
+    }
+    if (/^\s*sources?\s*:/im.test(s)) {
+      state.inSources = true;
+      state.suppressList = false;
     }
 
     return s;
   }
 
   function scrubFilenameLines(s) {
+    if (state.inSources) return s; // never scrub inside citations
     if (!state.suppressList) return s;
-    const lines = s.split("\n");
 
+    const lines = s.split("\n");
     for (let i = 0; i < lines.length; i++) {
       const L = lines[i];
 
-      // don't touch citations blocks
-      if (/^\s*sources?\s*:/i.test(L)) { state.suppressList = false; continue; }
-      if (L.toLowerCase().includes("source:")) { state.suppressList = false; continue; }
+      if (/^\s*sources?\s*:/i.test(L)) { state.inSources = true; state.suppressList = false; continue; }
 
-      // replace obvious filename lines (with common extensions) ONLY while suppressList is active
-      if (/[^\n]*\.(pdf|docx?|pptx?|xlsx?|xls|csv)\b/i.test(L)) {
+      // typical filename bullets
+      if (/^[\s\-\*\•\u2022]*.+\.(pdf|docx?|pptx?|xlsx?|xls|csv)\b/i.test(L)) {
         lines[i] = "• [document omitted]";
         continue;
       }
 
-      // end suppression when a plain sentence appears
+      // stop suppression at sentence end or blank line
       if (/[.!?]\s*$/.test(L) || /^\s*$/.test(L)) {
         state.suppressList = false;
       }
@@ -303,9 +294,8 @@ function makeSanitizer({ uploadTurn }) {
 
   return function sanitizeDeltaText(deltaText) {
     if (!deltaText) return deltaText;
-
-    // Never touch explicit Sources blocks (so citations remain intact)
-    if (/^\s*sources?\s*:/im.test(deltaText)) return deltaText;
+    // If this chunk itself starts a Sources header, mark state and pass through untouched
+    if (/^\s*sources?\s*:/im.test(deltaText)) { state.inSources = true; return deltaText; }
 
     let s = deltaText;
     s = neutraliseUploadPhrasing(s);
@@ -345,7 +335,6 @@ module.exports = async (req, res) => {
     // ---- INTENT GATE
     const intent = classifyIntent(userMessage);
     const canned = intent ? cannedReply(intent) : null;
-    const contentLikely = !intent && isContentish(userMessage); // tools only when domain-y
 
     if (canned) {
       if (wantStream) {
@@ -397,18 +386,22 @@ module.exports = async (req, res) => {
     input.push(...mapHistory(history || []));
     input.push({ role: "user", content: [{ type: "input_text", text: userMessage }] });
 
-    // Decide whether to include tools
+    // Tool wiring:
+    // - For any non-meta content, include Library (if configured).
+    // - If there's an upload this turn, use a temp VS for that file.
     let tools = [];
     let tempVS = null;
 
-    if (uploadTurn && contentLikely) {
+    const libraryCandidate = !!LIBRARY_VS_ID; // report for telemetry
+    if (uploadTurn) {
       tempVS = await createTempVS("TCN temp (this turn)");
       const vsFileId = await addFileToVS(tempVS, upload_file_id);
       if (wantStream) { if (!res.headersSent) sseHead(res); sseEvent(res, "start", { ok: true }); sseEvent(res, "info", { note: "temp_vector_store_created", id: tempVS }); }
       await waitVSFileReady(tempVS, vsFileId);
       if (wantStream) sseEvent(res, "info", { note: "temp_vector_store_ready", id: tempVS });
       tools = [{ type: "file_search", vector_store_ids: [tempVS] }];
-    } else if (!uploadTurn && contentLikely && LIBRARY_VS_ID) {
+    } else if (LIBRARY_VS_ID) {
+      // non-meta => include library by default to ground answers
       tools = [{ type: "file_search", vector_store_ids: [LIBRARY_VS_ID] }];
       if (wantStream && !res.headersSent) { sseHead(res); sseEvent(res, "start", { ok: true }); }
     } else {
@@ -437,12 +430,13 @@ module.exports = async (req, res) => {
       model: resolvedModel,
       tools_enabled: tools.length > 0,
       upload_turn: uploadTurn,
-      content_likely: contentLikely,
+      library_candidate: libraryCandidate,
       sanitizer: true
     });
 
-    // ---- Request to OpenAI
+    // ---- Request to OpenAI + stream with sanitizer & telemetry
     const sanitizer = makeSanitizer({ uploadTurn });
+    let usedFileSearch = false;
 
     let streamResp;
     try {
@@ -459,6 +453,7 @@ module.exports = async (req, res) => {
         text = sanitizer(text);
         sseEvent(res, "response.output_text.delta", { delta: text || "" });
       } catch {}
+      sseEvent(res, "info", { note: "tools_summary", used_file_search: false, library_candidate: libraryCandidate, upload_turn: uploadTurn });
       sseEvent(res, "response.completed", { done: true });
       return sseDone(res);
     }
@@ -469,7 +464,7 @@ module.exports = async (req, res) => {
       return sseDone(res);
     }
 
-    // ---- Proxy SSE with filtering of text deltas only
+    // Proxy SSE with filtering of *text* deltas only; also detect tool use
     const reader = streamResp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -501,7 +496,10 @@ module.exports = async (req, res) => {
           }
           const raw = dataLines.join("\n");
 
-          // Intercept only text deltas to sanitize upload phrasing; pass everything else as-is
+          // crude detection of file_search tool usage for telemetry
+          if (/tool/i.test(event) && /file_search/i.test(raw)) usedFileSearch = true;
+          if (/file_search/i.test(raw) && /(tool_call|tool_result)/i.test(event)) usedFileSearch = true;
+
           if (event.endsWith(".delta")) {
             let obj;
             try { obj = JSON.parse(raw); } catch { obj = null; }
@@ -526,13 +524,15 @@ module.exports = async (req, res) => {
               forward(event, raw);
             }
           } else {
-            forward(event, raw); // keep citations & other events intact
+            forward(event, raw); // forward non-text events (citations, tool calls, etc.) untouched
           }
         }
       }
     } catch (e) {
       sseEvent(res, "error", { message: `Stream error: ${String(e?.message || e)}` });
     } finally {
+      // Emit a one-line telemetry summary you can watch in DevTools
+      sseEvent(res, "info", { note: "tools_summary", used_file_search: !!usedFileSearch, library_candidate: libraryCandidate, upload_turn: uploadTurn });
       sseEvent(res, "response.completed", { done: true });
       sseDone(res);
     }
