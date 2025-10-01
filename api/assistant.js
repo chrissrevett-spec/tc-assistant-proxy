@@ -1,10 +1,10 @@
 // /api/assistant.js — Vercel serverless (CommonJS)
 //
-// Intent gate + low-signal guard + tool gating:
-// - Nonsense/low-signal => neutral greeting (“How may I assist you today?”)
-// - Greetings/identity/capability/process/privacy/comparisons => canned replies (UK English), NO tools, NO OpenAI call
-// - Content questions => fetch Assistant (v2), build system (shim + assistant), and only attach tools if content-ish or upload this turn
-// - Never list or inventory files (reinforced in shim + by not giving tools for meta/nonsense)
+// Intent gate + tool gating + tiny streaming sanitizer:
+// - Meta/low-signal => canned UK-English reply. NO tools.
+// - Content => fetch Assistant(v2), build system (shim + assistant), attach tools only when appropriate.
+// - Streaming sanitizer removes ONLY banned upload phrasing and filename inventories,
+//   never touching citations or other content.
 //
 // Env:
 // - OPENAI_API_KEY               (required)
@@ -115,28 +115,24 @@ function mapHistory(history = []) {
 function isLowSignal(message) {
   const t = (message || "").trim();
   if (!t) return true;
-  // Only punctuation / slashes / symbols
   if (/^[\s\/\?\.\!\,\-\_\|\*\+\=\(\)\[\]\{\}:;~`'"]+$/.test(t)) return true;
-  // Very few letters (<= 2) after stripping non-letters
   const letters = (t.replace(/[^a-zA-Z]/g, "") || "");
   if (letters.length <= 2) return true;
-  // Long repeated single char (e.g., "waaaaaa")
-  if (/(.)\1{3,}/.test(t)) return true;
+  if (/(.)\1{3,}/.test(t)) return true; // waaa, ppppp...
   return false;
 }
 
 // ---- Content-ish detector (governs tool inclusion)
 function isContentish(message) {
   const t = (message || "").toLowerCase();
+  // Domain-y words only; avoid generic “is this good?”
   const keywords = [
-    "regulation", "reg ", "reg.", "care act", "statutory guidance", "cqc", "quality statements",
-    "kloe", "dols", "mca", "policy", "procedure", "audit", "checklist", "summary", "summarise",
-    "explain", "what does", "evidence", "section", "schedule", "safeguard", "best practice",
-    "require", "compliance", "inspection", "guidance", "citations", "source", "according"
+    "regulation","care act","statutory guidance","cqc","quality statements","kloe",
+    "dols","mca","policy","procedure","audit","checklist","safeguard","inspection",
+    "compliance","risk assessment","capacity","duty of candour","provider","registered manager",
+    "reg ", "reg.", "section ", "schedule "
   ];
-  if (keywords.some(k => t.includes(k))) return true;
-  if (/\?$/.test(t)) return true; // questions are often content-seeking
-  return false;
+  return keywords.some(k => t.includes(k)) || /\?$/.test(t);
 }
 
 // ---- Intent gate (server-side)
@@ -148,7 +144,6 @@ function classifyIntent(text) {
   // greetings / small talk
   if (/^(hi|hello|hey|hiya|howdy|yo|good (morning|afternoon|evening))\b/.test(t)) return "greeting";
   if (/(are|r)\s*(you|u)\s*ok(ay)?\??$/.test(t)) return "greeting";
-  if (/\b(you|u)\s*ok(ay)?\??$/.test(t)) return "greeting";
   if (/\bhow('?|’)?s it going\b|\bhow are (you|u)\b/.test(t)) return "greeting";
 
   // identity / creator / purpose / capability
@@ -176,6 +171,9 @@ function classifyIntent(text) {
 
   // “document store / library contents” inventory questions
   if (/\b(document|doc) store\b|\bwhat (files|documents).* (do you have|are in (your|the) (library|store))\b/.test(t)) return "inventory";
+
+  // appearance/meta
+  if (/\bwhat do you look like\b|\bappearance\b/.test(t)) return "appearance";
 
   return null; // treat as potential content
 }
@@ -209,6 +207,8 @@ function cannedReply(kind) {
       return "Understood — I’ll only refer to an attached document if you add one. How can I help today?";
     case "inventory":
       return "I don’t list or inventory documents. If you add an attached document for this turn, I can refer to it, and I can also use the Talking Care Navigator Library where appropriate. How can I help today?";
+    case "appearance":
+      return "I don’t have a physical appearance. How may I assist you today?";
     default:
       return null;
   }
@@ -234,11 +234,34 @@ function buildPolicyShim(uploadTurn) {
     "- Keep it brief and helpful. Preferred greeting: “Hello! How may I assist you today?”",
     "",
     `Upload for THIS user turn: ${uploadTurn ? "YES" : "NO"}.`,
-    "- If NO: you must NOT refer to any uploads, files or documents being uploaded.",
+    "- If NO: you must NOT refer to uploads, files or documents being uploaded.",
     "- If YES and you need to reference it: call it “the attached document” (never “your upload” / “file you uploaded”).",
     "",
     "Never list or enumerate filenames or document titles. If asked to list or inventory documents, say: “I don’t list or inventory documents…” and continue helpfully.",
   ].join("\n");
+}
+
+// ---- Streaming sanitizer: blocks only upload-chatter and file lists
+function sanitizeDeltaText(deltaText, { uploadTurn }) {
+  if (!deltaText) return deltaText;
+
+  // Always ban filename inventories (bullet/numbered lines with common extensions)
+  deltaText = deltaText.replace(
+    /(^|\n)[ \t]*[-*•\u2022]?[ \t]*[^\n]*\.(pdf|docx?|pptx?|xlsx?|xls|csv)\b.*(?=\n|$)/gi,
+    (m, p1) => `${p1}• [document omitted]`
+  );
+
+  // If no upload this turn, rewrite upload phrasing to neutral terms
+  if (!uploadTurn) {
+    deltaText = deltaText
+      .replace(/\b(files|documents)\s+(you(?:'|’)??ve|you have)\s+uploaded\b/gi, "documents")
+      .replace(/\b(I|we)\s+(?:see|can see)\s+(?:you(?:'|’)??ve|you have)\s+uploaded\b/gi, "If you attach a document for this turn, I can refer to it")
+      .replace(/\byou(?:'|’)??ve uploaded\b/gi, "you add an attached document")
+      .replace(/\byou have uploaded\b/gi, "you add an attached document")
+      .replace(/\bhere (are|is) (the )?(files|documents) (you(?:'|’)??ve|you have) uploaded\b/gi, "I don’t list or inventory documents");
+  }
+
+  return deltaText;
 }
 
 module.exports = async (req, res) => {
@@ -269,10 +292,10 @@ module.exports = async (req, res) => {
 
     const uploadTurn = !!upload_file_id;
 
-    // ---- INTENT GATE: canned replies for meta/greetings/nonsense/etc.
+    // ---- INTENT GATE
     const intent = classifyIntent(userMessage);
-    const isMeta = !!intent;
     const canned = intent ? cannedReply(intent) : null;
+    const contentLikely = !intent && isContentish(userMessage);
 
     if (canned) {
       if (wantStream) {
@@ -282,6 +305,7 @@ module.exports = async (req, res) => {
         sseEvent(res, "response.completed", { done: true });
         return sseDone(res);
       } else {
+        res.setHeader("Content-Type", "application/json");
         return res.end(JSON.stringify({
           id: `resp_${Math.random().toString(36).slice(2)}`,
           object: "response",
@@ -323,16 +347,14 @@ module.exports = async (req, res) => {
     input.push(...mapHistory(history || []));
     input.push({ role: "user", content: [{ type: "input_text", text: userMessage }] });
 
-    // Decide whether to include tools (file_search / library)
-    // Only for clearly content-ish requests or when there's an upload this turn.
-    const contentLikely = isContentish(userMessage);
+    // Decide whether to include tools
     let tools = [];
     let tempVS = null;
 
     if (uploadTurn && contentLikely) {
       tempVS = await createTempVS("TCN temp (this turn)");
       const vsFileId = await addFileToVS(tempVS, upload_file_id);
-      if (wantStream) { sseHead(res); sseEvent(res, "start", { ok: true }); sseEvent(res, "info", { note: "temp_vector_store_created", id: tempVS }); }
+      if (wantStream) { if (!res.headersSent) sseHead(res); sseEvent(res, "start", { ok: true }); sseEvent(res, "info", { note: "temp_vector_store_created", id: tempVS }); }
       await waitVSFileReady(tempVS, vsFileId);
       if (wantStream) sseEvent(res, "info", { note: "temp_vector_store_ready", id: tempVS });
       tools = [{ type: "file_search", vector_store_ids: [tempVS] }];
@@ -340,7 +362,6 @@ module.exports = async (req, res) => {
       tools = [{ type: "file_search", vector_store_ids: [LIBRARY_VS_ID] }];
       if (wantStream && !res.headersSent) { sseHead(res); sseEvent(res, "start", { ok: true }); }
     } else {
-      // No tools for ambiguous/non-content queries — prevents any file chatter/inventory
       if (wantStream && !res.headersSent) { sseHead(res); sseEvent(res, "start", { ok: true }); }
     }
 
@@ -349,7 +370,7 @@ module.exports = async (req, res) => {
       input,
       tools,
       tool_choice: tools.length ? "auto" : "none",
-      temperature: 0.5, // tighter compliance
+      temperature: 0.5,
       text: { format: { type: "text" }, verbosity: "medium" },
       top_p: 1,
       truncation: "disabled",
@@ -366,30 +387,24 @@ module.exports = async (req, res) => {
       model: resolvedModel,
       tools_enabled: tools.length > 0,
       upload_turn: uploadTurn,
-      content_likely: contentLikely
+      content_likely: contentLikely,
+      sanitizer: true
     });
 
-    // Non-stream
-    if (!wantStream) {
-      const r = await oi("/v1/responses", { method: "POST", body: payload, stream: false });
-      const txt = await r.text();
-      if (!r.ok) { res.statusCode = r.status; return res.end(JSON.stringify({ error: `OpenAI request failed: ${txt}` })); }
-      res.setHeader("Content-Type", "application/json");
-      return res.end(txt);
-    }
-
-    // Stream
+    // ---- Request to OpenAI
     let streamResp;
     try {
       streamResp = await oi("/v1/responses", { method: "POST", body: { ...payload, stream: true }, stream: true });
     } catch (e) {
+      // Fallback to non-stream and emit via SSE
       const r2 = await oi("/v1/responses", { method: "POST", body: payload, stream: false });
       const txt2 = await r2.text();
       if (!r2.ok) { sseEvent(res, "error", { message: `OpenAI stream init failed: ${String(e?.message || e)}; fallback also failed: ${txt2}` }); sseDone(res); return; }
       try {
         const obj = JSON.parse(txt2);
         const out = (obj?.output || []).find(o => o.type === "message");
-        const text = (out?.content || []).map(c => c.type === "output_text" ? (c.text || "") : "").join("");
+        let text = (out?.content || []).map(c => c.type === "output_text" ? (c.text || "") : "").join("");
+        text = sanitizeDeltaText(text, { uploadTurn });
         sseEvent(res, "response.output_text.delta", { delta: text || "" });
       } catch {}
       sseEvent(res, "response.completed", { done: true });
@@ -402,13 +417,68 @@ module.exports = async (req, res) => {
       return sseDone(res);
     }
 
+    // ---- Proxy SSE with filtering of text deltas only
     const reader = streamResp.body.getReader();
     const decoder = new TextDecoder();
+    let buffer = "";
+
+    function forward(event, dataObjOrString) {
+      const payload = typeof dataObjOrString === "string" ? dataObjOrString : JSON.stringify(dataObjOrString);
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${payload}\n\n`);
+    }
+
     try {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        if (value) res.write(decoder.decode(value));
+        buffer += decoder.decode(value, { stream: true });
+
+        const blocks = buffer.split(/\n\n/);
+        buffer = blocks.pop(); // keep last partial
+
+        for (const block of blocks) {
+          const lines = block.split(/\n/);
+          let event = "message";
+          const dataLines = [];
+          for (const line of lines) {
+            if (!line) continue;
+            if (line.startsWith(":")) continue;
+            if (line.startsWith("event:")) { event = line.slice(6).trim(); continue; }
+            if (line.startsWith("data:"))  { dataLines.push(line.slice(5).trim()); continue; }
+          }
+          const raw = dataLines.join("\n");
+
+          // Intercept only text deltas to sanitize upload phrasing; pass everything else as-is
+          if (event.endsWith(".delta")) {
+            let obj;
+            try { obj = JSON.parse(raw); } catch { obj = null; }
+            if (obj) {
+              // Handle both formats
+              if (typeof obj.delta === "string") {
+                obj.delta = sanitizeDeltaText(obj.delta, { uploadTurn });
+                forward(event, obj);
+              } else if (obj.delta && Array.isArray(obj.delta.content)) {
+                obj.delta.content = obj.delta.content.map(c =>
+                  (c && c.type && c.type.includes("output_text") && typeof c.text === "string")
+                    ? { ...c, text: sanitizeDeltaText(c.text, { uploadTurn }) }
+                    : c
+                );
+                forward(event, obj);
+              } else if (typeof obj.text_delta === "string") {
+                obj.text_delta = sanitizeDeltaText(obj.text_delta, { uploadTurn });
+                forward(event, obj);
+              } else {
+                forward(event, obj);
+              }
+            } else {
+              forward(event, raw);
+            }
+          } else {
+            // Non-text events: pass through unchanged (keeps citations intact)
+            forward(event, raw);
+          }
+        }
       }
     } catch (e) {
       sseEvent(res, "error", { message: `Stream error: ${String(e?.message || e)}` });
