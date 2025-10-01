@@ -1,21 +1,26 @@
 // /api/assistant.js — Vercel serverless (CommonJS)
 //
-// Pulls system instructions dynamically from your OpenAI Assistant (TCN_ASSISTANT_ID)
-// and uses them as the single System message. Upload turns get a per-turn temp vector store.
-// Streams SSE; on stream failure, falls back to non-stream and emits SSE events.
+// - Dynamically pulls System instructions from an OpenAI Assistant (v2)
+// - Upload turn: builds a temp vector store for THIS turn only
+// - No upload: optionally uses library store (TCN_LIBRARY_VECTOR_STORE_ID)
+// - Streams SSE to client; on stream error, falls back to non-stream and emits SSE events
 //
 // Env:
-// - OPENAI_API_KEY                  (required)
-// - TCN_ASSISTANT_ID                (required; the OpenAI Assistant ID to pull instructions/model from)
-// - TCN_LIBRARY_VECTOR_STORE_ID     (optional; library store id used when no upload in the turn)
-// - TCN_ALLOWED_ORIGIN              (optional; default https://www.talkingcare.uk)
-// - TCN_MODEL                       (optional fallback model if assistant.model is missing)
+// - OPENAI_API_KEY               (required)
+// - TCN_ASSISTANT_ID             (required) asst_...
+// - TCN_LIBRARY_VECTOR_STORE_ID  (optional; library store id)
+// - TCN_ALLOWED_ORIGIN           (optional; default https://www.talkingcare.uk)
+// - TCN_MODEL                    (optional; default comes from Assistant.model, fallback gpt-4o-mini-2024-07-18)
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ASSISTANT_ID   = process.env.TCN_ASSISTANT_ID || "";
 const LIBRARY_VS_ID  = process.env.TCN_LIBRARY_VECTOR_STORE_ID || "";
 const ALLOWED_ORIGIN = process.env.TCN_ALLOWED_ORIGIN || "https://www.talkingcare.uk";
 const FALLBACK_MODEL = process.env.TCN_MODEL || "gpt-4o-mini-2024-07-18";
+
+// --- simple in-memory cache for assistant (warm each ~10min)
+let ASSISTANT_CACHE = { at: 0, data: null };
+const ASSISTANT_TTL_MS = 10 * 60 * 1000;
 
 function setCORS(res) {
   res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
@@ -61,36 +66,39 @@ async function oi(path, { method = "GET", body, headers, stream = false } = {}) 
   return resp;
 }
 
-async function fetchAssistant(assistantId) {
-  if (!assistantId) return { ok: false, error: "Missing TCN_ASSISTANT_ID" };
-  const r = await oi(`/v1/assistants/${assistantId}`, { method: "GET" });
+// ---- Assistant fetch (v2) ----
+async function fetchAssistant() {
+  if (!ASSISTANT_ID) return null;
+  const now = Date.now();
+  if (ASSISTANT_CACHE.data && (now - ASSISTANT_CACHE.at) < ASSISTANT_TTL_MS) {
+    return ASSISTANT_CACHE.data;
+  }
+  const r = await oi(`/v1/assistants/${ASSISTANT_ID}`, {
+    method: "GET",
+    headers: { "OpenAI-Beta": "assistants=v2" }
+  });
   if (!r.ok) {
-    return { ok: false, error: `Failed to fetch assistant: ${r.status} ${await r.text()}` };
+    const t = await r.text().catch(() => "");
+    throw new Error(`assistant fetch failed: ${r.status} ${t}`);
   }
   const data = await r.json();
-  return {
-    ok: true,
-    id: data.id || assistantId,
-    name: data.name || "",
-    instructions: data.instructions || "",
-    model: data.model || "",
-  };
+  ASSISTANT_CACHE = { at: now, data };
+  return data;
 }
 
+// ---- Vector store helpers ----
 async function createTempVS(name = "TCN temp store") {
   const r = await oi("/v1/vector_stores", { method: "POST", body: { name } });
   if (!r.ok) throw new Error(`create vector store failed: ${r.status} ${await r.text()}`);
   const d = await r.json();
   return d.id;
 }
-
 async function addFileToVS(vsId, fileId) {
   const r = await oi(`/v1/vector_stores/${vsId}/files`, { method: "POST", body: { file_id: fileId } });
   if (!r.ok) throw new Error(`add file failed: ${r.status} ${await r.text()}`);
   const d = await r.json();
   return d.id; // vs_file_id
 }
-
 async function waitVSFileReady(vsId, vsFileId, { timeoutMs = 30000, pollMs = 900 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let last = "";
@@ -106,6 +114,7 @@ async function waitVSFileReady(vsId, vsFileId, { timeoutMs = 30000, pollMs = 900
   throw new Error(`vector store file not ready (last: ${last || "unknown"})`);
 }
 
+// ---- map client history -> Responses input messages
 function mapHistory(history = []) {
   const arr = [];
   for (const t of history) {
@@ -157,14 +166,29 @@ module.exports = async (req, res) => {
       return res.end(JSON.stringify({ error: "Missing userMessage" }));
     }
 
-    // Fetch Assistant (dynamic instructions + preferred model)
-    const asst = await fetchAssistant(ASSISTANT_ID);
-    const systemText = asst.ok ? (asst.instructions || "") : "";
-    const modelToUse = (asst.ok && asst.model) ? asst.model : FALLBACK_MODEL;
+    // --- Fetch Assistant + resolve model/instructions
+    let assistant = null, systemText = "", resolvedModel = FALLBACK_MODEL;
+    let usingAssistant = false;
 
-    // Build input — single System message from Assistant instructions (if any)
+    try {
+      assistant = await fetchAssistant();
+      if (assistant && typeof assistant.instructions === "string" && assistant.instructions.trim().length) {
+        systemText = assistant.instructions.trim();
+        usingAssistant = true;
+      }
+      // Prefer the assistant's model if present; otherwise keep fallback
+      if (assistant && typeof assistant.model === "string" && assistant.model.trim()) {
+        resolvedModel = assistant.model.trim();
+      }
+    } catch (e) {
+      // Soft-fail: continue without assistant (you'll see this in SSE "info")
+      usingAssistant = false;
+      systemText = "";
+    }
+
+    // Build input
     const input = [];
-    if (systemText && systemText.trim().length) {
+    if (systemText) {
       input.push({ role: "system", content: [{ type: "input_text", text: systemText }] });
     }
     input.push(...mapHistory(history || []));
@@ -178,27 +202,20 @@ module.exports = async (req, res) => {
     if (uploadTurn) {
       tempVS = await createTempVS("TCN temp (this turn)");
       const vsFileId = await addFileToVS(tempVS, upload_file_id);
-
       if (wantStream) {
         sseHead(res);
         sseEvent(res, "start", { ok: true });
-        sseEvent(res, "info", {
-          note: "temp_vector_store_created",
-          id: tempVS
-        });
+        sseEvent(res, "info", { note: "temp_vector_store_created", id: tempVS });
       }
       await waitVSFileReady(tempVS, vsFileId);
-      if (wantStream) {
-        sseEvent(res, "info", { note: "temp_vector_store_ready", id: tempVS });
-      }
+      if (wantStream) sseEvent(res, "info", { note: "temp_vector_store_ready", id: tempVS });
       tools = [{ type: "file_search", vector_store_ids: [tempVS] }];
     } else if (LIBRARY_VS_ID) {
       tools = [{ type: "file_search", vector_store_ids: [LIBRARY_VS_ID] }];
     }
 
-    // Prepare payload
     const payload = {
-      model: modelToUse,
+      model: resolvedModel,
       input,
       tools,
       tool_choice: "auto",
@@ -208,22 +225,6 @@ module.exports = async (req, res) => {
       truncation: "disabled",
       store: true
     };
-
-    // On stream: also emit a tiny debug record so you can confirm the system was attached
-    if (wantStream) {
-      if (!res.headersSent) {
-        sseHead(res);
-        sseEvent(res, "start", { ok: true });
-      }
-      sseEvent(res, "info", {
-        note: "resolved_prompt",
-        using_assistant: !!asst.ok,
-        assistant_id: asst.ok ? asst.id : null,
-        assistant_name: asst.ok ? asst.name : null,
-        system_len: (systemText || "").length,
-        model: modelToUse
-      });
-    }
 
     // Non-stream
     if (!wantStream) {
@@ -238,6 +239,20 @@ module.exports = async (req, res) => {
     }
 
     // Stream
+    if (!res.headersSent) {
+      sseHead(res);
+      sseEvent(res, "start", { ok: true });
+    }
+    // Helpful debug info — watch this in your devtools Network/EventStream
+    sseEvent(res, "info", {
+      note: "resolved_prompt",
+      using_assistant: usingAssistant,
+      assistant_id: usingAssistant ? ASSISTANT_ID : null,
+      assistant_name: usingAssistant && assistant ? assistant.name || null : null,
+      system_len: systemText.length || 0,
+      model: resolvedModel
+    });
+
     let streamResp;
     try {
       streamResp = await oi("/v1/responses", { method: "POST", body: { ...payload, stream: true }, stream: true });
