@@ -1,10 +1,14 @@
 // /api/assistant.js — Vercel serverless (CommonJS)
 //
-// Intent gate + tool gating + streaming sanitizer + tool usage telemetry
-// - Meta/low-signal => canned UK-English reply. NO tools.
-// - Content => Assistant(v2) + shim + library tool (and temp VS on upload turn).
-// - Sanitizer preserves "Sources:" blocks across chunks, suppresses upload-inventory chatter only.
-// - Emits SSE "info" -> { note: "tools_summary", used_file_search, library_candidate, upload_turn }.
+// Upload-turn is authoritative:
+// - If an upload id is present in the POST body, we ALWAYS take the content path
+//   (no canned reply), create a temp vector store, and instruct the model
+//   to base the answer on the attached document (or say the exact "No matching..." line).
+//
+// Also:
+// - Accepts upload_file_id OR uploadFileId OR file_id
+// - Emits SSE info { upload_turn, tools_enabled } so you can verify
+// - Preserves Sources: in the stream; blocks filename inventory chatter
 //
 // Env:
 // - OPENAI_API_KEY               (required)
@@ -56,8 +60,7 @@ async function oi(path, { method = "GET", body, headers, stream = false } = {}) 
     ...(stream ? { "Accept": "text/event-stream" } : {}),
     ...(headers || {}),
   };
-  const resp = await fetch(url, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
-  return resp;
+  return fetch(url, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
 }
 
 // ---- Assistant fetch (v2) ----
@@ -111,100 +114,9 @@ function mapHistory(history = []) {
   return arr;
 }
 
-// ---- Low-signal / nonsense detector
-function isLowSignal(message) {
-  const t = (message || "").trim();
-  if (!t) return true;
-  if (/^[\s\/\?\.\!\,\-\_\|\*\+\=\(\)\[\]\{\}:;~`'"]+$/.test(t)) return true;
-  const letters = (t.replace(/[^a-zA-Z]/g, "") || "");
-  if (letters.length <= 2) return true;
-  if (/(.)\1{3,}/.test(t)) return true; // waaa, ppppp...
-  return false;
-}
-
-// ---- Intent gate (server-side)
-function classifyIntent(text) {
-  const t = (text || "").trim().toLowerCase();
-  if (!t) return "greeting";
-  if (isLowSignal(t)) return "greeting";
-
-  // greetings / small talk
-  if (/^(hi|hello|hey|hiya|howdy|yo|good (morning|afternoon|evening))\b/.test(t)) return "greeting";
-  if (/(are|r)\s*(you|u)\s*ok(ay)?\??$/.test(t)) return "greeting";
-  if (/\bhow('?|’)?s it going\b|\bhow are (you|u)\b/.test(t)) return "greeting";
-
-  // identity / creator / purpose / capability
-  if (/\bwho (are|r) (you|u)\b/.test(t)) return "who";
-  if (/\bwho (made|created|built) (you|u)\b|\bwho owns you\b|\bowner\b/.test(t)) return "creator";
-  if (/\bwhat (is|’s|'s) your (purpose|goal|mission|objective|role)\b|\bwhy (were you created|do you exist)\b|\bprime directive\b/.test(t)) return "purpose";
-
-  // capability
-  if (/\bwhat do (you|u) do\b|\bwhat('?|’)?s your (role|job|function|capabilities?)\b/.test(t)) return "capability";
-  if (/\bwhat can (you|u) do\b|\bhow can (you|u) help\b|\bexamples? of (how|what) (you|u) can do\b|\bwhat can u even do\b/.test(t)) return "capability";
-
-  // process / “how does this work”
-  if (/\bhow (does|do) (this|it) work\b|\bhow (do|to) (i|we) (use|work with) (you|this)\b|\bcan i upload\b|\bhow to upload\b/.test(t)) return "process";
-
-  // privacy / data handling
-  if (/\b(what|how) (do|will) (you|u) (do|use|handle) (with )?my data\b|\bdata (policy|privacy)\b|\bprivacy\b/.test(t)) return "privacy";
-
-  // comparison to ChatGPT / others
-  if (/\bwhy (should|would) i use (this|you) (instead of|over) (chatgpt|chat gpt|gpt|openai)\b/.test(t)) return "comparison";
-  if (/\bwhy (is|are) (this|you) (better|different) (than|to) (chatgpt|chat gpt|gpt|openai)\b/.test(t)) return "comparison";
-  if (/\b(compare|difference|vs\.?|versus)\b.*\b(chatgpt|chat gpt|gpt|openai)\b/.test(t)) return "comparison";
-
-  // inventory probes
-  if (/\bwhat files\??$|\bi haven'?t uploaded any\b|\bno (files|documents) uploaded\b/.test(t)) return "no_files";
-  if (/\b(document|doc) store\b|\bwhat (files|documents).* (do you have|are in (your|the) (library|store))\b/.test(t)) return "inventory";
-
-  // appearance/meta & preferences
-  if (/\bwhat do you look like\b|\bappearance\b/.test(t)) return "appearance";
-  if (/\bdo (you|u) like\b|\bwhat('?|’)?s your favourite\b|\bfavorite\b/.test(t)) return "preference";
-
-  return null; // treat as potential content
-}
-
-function cannedReply(kind) {
-  switch (kind) {
-    case "greeting":
-      return "Hello! How may I assist you today?";
-    case "who":
-      return "I am Talking Care Navigator, here to help with adult social care in England. How may I assist you today?";
-    case "creator":
-      return "I was created by Chris Revett at Talking Care. How may I assist you today?";
-    case "purpose":
-      return "My purpose is to provide practical, regulation-aligned guidance for adult social care in England. How may I assist you today?";
-    case "capability":
-      return [
-        "I can help with:",
-        "• Clear explanations of regulations and guidance (England).",
-        "• Practical checklists and step-by-step actions.",
-        "• Summaries and plain-English clarifications.",
-        "• Drafting notes for audits, supervision and everyday good practice.",
-        "• Signposting when specialist or legal advice is needed.",
-      ].join("\n");
-    case "process":
-      return "Ask questions in plain English. If needed, attach a document for that turn and I’ll base my answer on the attached document.";
-    case "privacy":
-      return "I don’t need personal data to help. Please avoid sharing names or sensitive details. For privacy information, see https://www.talkingcare.uk/privacy.";
-    case "comparison":
-      return "I’m focused on adult social care in England and prioritise practical, regulation-aligned guidance for providers and staff.";
-    case "no_files":
-      return "Understood — I’ll only refer to an attached document if you add one. How can I help today?";
-    case "inventory":
-      return "I don’t list or inventory documents. If you add an attached document for this turn, I can refer to it, and I can also use the Talking Care Navigator Library where appropriate. How can I help today?";
-    case "appearance":
-      return "I don’t have a physical appearance. How may I assist you today?";
-    case "preference":
-      return "I don’t have personal preferences. How may I assist you today?";
-    default:
-      return null;
-  }
-}
-
 // ---- Dynamic policy shim (overrides conflicts)
-function buildPolicyShim(uploadTurn) {
-  return [
+function buildPolicyShim({ uploadTurn }) {
+  const lines = [
     "PRIORITY SHIM — Apply these rules first. If any other instruction conflicts with this shim, this shim wins.",
     "",
     "Language & style:",
@@ -222,23 +134,32 @@ function buildPolicyShim(uploadTurn) {
     "- Keep it brief and helpful. Preferred greeting: “Hello! How may I assist you today?”",
     "",
     `Upload for THIS user turn: ${uploadTurn ? "YES" : "NO"}.`,
-    "- If NO: you must NOT refer to uploads, files or documents being uploaded.",
+    "- If NO: do not refer to uploads, files or documents being uploaded.",
     "- If YES and you need to reference it: call it “the attached document” (never “your upload” / “file you uploaded”).",
     "",
-    "When you use the Talking Care Navigator Library or an attached document to answer, add a final section titled “Sources:” and list the document titles you relied on. Once you start a “Sources:” section, do not remove it.",
-    "Never list or enumerate filenames as an inventory. Provide only the minimal citations needed for the answer.",
-  ].join("\n");
+    "When you use the Talking Care Navigator Library or an attached document to answer, add a final section titled “Sources:” and list only the document titles you relied on. Once you start a “Sources:” section, do not remove it.",
+    "Never list or enumerate filenames as an inventory. Provide only the minimal citations needed."
+  ];
+
+  if (uploadTurn) {
+    lines.push(
+      "",
+      "UPLOAD-TURN REQUIREMENT:",
+      "- Treat the attached document as the primary source.",
+      "- Base your answer solely on the attached document.",
+      "- If the attached document has no relevant content, reply exactly: “No matching sources found in the attached document.”",
+      "- Do not claim that no files are attached."
+    );
+  }
+  return lines.join("\n");
 }
 
-// ---- Streaming sanitizer with state (per request)
+// ---- Streaming sanitizer: keep Sources, block filename inventories
 function makeSanitizer({ uploadTurn }) {
   const state = { suppressList: false, inSources: false };
-
   function neutraliseUploadPhrasing(txt) {
     let s = txt;
-
     const up = "(?:you(?:'|’)?ve|you have) uploaded";
-
     if (!uploadTurn) {
       s = s.replace(new RegExp(`\\b(files|documents)\\s+${up}\\b`, "gi"), "documents");
       s = s.replace(new RegExp(`\\b${up}\\b`, "gi"), "you add an attached document for this turn");
@@ -249,59 +170,84 @@ function makeSanitizer({ uploadTurn }) {
       s = s.replace(/\b(the|your)\s+uploaded\s+(files|documents)\b/gi, "documents");
       s = s.replace(/\bfiles\s+you\s+uploaded\b/gi, "documents");
     }
-
-    // detect start of inventory phrasing
     if (/\b(here (are|is) (the )?(files|documents).*(uploaded|attached)|you (?:have|(?:'|’)??ve) uploaded)\b/i.test(s)) {
       state.suppressList = true;
     }
-
-    // detect entering a Sources block in this delta
-    if (/^\s*sources?\s*:\s*$/im.test(s) || /\bSources:\s*$/i.test(s)) {
-      state.inSources = true;
-      state.suppressList = false; // ensure no suppression inside Sources
-    }
-    if (/^\s*sources?\s*:/im.test(s)) {
-      state.inSources = true;
-      state.suppressList = false;
-    }
-
+    if (/^\s*sources?\s*:/im.test(s)) { state.inSources = true; state.suppressList = false; }
     return s;
   }
-
   function scrubFilenameLines(s) {
-    if (state.inSources) return s; // never scrub inside citations
+    if (state.inSources) return s;
     if (!state.suppressList) return s;
-
     const lines = s.split("\n");
     for (let i = 0; i < lines.length; i++) {
       const L = lines[i];
-
       if (/^\s*sources?\s*:/i.test(L)) { state.inSources = true; state.suppressList = false; continue; }
-
-      // typical filename bullets
       if (/^[\s\-\*\•\u2022]*.+\.(pdf|docx?|pptx?|xlsx?|xls|csv)\b/i.test(L)) {
         lines[i] = "• [document omitted]";
         continue;
       }
-
-      // stop suppression at sentence end or blank line
-      if (/[.!?]\s*$/.test(L) || /^\s*$/.test(L)) {
-        state.suppressList = false;
-      }
+      if (/[.!?]\s*$/.test(L) || /^\s*$/.test(L)) state.suppressList = false;
     }
     return lines.join("\n");
   }
-
   return function sanitizeDeltaText(deltaText) {
     if (!deltaText) return deltaText;
-    // If this chunk itself starts a Sources header, mark state and pass through untouched
     if (/^\s*sources?\s*:/im.test(deltaText)) { state.inSources = true; return deltaText; }
-
     let s = deltaText;
     s = neutraliseUploadPhrasing(s);
     s = scrubFilenameLines(s);
     return s;
   };
+}
+
+// ---- Simple intent gate (kept, but bypassed on upload-turn)
+function isLowSignal(message) {
+  const t = (message || "").trim();
+  if (!t) return true;
+  if (/^[\s\/\?\.\!\,\-\_\|\*\+\=\(\)\[\]\{\}:;~`'"]+$/.test(t)) return true;
+  const letters = (t.replace(/[^a-zA-Z]/g, "") || "");
+  if (letters.length <= 2) return true;
+  if (/(.)\1{3,}/.test(t)) return true;
+  return false;
+}
+function classifyIntent(text) {
+  const t = (text || "").trim().toLowerCase();
+  if (!t) return "greeting";
+  if (isLowSignal(t)) return "greeting";
+  if (/^(hi|hello|hey|hiya|howdy|yo|good (morning|afternoon|evening))\b/.test(t)) return "greeting";
+  if (/\bwho (are|r) (you|u)\b/.test(t)) return "who";
+  if (/\bwho (made|created|built) (you|u)\b|\bwho owns you\b/.test(t)) return "creator";
+  if (/\bwhat (is|’s|'s) your (purpose|goal|mission|objective|role)\b|\bprime directive\b/.test(t)) return "purpose";
+  if (/\bwhat do (you|u) do\b|\bwhat can (you|u) do\b/.test(t)) return "capability";
+  if (/\bhow (does|do) (this|it) work\b|\bcan i upload\b/.test(t)) return "process";
+  if (/\bprivacy\b|\bwhat .* (do|will) you .* my data\b/.test(t)) return "privacy";
+  if (/\bwhy (is|are) (this|you) (better|different) (than|to) (chatgpt|chat gpt|gpt|openai)\b/.test(t)) return "comparison";
+  if (/\bwhat files\??$|\bi haven'?t uploaded any\b|\bno (files|documents) uploaded\b/.test(t)) return "no_files";
+  if (/\b(document|doc) store\b|\bwhat (files|documents).* (do you have|are in (your|the) (library|store))\b/.test(t)) return "inventory";
+  return null;
+}
+function cannedReply(kind) {
+  switch (kind) {
+    case "greeting":   return "Hello! How may I assist you today?";
+    case "who":        return "I am Talking Care Navigator, here to help with adult social care in England. How may I assist you today?";
+    case "creator":    return "I was created by Chris Revett at Talking Care. How may I assist you today?";
+    case "purpose":    return "My purpose is to provide practical, regulation-aligned guidance for adult social care in England. How may I assist you today?";
+    case "capability": return [
+      "I can help with:",
+      "• Clear explanations of regulations and guidance (England).",
+      "• Practical checklists and step-by-step actions.",
+      "• Summaries and plain-English clarifications.",
+      "• Drafting notes for audits, supervision and everyday good practice.",
+      "• Signposting when specialist or legal advice is needed.",
+    ].join("\n");
+    case "process":    return "Ask questions in plain English. If needed, attach a document for that turn and I’ll base my answer on the attached document.";
+    case "privacy":    return "I don’t need personal data to help. Please avoid sharing names or sensitive details. For privacy information, see https://www.talkingcare.uk/privacy.";
+    case "comparison": return "I’m focused on adult social care in England and prioritise practical, regulation-aligned guidance for providers and staff.";
+    case "no_files":   return "Understood — I’ll only refer to an attached document if you add one. How can I help today?";
+    case "inventory":  return "I don’t list or inventory documents. If you add an attached document for this turn, I can refer to it, and I can also use the Talking Care Navigator Library where appropriate. How can I help today?";
+    default:           return null;
+  }
 }
 
 module.exports = async (req, res) => {
@@ -312,7 +258,9 @@ module.exports = async (req, res) => {
     res.statusCode = 405; res.setHeader("Allow", "POST, OPTIONS");
     return res.end(JSON.stringify({ error: "Method not allowed" }));
   }
-  if (!OPENAI_API_KEY) { res.statusCode = 500; return res.end(JSON.stringify({ error: "Missing OPENAI_API_KEY" })); }
+  if (!OPENAI_API_KEY) {
+    res.statusCode = 500; return res.end(JSON.stringify({ error: "Missing OPENAI_API_KEY" }));
+  }
 
   try {
     // Parse query (?stream=on)
@@ -325,88 +273,103 @@ module.exports = async (req, res) => {
       req.on("end", () => resolve(Buffer.concat(chunks)));
       req.on("error", reject);
     });
-    const { userMessage, history, upload_file_id } = JSON.parse(bodyBuf.toString("utf8") || "{}");
+    const bodyJson = JSON.parse(bodyBuf.toString("utf8") || "{}");
+
+    const userMessage = bodyJson.userMessage;
+    const history = bodyJson.history || [];
+
+    // Accept multiple field names for the upload id
+    const upload_file_id =
+      bodyJson.upload_file_id ||
+      bodyJson.uploadFileId ||
+      bodyJson.file_id ||
+      null;
+
     if (!userMessage || typeof userMessage !== "string") {
       res.statusCode = 400; return res.end(JSON.stringify({ error: "Missing userMessage" }));
     }
 
     const uploadTurn = !!upload_file_id;
 
-    // ---- INTENT GATE
-    const intent = classifyIntent(userMessage);
-    const canned = intent ? cannedReply(intent) : null;
+    // ---- INTENT GATE (BYPASS if upload present)
+    let intent = null;
+    let canned = null;
+    if (!uploadTurn) { // only allow canned path when there's no upload for this turn
+      intent = classifyIntent(userMessage);
+      canned = intent ? cannedReply(intent) : null;
+    }
 
+    // ---- Start SSE for visibility
+    if (wantStream && !res.headersSent) { sseHead(res); sseEvent(res, "start", { ok: true }); }
+
+    // ---- CANNED PATH (no tools, no upload)
     if (canned) {
-      if (wantStream) {
-        if (!res.headersSent) { sseHead(res); sseEvent(res, "start", { ok: true }); }
-        sseEvent(res, "info", { note: "canned_reply", intent, used_assistant: false, used_tools: false });
-        sseEvent(res, "response.output_text.delta", { delta: canned });
-        sseEvent(res, "response.completed", { done: true });
-        return sseDone(res);
-      } else {
-        res.setHeader("Content-Type", "application/json");
-        return res.end(JSON.stringify({
-          id: `resp_${Math.random().toString(36).slice(2)}`,
-          object: "response",
-          model: "canned",
-          status: "completed",
-          output: [{
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: canned }]
-          }]
-        }));
-      }
+      sseEvent(res, "info", { note: "canned_reply", intent, used_assistant: false, used_tools: false, upload_turn: false });
+      sseEvent(res, "response.output_text.delta", { delta: canned });
+      sseEvent(res, "response.completed", { done: true });
+      return sseDone(res);
     }
 
     // --- Content path: fetch Assistant + build prompt
     let assistant = null, asstText = "", resolvedModel = FALLBACK_MODEL;
     let usingAssistant = false;
-
     try {
       assistant = await fetchAssistant();
       if (assistant && typeof assistant.instructions === "string" && assistant.instructions.trim().length) {
-        asstText = assistant.instructions.trim();
-        usingAssistant = true;
+        asstText = assistant.instructions.trim(); usingAssistant = true;
       }
       if (assistant && typeof assistant.model === "string" && assistant.model.trim()) {
         resolvedModel = assistant.model.trim();
       }
-    } catch {
-      usingAssistant = false; asstText = "";
-    }
+    } catch { usingAssistant = false; asstText = ""; }
 
     // Build system message
-    const shim = buildPolicyShim(uploadTurn);
+    const shim = buildPolicyShim({ uploadTurn });
     const systemText = [shim, asstText].filter(Boolean).join("\n\n");
 
     // Build input
     const input = [];
     if (systemText) input.push({ role: "system", content: [{ type: "input_text", text: systemText }] });
-    input.push(...mapHistory(history || []));
+    input.push(...mapHistory(history));
     input.push({ role: "user", content: [{ type: "input_text", text: userMessage }] });
 
-    // Tool wiring:
-    // - For any non-meta content, include Library (if configured).
-    // - If there's an upload this turn, use a temp VS for that file.
+    // Tool wiring
     let tools = [];
     let tempVS = null;
+    let libraryCandidate = !!LIBRARY_VS_ID;
 
-    const libraryCandidate = !!LIBRARY_VS_ID; // report for telemetry
     if (uploadTurn) {
-      tempVS = await createTempVS("TCN temp (this turn)");
-      const vsFileId = await addFileToVS(tempVS, upload_file_id);
-      if (wantStream) { if (!res.headersSent) sseHead(res); sseEvent(res, "start", { ok: true }); sseEvent(res, "info", { note: "temp_vector_store_created", id: tempVS }); }
-      await waitVSFileReady(tempVS, vsFileId);
-      if (wantStream) sseEvent(res, "info", { note: "temp_vector_store_ready", id: tempVS });
-      tools = [{ type: "file_search", vector_store_ids: [tempVS] }];
+      // Always use temp vector store on upload turns
+      try {
+        tempVS = await createTempVS("TCN temp (this turn)");
+        const vsFileId = await addFileToVS(tempVS, upload_file_id);
+        sseEvent(res, "info", { note: "temp_vector_store_created", id: tempVS });
+        await waitVSFileReady(tempVS, vsFileId);
+        sseEvent(res, "info", { note: "temp_vector_store_ready", id: tempVS });
+        tools = [{ type: "file_search", vector_store_ids: [tempVS] }];
+      } catch (e) {
+        // If anything fails, still answer safely without claiming "no files"
+        sseEvent(res, "error", { message: `Upload indexing failed: ${String(e?.message || e)}` });
+        // fall back to library if available; otherwise no tools
+        tools = LIBRARY_VS_ID ? [{ type: "file_search", vector_store_ids: [LIBRARY_VS_ID] }] : [];
+        libraryCandidate = !!LIBRARY_VS_ID;
+      }
     } else if (LIBRARY_VS_ID) {
-      // non-meta => include library by default to ground answers
       tools = [{ type: "file_search", vector_store_ids: [LIBRARY_VS_ID] }];
-      if (wantStream && !res.headersSent) { sseHead(res); sseEvent(res, "start", { ok: true }); }
-    } else {
-      if (wantStream && !res.headersSent) { sseHead(res); sseEvent(res, "start", { ok: true }); }
     }
+
+    // Emit resolved prompt info
+    sseEvent(res, "info", {
+      note: "resolved_prompt",
+      using_assistant: usingAssistant,
+      assistant_id: usingAssistant ? ASSISTANT_ID : null,
+      assistant_name: usingAssistant && assistant ? assistant.name || null : null,
+      system_len: systemText.length || 0,
+      model: resolvedModel,
+      tools_enabled: tools.length > 0,
+      upload_turn: uploadTurn,
+      library_candidate: libraryCandidate
+    });
 
     const payload = {
       model: resolvedModel,
@@ -420,21 +383,7 @@ module.exports = async (req, res) => {
       store: true
     };
 
-    // Debug info
-    sseEvent(res, "info", {
-      note: "resolved_prompt",
-      using_assistant: usingAssistant,
-      assistant_id: usingAssistant ? ASSISTANT_ID : null,
-      assistant_name: usingAssistant && assistant ? assistant.name || null : null,
-      system_len: systemText.length || 0,
-      model: resolvedModel,
-      tools_enabled: tools.length > 0,
-      upload_turn: uploadTurn,
-      library_candidate: libraryCandidate,
-      sanitizer: true
-    });
-
-    // ---- Request to OpenAI + stream with sanitizer & telemetry
+    // ---- Request + stream (with sanitizer)
     const sanitizer = makeSanitizer({ uploadTurn });
     let usedFileSearch = false;
 
@@ -442,10 +391,13 @@ module.exports = async (req, res) => {
     try {
       streamResp = await oi("/v1/responses", { method: "POST", body: { ...payload, stream: true }, stream: true });
     } catch (e) {
-      // Fallback to non-stream and emit via SSE
-      const r2 = await oi("/v1/responses", { method: "POST", body: payload, stream: false });
+      // Non-stream fallback
+      const r2 = await oi("/v1/responses", { method: "POST", body: payload });
       const txt2 = await r2.text();
-      if (!r2.ok) { sseEvent(res, "error", { message: `OpenAI stream init failed: ${String(e?.message || e)}; fallback also failed: ${txt2}` }); sseDone(res); return; }
+      if (!r2.ok) {
+        sseEvent(res, "error", { message: `OpenAI stream init failed: ${String(e?.message || e)}; fallback also failed: ${txt2}` });
+        sseDone(res); return;
+      }
       try {
         const obj = JSON.parse(txt2);
         const out = (obj?.output || []).find(o => o.type === "message");
@@ -464,7 +416,6 @@ module.exports = async (req, res) => {
       return sseDone(res);
     }
 
-    // Proxy SSE with filtering of *text* deltas only; also detect tool use
     const reader = streamResp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -480,9 +431,8 @@ module.exports = async (req, res) => {
         const { value, done } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-
         const blocks = buffer.split(/\n\n/);
-        buffer = blocks.pop(); // keep last partial
+        buffer = blocks.pop();
 
         for (const block of blocks) {
           const lines = block.split(/\n/);
@@ -496,13 +446,12 @@ module.exports = async (req, res) => {
           }
           const raw = dataLines.join("\n");
 
-          // crude detection of file_search tool usage for telemetry
+          // crude detect file_search tool usage
           if (/tool/i.test(event) && /file_search/i.test(raw)) usedFileSearch = true;
           if (/file_search/i.test(raw) && /(tool_call|tool_result)/i.test(event)) usedFileSearch = true;
 
           if (event.endsWith(".delta")) {
-            let obj;
-            try { obj = JSON.parse(raw); } catch { obj = null; }
+            let obj; try { obj = JSON.parse(raw); } catch { obj = null; }
             if (obj) {
               if (typeof obj.delta === "string") {
                 obj.delta = sanitizer(obj.delta);
@@ -524,15 +473,19 @@ module.exports = async (req, res) => {
               forward(event, raw);
             }
           } else {
-            forward(event, raw); // forward non-text events (citations, tool calls, etc.) untouched
+            forward(event, raw);
           }
         }
       }
     } catch (e) {
       sseEvent(res, "error", { message: `Stream error: ${String(e?.message || e)}` });
     } finally {
-      // Emit a one-line telemetry summary you can watch in DevTools
-      sseEvent(res, "info", { note: "tools_summary", used_file_search: !!usedFileSearch, library_candidate: libraryCandidate, upload_turn: uploadTurn });
+      sseEvent(res, "info", {
+        note: "tools_summary",
+        used_file_search: !!usedFileSearch,
+        library_candidate: libraryCandidate,
+        upload_turn: uploadTurn
+      });
       sseEvent(res, "response.completed", { done: true });
       sseDone(res);
     }
