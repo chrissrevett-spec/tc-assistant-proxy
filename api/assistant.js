@@ -1,8 +1,7 @@
 // /api/assistant.js — Vercel serverless (CommonJS)
 //
-// Adds:
-// 1) Dynamic policy shim (UK English, identity, meta rules, upload wording).
-// 2) Server-side INTENT GATE for greetings/meta so we never mention docs on those turns.
+// Strong intent-gate to avoid model hallucinating "attached documents" on meta turns.
+// Dynamic pull of OpenAI Assistant instructions is preserved.
 //
 // Env:
 // - OPENAI_API_KEY               (required)
@@ -17,7 +16,7 @@ const LIBRARY_VS_ID  = process.env.TCN_LIBRARY_VECTOR_STORE_ID || "";
 const ALLOWED_ORIGIN = process.env.TCN_ALLOWED_ORIGIN || "https://www.talkingcare.uk";
 const FALLBACK_MODEL = process.env.TCN_MODEL || "gpt-4o-mini-2024-07-18";
 
-// In-memory cache for assistant (10 min)
+// Cache Assistant (10 min)
 let ASSISTANT_CACHE = { at: 0, data: null };
 const ASSISTANT_TTL_MS = 10 * 60 * 1000;
 
@@ -45,7 +44,7 @@ function sseEvent(res, event, data) {
 }
 function sseDone(res) { sseEvent(res, "done", "[DONE]"); res.end(); }
 
-// ---- OpenAI REST (no SDK) ----
+// ---- OpenAI REST ----
 async function oi(path, { method = "GET", body, headers, stream = false } = {}) {
   const url = `https://api.openai.com${path}`;
   const h = {
@@ -109,7 +108,7 @@ function mapHistory(history = []) {
   return arr;
 }
 
-// ---- Dynamic policy shim (overrides conflicts)
+// ---- Policy shim (prepends Assistant instructions)
 function buildPolicyShim(uploadTurn) {
   return [
     "PRIORITY SHIM — Apply these rules first. If any other instruction conflicts with this shim, this shim wins.",
@@ -123,7 +122,7 @@ function buildPolicyShim(uploadTurn) {
     "- If asked who you are: start with “I am Talking Care Navigator…”",
     "- Only if specifically asked about technology: you may add “I use OpenAI’s models under the hood.”",
     "",
-    "Meta/greetings (e.g., hi/hello/how are you?/who are you?/who created you?/what can you do?/what is your purpose?):",
+    "Meta/greetings (hi/hello/who are you/who created you/what can you do/what is your purpose/how does this work/why better than chatgpt/privacy questions):",
     "- Do NOT run search or cite sources.",
     "- Do NOT mention documents, files, uploads, a library, sources, or tooling.",
     "- Keep it brief and helpful. Preferred greeting: “Hello! How may I assist you today?”",
@@ -134,29 +133,38 @@ function buildPolicyShim(uploadTurn) {
   ].join("\n");
 }
 
-// ---- Intent gate (server-side, before OpenAI)
+// ---- Intent gate (server-side; returns canned UK-English text)
 function classifyIntent(text) {
   const t = (text || "").trim().toLowerCase();
+
   if (!t) return null;
 
   // greetings / small talk
   if (/^(hi|hello|hey|hiya|howdy|yo|good (morning|afternoon|evening))\b/.test(t)) return "greeting";
   if (/^(how(('|’)?s)? it going|how are (you|u)|you ok\??)/.test(t)) return "greeting";
 
-  // meta / identity / creator / purpose / capability
+  // identity / creator / purpose / capability
   if (/\bwho (are|r) (you|u)\b/.test(t)) return "who";
   if (/\bwho (made|created|built) (you|u)\b|\bwho owns you\b|\bowner\b/.test(t)) return "creator";
-  if (/\bwhat (is|’s|'s) your purpose\b|\bwhy (were you created|do you exist)\b/.test(t)) return "purpose";
-  if (/\bwhat can (you|u) do\b|\bhow can (you|u) help\b|\bexamples? of (how|what) (you|u) can do\b/.test(t)) return "capability";
+  if (/\bwhat (is|’s|'s) your purpose\b|\bwhy (were you created|do you exist)\b|\bprime directive\b/.test(t)) return "purpose";
+  if (/\bwhat can (you|u) do\b|\bhow can (you|u) help\b|\bexamples? of (how|what) (you|u) can do\b|\bwhat can u even do\b/.test(t)) return "capability";
 
-  // process / how to use
-  if (/\bhow (do|to) (i|we) (use|work with) (you|this)\b|\bcan i upload\b|\bhow to upload\b/.test(t)) return "process";
+  // process / “how does this work”
+  if (/\bhow (does|do) (this|it) work\b|\bhow (do|to) (i|we) (use|work with) (you|this)\b|\bcan i upload\b|\bhow to upload\b/.test(t)) return "process";
+
+  // privacy / data handling
+  if (/\b(what|how) (do|will) (you|u) (do|use) (with )?my data\b|\bdata (policy|privacy)\b|\bprivacy\b/.test(t)) return "privacy";
+
+  // comparison to ChatGPT / others
+  if (/\bwhy (are|is) (you|this) (better|different) than (chatgpt|gpt|openai)\b|\bwhy is this better than chat ?gpt\b/.test(t)) return "comparison";
+
+  // “what files?” challenge (user pushes back on hallucination)
+  if (/\bwhat files\b|\bi haven'?t uploaded any\b|\bno (files|documents) uploaded\b/.test(t)) return "no_files";
 
   return null;
 }
 
 function cannedReply(kind) {
-  // All UK English; no doc mentions.
   switch (kind) {
     case "greeting":
       return "Hello! How may I assist you today?";
@@ -177,6 +185,12 @@ function cannedReply(kind) {
       ].join("\n");
     case "process":
       return "You can ask questions in plain English. If needed, you can attach a document and I’ll base my answer on the attached document for that turn.";
+    case "privacy":
+      return "I don’t need personal data to help. Please avoid sharing names or sensitive details. For more on privacy, see https://www.talkingcare.uk/privacy.";
+    case "comparison":
+      return "I’m focused on adult social care in England. I prioritise practical, regulation-aligned guidance for providers and staff.";
+    case "no_files":
+      return "Thanks for checking — I don’t see any document attached for this turn. How can I help?";
     default:
       return null;
   }
@@ -208,7 +222,7 @@ module.exports = async (req, res) => {
       res.statusCode = 400; return res.end(JSON.stringify({ error: "Missing userMessage" }));
     }
 
-    // ---------- INTENT GATE: intercept meta/greetings/process ----------
+    // ---------- INTENT GATE ----------
     const intent = classifyIntent(userMessage);
     if (intent) {
       const reply = cannedReply(intent);
@@ -221,7 +235,6 @@ module.exports = async (req, res) => {
         sseDone(res);
         return;
       } else {
-        // Minimal non-stream JSON shaped like /v1/responses
         res.setHeader("Content-Type", "application/json");
         return res.end(JSON.stringify({
           id: "resp_local_intent_gate",
@@ -238,12 +251,10 @@ module.exports = async (req, res) => {
         }));
       }
     }
-    // -------------------------------------------------------------------
+    // ----------------------------------
 
     // --- Fetch Assistant + resolve model/instructions
-    let assistant = null, asstText = "", resolvedModel = FALLBACK_MODEL;
-    let usingAssistant = false;
-
+    let assistant = null, asstText = "", resolvedModel = FALLBACK_MODEL, usingAssistant = false;
     try {
       assistant = await fetchAssistant();
       if (assistant && typeof assistant.instructions === "string" && assistant.instructions.trim().length) {
@@ -253,9 +264,7 @@ module.exports = async (req, res) => {
       if (assistant && typeof assistant.model === "string" && assistant.model.trim()) {
         resolvedModel = assistant.model.trim();
       }
-    } catch {
-      usingAssistant = false; asstText = "";
-    }
+    } catch { usingAssistant = false; asstText = ""; }
 
     // Build system message: shim + assistant instructions
     const uploadTurn = !!upload_file_id;
@@ -271,7 +280,6 @@ module.exports = async (req, res) => {
     // Tools (vector stores)
     let tools = [];
     let tempVS = null;
-
     if (uploadTurn) {
       tempVS = await createTempVS("TCN temp (this turn)");
       const vsFileId = await addFileToVS(tempVS, upload_file_id);
