@@ -1,19 +1,14 @@
 // /api/assistant.js — Vercel serverless (CommonJS)
 //
-// Adds a dynamic intent gate before calling OpenAI:
-// - Catches greetings/identity/capability/process/privacy/comparison/"what files?" / "document store" probes
-// - Returns UK-English canned replies with NO file/library/tool mentions
-// - Skips OpenAI + vector store for those intents
-//
-// For content questions, falls through to your normal pipeline:
-// - Optionally fetches Assistant (v2) and appends its instructions after a small UK-English shim
-// - Upload turn -> create temp vector store and use file_search
-// - Otherwise optionally include library vector store
-// - Streams SSE to the client
+// Intent gate + low-signal guard + tool gating:
+// - Nonsense/low-signal => neutral greeting (“How may I assist you today?”)
+// - Greetings/identity/capability/process/privacy/comparisons => canned replies (UK English), NO tools, NO OpenAI call
+// - Content questions => fetch Assistant (v2), build system (shim + assistant), and only attach tools if content-ish or upload this turn
+// - Never list or inventory files (reinforced in shim + by not giving tools for meta/nonsense)
 //
 // Env:
 // - OPENAI_API_KEY               (required)
-// - TCN_ASSISTANT_ID             (required) asst_... (used to fetch live instructions/model)
+// - TCN_ASSISTANT_ID             (required) asst_...
 // - TCN_LIBRARY_VECTOR_STORE_ID  (optional; library store id)
 // - TCN_ALLOWED_ORIGIN           (optional; default https://www.talkingcare.uk)
 // - TCN_MODEL                    (optional fallback; default gpt-4o-mini-2024-07-18)
@@ -81,7 +76,7 @@ async function fetchAssistant() {
 }
 
 // ---- Vector store helpers ----
-async function createTempVS(name = "TCN temp store") {
+async function createTempVS(name = "TCN temp (this turn)") {
   const r = await oi("/v1/vector_stores", { method: "POST", body: { name } });
   if (!r.ok) throw new Error(`create vector store failed: ${r.status} ${await r.text()}`);
   const d = await r.json(); return d.id;
@@ -116,35 +111,39 @@ function mapHistory(history = []) {
   return arr;
 }
 
-// ---- Dynamic policy shim (overrides conflicts)
-function buildPolicyShim(uploadTurn) {
-  return [
-    "PRIORITY SHIM — Apply these rules first. If any other instruction conflicts with this shim, this shim wins.",
-    "",
-    "Language & style:",
-    "- Use UK English spelling, punctuation and grammar.",
-    "",
-    "Identity & attribution:",
-    "- You are Talking Care Navigator (TCN), a support tool for adult social care in England.",
-    "- If asked who created/built/owns you: reply exactly “I was created by Chris Revett at Talking Care.”",
-    "- If asked who you are: start with “I am Talking Care Navigator…”",
-    "- Only if specifically asked about technology: you may add “I use OpenAI’s models under the hood.”",
-    "",
-    "Meta/greetings (e.g., hi/hello/how are you?/who are you?/who created you?/what can you do?):",
-    "- Do NOT run search or cite sources.",
-    "- Do NOT mention documents, files, uploads, a library, sources, or tooling.",
-    "- Keep it brief and helpful. Preferred greeting: “Hello! How may I assist you today?”",
-    "",
-    `Upload for THIS user turn: ${uploadTurn ? "YES" : "NO"}.`,
-    "- If NO: you must NOT refer to any uploads, files or documents being uploaded.",
-    "- If YES: if you need to reference it, call it “the attached document” (never “your upload” / “file you uploaded”).",
-  ].join("\n");
+// ---- Low-signal / nonsense detector
+function isLowSignal(message) {
+  const t = (message || "").trim();
+  if (!t) return true;
+  // Only punctuation / slashes / symbols
+  if (/^[\s\/\?\.\!\,\-\_\|\*\+\=\(\)\[\]\{\}:;~`'"]+$/.test(t)) return true;
+  // Very few letters (<= 2) after stripping non-letters
+  const letters = (t.replace(/[^a-zA-Z]/g, "") || "");
+  if (letters.length <= 2) return true;
+  // Long repeated single char (e.g., "waaaaaa")
+  if (/(.)\1{3,}/.test(t)) return true;
+  return false;
+}
+
+// ---- Content-ish detector (governs tool inclusion)
+function isContentish(message) {
+  const t = (message || "").toLowerCase();
+  const keywords = [
+    "regulation", "reg ", "reg.", "care act", "statutory guidance", "cqc", "quality statements",
+    "kloe", "dols", "mca", "policy", "procedure", "audit", "checklist", "summary", "summarise",
+    "explain", "what does", "evidence", "section", "schedule", "safeguard", "best practice",
+    "require", "compliance", "inspection", "guidance", "citations", "source", "according"
+  ];
+  if (keywords.some(k => t.includes(k))) return true;
+  if (/\?$/.test(t)) return true; // questions are often content-seeking
+  return false;
 }
 
 // ---- Intent gate (server-side)
 function classifyIntent(text) {
   const t = (text || "").trim().toLowerCase();
-  if (!t) return null;
+  if (!t) return "greeting";
+  if (isLowSignal(t)) return "greeting";
 
   // greetings / small talk
   if (/^(hi|hello|hey|hiya|howdy|yo|good (morning|afternoon|evening))\b/.test(t)) return "greeting";
@@ -157,7 +156,7 @@ function classifyIntent(text) {
   if (/\bwho (made|created|built) (you|u)\b|\bwho owns you\b|\bowner\b/.test(t)) return "creator";
   if (/\bwhat (is|’s|'s) your (purpose|goal|mission|objective|role)\b|\bwhy (were you created|do you exist)\b|\bprime directive\b/.test(t)) return "purpose";
 
-  // NEW: capability expressions
+  // capability
   if (/\bwhat do (you|u) do\b|\bwhat('?|’)?s your (role|job|function|capabilities?)\b/.test(t)) return "capability";
   if (/\bwhat can (you|u) do\b|\bhow can (you|u) help\b|\bexamples? of (how|what) (you|u) can do\b|\bwhat can u even do\b/.test(t)) return "capability";
 
@@ -175,10 +174,10 @@ function classifyIntent(text) {
   // “what files?” / inventory probes
   if (/\bwhat files\??$|\bi haven'?t uploaded any\b|\bno (files|documents) uploaded\b/.test(t)) return "no_files";
 
-  // explicit “document store / library contents” inventory questions
-  if (/\b(document|doc) store\b|\bwhat (files|documents).*\b(do you have|are in (your|the) (library|store))\b/.test(t)) return "inventory";
+  // “document store / library contents” inventory questions
+  if (/\b(document|doc) store\b|\bwhat (files|documents).* (do you have|are in (your|the) (library|store))\b/.test(t)) return "inventory";
 
-  return null;
+  return null; // treat as potential content
 }
 
 function cannedReply(kind) {
@@ -209,10 +208,37 @@ function cannedReply(kind) {
     case "no_files":
       return "Understood — I’ll only refer to an attached document if you add one. How can I help today?";
     case "inventory":
-      return "I don’t maintain a personal document store for you. I only use (a) the attached document for this turn, if you add one, and (b) the Talking Care Navigator Library. I don’t list or inventory documents. How can I help today?";
+      return "I don’t list or inventory documents. If you add an attached document for this turn, I can refer to it, and I can also use the Talking Care Navigator Library where appropriate. How can I help today?";
     default:
       return null;
   }
+}
+
+// ---- Dynamic policy shim (overrides conflicts)
+function buildPolicyShim(uploadTurn) {
+  return [
+    "PRIORITY SHIM — Apply these rules first. If any other instruction conflicts with this shim, this shim wins.",
+    "",
+    "Language & style:",
+    "- Use UK English spelling, punctuation and grammar.",
+    "",
+    "Identity & attribution:",
+    "- You are Talking Care Navigator (TCN), a support tool for adult social care in England.",
+    "- If asked who created/built/owns you: reply exactly “I was created by Chris Revett at Talking Care.”",
+    "- If asked who you are: start with “I am Talking Care Navigator…”",
+    "- Only if specifically asked about technology: you may add “I use OpenAI’s models under the hood.”",
+    "",
+    "Meta/greetings (hi/hello/how are you/who are you/who created you/what can you do):",
+    "- Do NOT run search or cite sources.",
+    "- Do NOT mention documents, files, uploads, a library, sources, or tooling.",
+    "- Keep it brief and helpful. Preferred greeting: “Hello! How may I assist you today?”",
+    "",
+    `Upload for THIS user turn: ${uploadTurn ? "YES" : "NO"}.`,
+    "- If NO: you must NOT refer to any uploads, files or documents being uploaded.",
+    "- If YES and you need to reference it: call it “the attached document” (never “your upload” / “file you uploaded”).",
+    "",
+    "Never list or enumerate filenames or document titles. If asked to list or inventory documents, say: “I don’t list or inventory documents…” and continue helpfully.",
+  ].join("\n");
 }
 
 module.exports = async (req, res) => {
@@ -243,23 +269,19 @@ module.exports = async (req, res) => {
 
     const uploadTurn = !!upload_file_id;
 
-    // ---- INTENT GATE: return canned replies for meta/process etc., ignore uploads
+    // ---- INTENT GATE: canned replies for meta/greetings/nonsense/etc.
     const intent = classifyIntent(userMessage);
+    const isMeta = !!intent;
     const canned = intent ? cannedReply(intent) : null;
+
     if (canned) {
       if (wantStream) {
         if (!res.headersSent) { sseHead(res); sseEvent(res, "start", { ok: true }); }
-        sseEvent(res, "info", {
-          note: "canned_reply",
-          intent,
-          used_assistant: false,
-          used_tools: false
-        });
+        sseEvent(res, "info", { note: "canned_reply", intent, used_assistant: false, used_tools: false });
         sseEvent(res, "response.output_text.delta", { delta: canned });
         sseEvent(res, "response.completed", { done: true });
         return sseDone(res);
       } else {
-        // Minimal shape similar to Responses API (enough for debugging)
         return res.end(JSON.stringify({
           id: `resp_${Math.random().toString(36).slice(2)}`,
           object: "response",
@@ -274,7 +296,7 @@ module.exports = async (req, res) => {
       }
     }
 
-    // --- Fetch Assistant + resolve model/instructions (content questions only)
+    // --- Content path: fetch Assistant + build prompt
     let assistant = null, asstText = "", resolvedModel = FALLBACK_MODEL;
     let usingAssistant = false;
 
@@ -291,7 +313,7 @@ module.exports = async (req, res) => {
       usingAssistant = false; asstText = "";
     }
 
-    // Build system message: shim + assistant instructions
+    // Build system message
     const shim = buildPolicyShim(uploadTurn);
     const systemText = [shim, asstText].filter(Boolean).join("\n\n");
 
@@ -301,31 +323,33 @@ module.exports = async (req, res) => {
     input.push(...mapHistory(history || []));
     input.push({ role: "user", content: [{ type: "input_text", text: userMessage }] });
 
-    // Tools (vector stores)
+    // Decide whether to include tools (file_search / library)
+    // Only for clearly content-ish requests or when there's an upload this turn.
+    const contentLikely = isContentish(userMessage);
     let tools = [];
     let tempVS = null;
 
-    if (uploadTurn) {
+    if (uploadTurn && contentLikely) {
       tempVS = await createTempVS("TCN temp (this turn)");
       const vsFileId = await addFileToVS(tempVS, upload_file_id);
       if (wantStream) { sseHead(res); sseEvent(res, "start", { ok: true }); sseEvent(res, "info", { note: "temp_vector_store_created", id: tempVS }); }
       await waitVSFileReady(tempVS, vsFileId);
       if (wantStream) sseEvent(res, "info", { note: "temp_vector_store_ready", id: tempVS });
       tools = [{ type: "file_search", vector_store_ids: [tempVS] }];
-    } else if (LIBRARY_VS_ID) {
+    } else if (!uploadTurn && contentLikely && LIBRARY_VS_ID) {
       tools = [{ type: "file_search", vector_store_ids: [LIBRARY_VS_ID] }];
       if (wantStream && !res.headersSent) { sseHead(res); sseEvent(res, "start", { ok: true }); }
     } else {
+      // No tools for ambiguous/non-content queries — prevents any file chatter/inventory
       if (wantStream && !res.headersSent) { sseHead(res); sseEvent(res, "start", { ok: true }); }
     }
 
-    // Payload (slightly lower temp for tighter compliance)
     const payload = {
       model: resolvedModel,
       input,
       tools,
-      tool_choice: "auto",
-      temperature: 0.6,     // was 1.0
+      tool_choice: tools.length ? "auto" : "none",
+      temperature: 0.5, // tighter compliance
       text: { format: { type: "text" }, verbosity: "medium" },
       top_p: 1,
       truncation: "disabled",
@@ -339,7 +363,10 @@ module.exports = async (req, res) => {
       assistant_id: usingAssistant ? ASSISTANT_ID : null,
       assistant_name: usingAssistant && assistant ? assistant.name || null : null,
       system_len: systemText.length || 0,
-      model: resolvedModel
+      model: resolvedModel,
+      tools_enabled: tools.length > 0,
+      upload_turn: uploadTurn,
+      content_likely: contentLikely
     });
 
     // Non-stream
@@ -356,7 +383,6 @@ module.exports = async (req, res) => {
     try {
       streamResp = await oi("/v1/responses", { method: "POST", body: { ...payload, stream: true }, stream: true });
     } catch (e) {
-      // Fallback to non-stream and emit via SSE
       const r2 = await oi("/v1/responses", { method: "POST", body: payload, stream: false });
       const txt2 = await r2.text();
       if (!r2.ok) { sseEvent(res, "error", { message: `OpenAI stream init failed: ${String(e?.message || e)}; fallback also failed: ${txt2}` }); sseDone(res); return; }
