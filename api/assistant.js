@@ -128,8 +128,9 @@ function classifyIntent(text) {
   if (!t) return "greeting";
   if (isLowSignal(t)) return "greeting";
 
-  // greetings / small talk
-  if (/^(hi|hello|hey|hiya|howdy|yo|good (morning|afternoon|evening))\b/.test(t)) return "greeting";
+  // greetings / small talk (expanded + curly apostrophe support)
+  if (/^(hi|hello|hey|hiya|howdy|yo|yoyo|oi(?:\s+oi)?|sup|wass?up|wazz+up|whazz+up|what(?:'|’)?s up|whatsup)\b/.test(t)) return "greeting";
+  if (/^good (morning|afternoon|evening)\b/.test(t)) return "greeting";
   if (/(are|r)\s*(you|u)\s*ok(ay)?\??$/.test(t)) return "greeting";
   if (/\bhow('?|’)?s it going\b|\bhow are (you|u)\b/.test(t)) return "greeting";
 
