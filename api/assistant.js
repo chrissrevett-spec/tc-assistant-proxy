@@ -1,10 +1,12 @@
 // /api/assistant.js — Vercel serverless (CommonJS)
 //
-// Intent gate + tool gating + tiny streaming sanitizer:
+// Intent gate + tool gating + careful streaming sanitizer:
 // - Meta/low-signal => canned UK-English reply. NO tools.
-// - Content => fetch Assistant(v2), build system (shim + assistant), attach tools only when appropriate.
-// - Streaming sanitizer removes ONLY banned upload phrasing and filename inventories,
-//   never touching citations or other content.
+// - Content => fetch Assistant(v2), merge shim + assistant instructions, tools only when appropriate.
+// - Streaming sanitizer:
+//     * Rewrites "files you've uploaded" / inventory chatter.
+//     * Does NOT touch "Sources:" blocks (citations remain).
+//     * Never enumerates filenames from the store.
 //
 // Env:
 // - OPENAI_API_KEY               (required)
@@ -123,16 +125,16 @@ function isLowSignal(message) {
 }
 
 // ---- Content-ish detector (governs tool inclusion)
+// IMPORTANT: no longer treats "any question mark" as content — only domain signals
 function isContentish(message) {
   const t = (message || "").toLowerCase();
-  // Domain-y words only; avoid generic “is this good?”
   const keywords = [
     "regulation","care act","statutory guidance","cqc","quality statements","kloe",
     "dols","mca","policy","procedure","audit","checklist","safeguard","inspection",
     "compliance","risk assessment","capacity","duty of candour","provider","registered manager",
-    "reg ", "reg.", "section ", "schedule "
+    "reg ","reg.","section ","schedule "
   ];
-  return keywords.some(k => t.includes(k)) || /\?$/.test(t);
+  return keywords.some(k => t.includes(k));
 }
 
 // ---- Intent gate (server-side)
@@ -166,14 +168,13 @@ function classifyIntent(text) {
   if (/\bwhy (is|are) (this|you) (better|different) (than|to) (chatgpt|chat gpt|gpt|openai)\b/.test(t)) return "comparison";
   if (/\b(compare|difference|vs\.?|versus)\b.*\b(chatgpt|chat gpt|gpt|openai)\b/.test(t)) return "comparison";
 
-  // “what files?” / inventory probes
+  // inventory probes
   if (/\bwhat files\??$|\bi haven'?t uploaded any\b|\bno (files|documents) uploaded\b/.test(t)) return "no_files";
-
-  // “document store / library contents” inventory questions
   if (/\b(document|doc) store\b|\bwhat (files|documents).* (do you have|are in (your|the) (library|store))\b/.test(t)) return "inventory";
 
-  // appearance/meta
+  // appearance/meta & preferences
   if (/\bwhat do you look like\b|\bappearance\b/.test(t)) return "appearance";
+  if (/\bdo (you|u) like\b|\bwhat('?|’)?s your favourite\b|\bfavorite\b/.test(t)) return "preference";
 
   return null; // treat as potential content
 }
@@ -209,6 +210,8 @@ function cannedReply(kind) {
       return "I don’t list or inventory documents. If you add an attached document for this turn, I can refer to it, and I can also use the Talking Care Navigator Library where appropriate. How can I help today?";
     case "appearance":
       return "I don’t have a physical appearance. How may I assist you today?";
+    case "preference":
+      return "I don’t have personal preferences. How may I assist you today?";
     default:
       return null;
   }
@@ -237,31 +240,78 @@ function buildPolicyShim(uploadTurn) {
     "- If NO: you must NOT refer to uploads, files or documents being uploaded.",
     "- If YES and you need to reference it: call it “the attached document” (never “your upload” / “file you uploaded”).",
     "",
-    "Never list or enumerate filenames or document titles. If asked to list or inventory documents, say: “I don’t list or inventory documents…” and continue helpfully.",
+    "Never list or enumerate filenames or document titles from a store/inventory. Provide citations only when relevant to a content answer.",
   ].join("\n");
 }
 
-// ---- Streaming sanitizer: blocks only upload-chatter and file lists
-function sanitizeDeltaText(deltaText, { uploadTurn }) {
-  if (!deltaText) return deltaText;
+// ---- Streaming sanitizer with tiny state (per request)
+function makeSanitizer({ uploadTurn }) {
+  // state lives across streamed chunks
+  const state = { suppressList: false };
 
-  // Always ban filename inventories (bullet/numbered lines with common extensions)
-  deltaText = deltaText.replace(
-    /(^|\n)[ \t]*[-*•\u2022]?[ \t]*[^\n]*\.(pdf|docx?|pptx?|xlsx?|xls|csv)\b.*(?=\n|$)/gi,
-    (m, p1) => `${p1}• [document omitted]`
-  );
+  function neutraliseUploadPhrasing(txt) {
+    // broad neutralisation of "files you've uploaded" & friends
+    let s = txt;
 
-  // If no upload this turn, rewrite upload phrasing to neutral terms
-  if (!uploadTurn) {
-    deltaText = deltaText
-      .replace(/\b(files|documents)\s+(you(?:'|’)??ve|you have)\s+uploaded\b/gi, "documents")
-      .replace(/\b(I|we)\s+(?:see|can see)\s+(?:you(?:'|’)??ve|you have)\s+uploaded\b/gi, "If you attach a document for this turn, I can refer to it")
-      .replace(/\byou(?:'|’)??ve uploaded\b/gi, "you add an attached document")
-      .replace(/\byou have uploaded\b/gi, "you add an attached document")
-      .replace(/\bhere (are|is) (the )?(files|documents) (you(?:'|’)??ve|you have) uploaded\b/gi, "I don’t list or inventory documents");
+    // normalise curly quotes: we’ll match both variants
+    const up = "(?:you(?:'|’)?ve|you have) uploaded";
+
+    // global rewrites when we must not talk about uploads
+    if (!uploadTurn) {
+      s = s.replace(new RegExp(`\\b(files|documents)\\s+${up}\\b`, "gi"), "documents");
+      s = s.replace(new RegExp(`\\b${up}\\b`, "gi"), "you add an attached document for this turn");
+      s = s.replace(/\b(I|we)\s+(?:can\s+)?see\s+(?:that\s+)?(?:you(?:'|’)?ve|you have)\s+uploaded\b/gi,
+                    "If you attach a document for this turn, I can refer to it");
+      s = s.replace(/\b(here (are|is) (the )?(files|documents) (that )?you(?:'|’)?ve uploaded)\b/gi,
+                    "I don’t list or inventory documents");
+      s = s.replace(/\b(the|your)\s+uploaded\s+(files|documents)\b/gi, "documents");
+      s = s.replace(/\bfiles\s+you\s+uploaded\b/gi, "documents");
+    }
+
+    // trigger inventory suppression when model starts listing uploads
+    if (/\b(here (are|is) (the )?(files|documents).*(uploaded|attached)|you (?:have|(?:'|’)??ve) uploaded)\b/i.test(s)) {
+      state.suppressList = true;
+    }
+
+    return s;
   }
 
-  return deltaText;
+  function scrubFilenameLines(s) {
+    if (!state.suppressList) return s;
+    const lines = s.split("\n");
+
+    for (let i = 0; i < lines.length; i++) {
+      const L = lines[i];
+
+      // don't touch citations blocks
+      if (/^\s*sources?\s*:/i.test(L)) { state.suppressList = false; continue; }
+      if (L.toLowerCase().includes("source:")) { state.suppressList = false; continue; }
+
+      // replace obvious filename lines (with common extensions) ONLY while suppressList is active
+      if (/[^\n]*\.(pdf|docx?|pptx?|xlsx?|xls|csv)\b/i.test(L)) {
+        lines[i] = "• [document omitted]";
+        continue;
+      }
+
+      // end suppression when a plain sentence appears
+      if (/[.!?]\s*$/.test(L) || /^\s*$/.test(L)) {
+        state.suppressList = false;
+      }
+    }
+    return lines.join("\n");
+  }
+
+  return function sanitizeDeltaText(deltaText) {
+    if (!deltaText) return deltaText;
+
+    // Never touch explicit Sources blocks (so citations remain intact)
+    if (/^\s*sources?\s*:/im.test(deltaText)) return deltaText;
+
+    let s = deltaText;
+    s = neutraliseUploadPhrasing(s);
+    s = scrubFilenameLines(s);
+    return s;
+  };
 }
 
 module.exports = async (req, res) => {
@@ -295,7 +345,7 @@ module.exports = async (req, res) => {
     // ---- INTENT GATE
     const intent = classifyIntent(userMessage);
     const canned = intent ? cannedReply(intent) : null;
-    const contentLikely = !intent && isContentish(userMessage);
+    const contentLikely = !intent && isContentish(userMessage); // tools only when domain-y
 
     if (canned) {
       if (wantStream) {
@@ -392,6 +442,8 @@ module.exports = async (req, res) => {
     });
 
     // ---- Request to OpenAI
+    const sanitizer = makeSanitizer({ uploadTurn });
+
     let streamResp;
     try {
       streamResp = await oi("/v1/responses", { method: "POST", body: { ...payload, stream: true }, stream: true });
@@ -404,7 +456,7 @@ module.exports = async (req, res) => {
         const obj = JSON.parse(txt2);
         const out = (obj?.output || []).find(o => o.type === "message");
         let text = (out?.content || []).map(c => c.type === "output_text" ? (c.text || "") : "").join("");
-        text = sanitizeDeltaText(text, { uploadTurn });
+        text = sanitizer(text);
         sseEvent(res, "response.output_text.delta", { delta: text || "" });
       } catch {}
       sseEvent(res, "response.completed", { done: true });
@@ -454,19 +506,18 @@ module.exports = async (req, res) => {
             let obj;
             try { obj = JSON.parse(raw); } catch { obj = null; }
             if (obj) {
-              // Handle both formats
               if (typeof obj.delta === "string") {
-                obj.delta = sanitizeDeltaText(obj.delta, { uploadTurn });
+                obj.delta = sanitizer(obj.delta);
                 forward(event, obj);
               } else if (obj.delta && Array.isArray(obj.delta.content)) {
                 obj.delta.content = obj.delta.content.map(c =>
                   (c && c.type && c.type.includes("output_text") && typeof c.text === "string")
-                    ? { ...c, text: sanitizeDeltaText(c.text, { uploadTurn }) }
+                    ? { ...c, text: sanitizer(c.text) }
                     : c
                 );
                 forward(event, obj);
               } else if (typeof obj.text_delta === "string") {
-                obj.text_delta = sanitizeDeltaText(obj.text_delta, { uploadTurn });
+                obj.text_delta = sanitizer(obj.text_delta);
                 forward(event, obj);
               } else {
                 forward(event, obj);
@@ -475,8 +526,7 @@ module.exports = async (req, res) => {
               forward(event, raw);
             }
           } else {
-            // Non-text events: pass through unchanged (keeps citations intact)
-            forward(event, raw);
+            forward(event, raw); // keep citations & other events intact
           }
         }
       }
