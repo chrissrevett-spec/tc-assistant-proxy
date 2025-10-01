@@ -31,9 +31,11 @@
       border-top: 1px solid #f0f0f0;
       border-bottom: 1px solid #f0f0f0;
       order: 2;
+      position: sticky; bottom: 0; z-index: 2; /* keep controls visible */
     }
 
     .inputrow { display: flex; gap: 8px; align-items: flex-start; flex-wrap: nowrap; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
     .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
 
@@ -49,17 +51,37 @@
       display: inline-flex; align-items: center; justify-content: center; gap: 8px;
       height: 40px; padding: 0 14px; cursor: pointer; border-radius: 10px; border: 1px solid #ddd;
       background: #FAFAFA; color: #333; font-size: 14px; line-height: 1; letter-spacing: .2px;
-      transition: background .2s, color .2s, border-color .2s, box-shadow .2s;
-      white-space: nowrap; user-select: none;
-      flex: 0 0 auto;
+      transition: background .2s, color .2s, border-color .2s, box-shadow .2s, transform .08s ease;
+      white-space: nowrap; user-select: none; flex: 0 0 auto;
     }
     .ui-btn:hover { background: #f0f0f0; border-color: #ccc; }
     .ui-btn.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
+    .ui-btn.danger { border-color: #f2b8b8; color: #b40000; }
+    .ui-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* Request: slightly larger emojis inside buttons */
+    .ui-btn .emoji { font-size: 18px; line-height: 1; display: inline-block; }
+
+    /* “Paperclip” hover/click animations */
+    @keyframes hop {
+      0%   { transform: translateY(0); }
+      50%  { transform: translateY(-3px); }
+      100% { transform: translateY(0); }
+    }
+    @keyframes spinOnce {
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(360deg); }
+    }
+    /* Hop while hovered */
+    #attach-btn:hover .clip-emoji { animation: hop 600ms ease-in-out infinite; }
+    /* Spin once when we add/remove a class via JS */
+    .spin-once { animation: spinOnce 500ms ease-in-out 1; }
 
     @media (max-width: 540px) {
       .inputrow { flex-wrap: wrap; }
       .inputrow textarea { flex: 1 1 100%; width: 100%; }
-      .inputrow .ui-btn { margin-top: 8px; }
+      .controls { gap: 6px; }
+      .ui-btn { height: 38px; }
     }
 
     .attach-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
@@ -73,6 +95,9 @@
     .attach-status.pending { border-color: #ddd; background: #FAFAFA; color: #333; }
     .attach-status.error { border-color: #e57373; background: #fff5f5; color: #b71c1c; }
     .attach-status .icon { font-size: 14px; }
+
+    /* Drag & drop highlight */
+    .drop-active textarea { border-color: #9ad0ff; box-shadow: 0 0 0 3px rgba(0,140,255,0.12); background: #f5fbff; }
 
     .chat-wrap { display: none; }
     .chat {
@@ -109,12 +134,31 @@
       display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
       font-weight: 600; font-size: 13px; color: #111;
     }
-    .bubble-actions { margin-left: auto; display: flex; gap: 6px; }
+    .bubble-meta { margin-left: auto; font-weight: 400; font-size: 11px; color: #777; }
+
+    .bubble-actions { margin-left: 8px; display: flex; gap: 6px; }
     .copy-btn {
       border: 1px solid #ddd; background: #FAFAFA; color: #333; border-radius: 6px;
       font-size: 12px; padding: 2px 6px; cursor: pointer;
     }
     .copy-btn:hover { background: #f0f0f0; }
+
+    .used-file-note, .upload-banner, .error-banner {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid #ddd; background: #FAFAFA;
+      margin-top: 6px;
+    }
+    .used-file-note { border-color: #4caf50; background: #f2fff2; color: #256f2a; }
+    .upload-banner { border-color: #4caf50; background: #f2fff2; color: #256f2a; }
+    .error-banner { border-color: #e57373; background: #fff5f5; color: #b71c1c; }
+
+    /* Assistant “Using: …” chip */
+    .using-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid #cde6cd; background: #f6fff6; color: #215c21;
+      margin: 0 0 8px; max-width: 100%;
+    }
+    .using-chip .fname { max-width: 40ch; overflow: hidden; text-overflow: ellipsis; }
 
     .bubble-content { font-size: 14px; line-height: 1.5; }
     .bubble-content p { margin: 0 0 8px; }
@@ -130,16 +174,9 @@
     .bubble-content tr:nth-child(even) td { background: #fcfcfc; }
 
     .sources { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e5e5e5; font-size: 13px; color: #444; }
-
-    /* Added: small status chips used in chat */
-    .used-file-note, .upload-banner, .error-banner {
-      display: inline-flex; align-items: center; gap: 6px;
-      font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid #ddd; background: #FAFAFA;
-      margin-top: 6px;
-    }
-    .used-file-note { border-color: #4caf50; background: #f2fff2; color: #256f2a; }
-    .upload-banner { border-color: #4caf50; background: #f2fff2; color: #256f2a; }
-    .error-banner { border-color: #e57373; background: #fff5f5; color: #b71c1c; }
+    .sources .title { font-weight: 600; margin-bottom: 6px; }
+    .sources a { color: inherit; text-decoration: underline; }
+    .sources a:focus { outline: 2px solid #ddd; outline-offset: 2px; }
   </style>
 </head>
 <body>
@@ -147,17 +184,30 @@
     <div class="wrap">
       <h1>Talking Care Navigator</h1>
       <p class="sub">Ask me anything about adult social care in England, including CQC registrations, regulations and guidance, Mental Capacity Act and DoLS queries, best practice advice, auditing, policy queries and more. Always consult your organisations' confidentiality policy. Talking Care Navigator may make a mistake. Always check important info.</p>
-      <div id="status"></div>
+      <div id="status" role="status" aria-live="polite"></div>
     </div>
 
     <div class="inputbar" id="inputbar">
-      <div class="inputrow">
+      <div class="inputrow" id="dropzone">
         <label for="tc-input" class="sr">Message</label>
-        <textarea id="tc-input" placeholder="Type your question… 🙂"></textarea>
-        <button id="tc-ask-stream" class="ui-btn" title="Send" aria-label="Send">✈️ Send</button>
-        <button id="tc-clear" class="ui-btn secondary" title="Clear chat" aria-label="Clear">🧽 Clear</button>
-        <button id="attach-btn" class="ui-btn" title="Attach a file" aria-label="Attach">📎 Attach</button>
+        <textarea id="tc-input" placeholder="Type your question… 🙂" aria-label="Message"></textarea>
+
+        <div class="controls" aria-label="Controls">
+          <button id="tc-ask-stream" class="ui-btn" title="Send" aria-label="Send">
+            <span class="emoji">✈️</span> Send
+          </button>
+          <button id="tc-stop" class="ui-btn danger" title="Stop response" aria-label="Stop" disabled>
+            <span class="emoji">⏹</span> Stop
+          </button>
+          <button id="tc-clear" class="ui-btn secondary" title="Clear chat" aria-label="Clear">
+            <span class="emoji">🧽</span> Clear
+          </button>
+          <button id="attach-btn" class="ui-btn" title="Attach a file" aria-label="Attach">
+            <span class="emoji clip-emoji">📎</span> Attach
+          </button>
+        </div>
       </div>
+
       <div class="attach-row">
         <input id="file-input" type="file" style="display:none" />
         <span id="attach-status" class="attach-status pending" style="display:none;">
@@ -191,8 +241,10 @@
     const $shell   = document.getElementById("shell");
     const $chat    = document.getElementById("chat");
     const $inputbar= document.getElementById("inputbar");
+    const $drop    = document.getElementById("dropzone");
     const $in      = document.getElementById("tc-input");
     const $send    = document.getElementById("tc-ask-stream");
+    const $stop    = document.getElementById("tc-stop");
     const $clear   = document.getElementById("tc-clear");
     const $status  = document.getElementById("status");
 
@@ -203,6 +255,7 @@
     const $attachName   = document.getElementById("attach-name");
 
     const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
+    const SOURCE_TITLE = "Sources:";
 
     function setStatus(t){ $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
     function activateChat(){ if (!$shell.classList.contains("chat-active")) $shell.classList.add("chat-active"); }
@@ -211,6 +264,11 @@
     const history = (() => { try { return JSON.parse(sessionStorage.getItem("tc_history") || "[]"); } catch { return []; } })();
     function saveHistory(){ try { sessionStorage.setItem("tc_history", JSON.stringify(history)); } catch {} }
     function clearHistory(){ history.length = 0; saveHistory(); }
+
+    function timeStamp() {
+      const d = new Date();
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
 
     function createMsg(role, headerText, withCopy=false){
       const msg = document.createElement("div");
@@ -227,7 +285,11 @@
       }
 
       const bubble = document.createElement("div"); bubble.className = "bubble";
-      const head = document.createElement("div"); head.className = "bubble-head"; head.textContent = headerText;
+      const head = document.createElement("div"); head.className = "bubble-head";
+      const title = document.createElement("div"); title.textContent = headerText;
+      const meta = document.createElement("div"); meta.className = "bubble-meta"; meta.textContent = timeStamp();
+      head.appendChild(title); head.appendChild(meta);
+
       const content = document.createElement("div"); content.className = "bubble-content";
 
       if (withCopy) {
@@ -240,14 +302,20 @@
             copyBtn.textContent = "✅ Copied"; setTimeout(() => (copyBtn.textContent = "📋 Copy"), 1200);
           });
         });
-        actions.appendChild(copyBtn); head.appendChild(actions);
+        head.appendChild(actions); actions.appendChild(copyBtn);
       }
 
-      bubble.appendChild(head); bubble.appendChild(content);
+      bubble.appendChild(head);
+
+      // slot for “Using: …” chip (assistant turns)
+      const usingSlot = document.createElement("div");
+      bubble.appendChild(usingSlot);
+
+      bubble.appendChild(content);
       msg.appendChild(avatar); msg.appendChild(bubble);
       $chat.appendChild(msg);
       $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
-      return { msg, content, bubble };
+      return { msg, content, bubble, usingSlot };
     }
 
     function renderMarkdown(md, el) {
@@ -266,17 +334,34 @@
         if (c.kind === "web")  { if (!seenURL.has(c.url)) { seenURL.add(c.url); urls.push(c); } }
       }
       if (!files.length && !urls.length) return;
+
+      // avoid duplicate Sources blocks
+      if (containerEl.querySelector(".sources")) return;
+
       const src = document.createElement("div");
       src.className = "sources";
       const title = document.createElement("div");
       title.className = "title";
-      title.textContent = "Sources:";
+      title.textContent = SOURCE_TITLE;
       src.appendChild(title);
+
       const list = document.createElement("ul");
       list.style.margin = "0"; list.style.paddingLeft = "20px";
-      [...files, ...urls].forEach((c) => {
-        const li = document.createElement("li"); li.textContent = c.label; list.appendChild(li);
+
+      files.forEach((c) => {
+        const li = document.createElement("li");
+        li.textContent = c.label || c.id;
+        list.appendChild(li);
       });
+      urls.forEach((c) => {
+        const li = document.createElement("li");
+        const a = document.createElement("a");
+        a.href = c.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+        a.textContent = c.label || c.url;
+        li.appendChild(a);
+        list.appendChild(li);
+      });
+
       src.appendChild(list);
       containerEl.appendChild(src);
       $inputbar.scrollIntoView({ block: "end", behavior: "smooth" });
@@ -284,11 +369,39 @@
 
     let currentAbort = null;
     let pendingUpload = { file_id: null, filename: "" };
+    let lastUsedAttachmentName = "";
 
-    // Upload UI
-    $attachBtn.addEventListener("click", () => $fileInput.click());
-    $fileInput.addEventListener("change", async () => {
-      const file = $fileInput.files?.[0];
+    // Upload UI (click)
+    $attachBtn.addEventListener("click", () => {
+      // spin on click (once)
+      const icon = $attachBtn.querySelector('.clip-emoji');
+      if (icon) {
+        icon.classList.remove('spin-once');
+        // force reflow to restart animation if clicked twice quickly
+        void icon.offsetWidth;
+        icon.classList.add('spin-once');
+      }
+      $fileInput.click();
+    });
+
+    // Drag & drop
+    ["dragenter","dragover"].forEach(evt => {
+      document.getElementById("dropzone").addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); $inputbar.classList.add("drop-active"); });
+    });
+    ["dragleave","drop"].forEach(evt => {
+      document.getElementById("dropzone").addEventListener(evt, (e) => { e.preventDefault(); e.stopPropagation(); $inputbar.classList.remove("drop-active"); });
+    });
+    document.getElementById("dropzone").addEventListener("drop", (e) => {
+      const dt = e.dataTransfer;
+      if (!dt || !dt.files || !dt.files.length) return;
+      handleFiles(dt.files);
+    });
+
+    // File input change
+    $fileInput.addEventListener("change", () => handleFiles($fileInput.files));
+
+    async function handleFiles(fileList) {
+      const file = fileList?.[0];
       if (!file) return;
 
       if (file.size > MAX_UPLOAD_BYTES) {
@@ -317,8 +430,7 @@
         } else {
           $attachStatus.className = "attach-status pending";
           $attachIcon.textContent = "⌛";
-          $attachName.textContent = "Processing… try your question in a moment";
-          $attachName.textContent = (file.name.length > 36 ? file.name.slice(0,33) + "..." : file.name);
+          $attachName.textContent = (file.name.length > 36 ? file.name.slice(0,33) + "..." : file.name) + " — processing…";
         }
       } catch (e) {
         $attachStatus.className = "attach-status error";
@@ -326,7 +438,7 @@
         $attachName.textContent = e?.message || "Upload failed";
         pendingUpload = { file_id: null, filename: "" };
       }
-    });
+    }
 
     // SSE ask
     async function askStream(prompt) {
@@ -338,20 +450,20 @@
       const userMsg = createMsg("user", "You");
       userMsg.content.textContent = prompt;
 
-      // Prepare request body (attach file if present for THIS turn) + UI confirmations
+      // Prepare request body (attach file if present for THIS turn)
       const body = { userMessage: prompt, history };
       let uploadTurn = false;
-      let usedFilename = "";
+      lastUsedAttachmentName = "";
 
       if (pendingUpload.file_id) {
         body.upload_file_id = pendingUpload.file_id;
         uploadTurn = true;
-        usedFilename = pendingUpload.filename || "";
+        lastUsedAttachmentName = pendingUpload.filename || "";
 
         // Show a chip in the user bubble
         const used = document.createElement("div");
         used.className = "used-file-note";
-        const shortName = usedFilename.length > 36 ? usedFilename.slice(0,33) + "..." : usedFilename;
+        const shortName = lastUsedAttachmentName.length > 36 ? lastUsedAttachmentName.slice(0,33) + "..." : lastUsedAttachmentName;
         used.innerHTML = `✅ Using: <strong>${shortName}</strong>`;
         userMsg.bubble.appendChild(used);
 
@@ -364,8 +476,16 @@
         $attachName.textContent = "";
       }
 
-      const { content: aContent, bubble: aBubble } = createMsg("assistant", "Talking Care Navigator", true);
+      const { content: aContent, bubble: aBubble, usingSlot } = createMsg("assistant", "Talking Care Navigator", true);
       aContent.innerHTML = `<em>Thinking… ⏳</em>`;
+
+      // Assistant “Using: …” chip
+      if (uploadTurn && lastUsedAttachmentName) {
+        const chip = document.createElement("div");
+        chip.className = "using-chip";
+        chip.innerHTML = `✅ <span>Using:</span> <span class="fname" title="${escapeHtml(lastUsedAttachmentName)}">${escapeHtml(lastUsedAttachmentName)}</span>`;
+        usingSlot.appendChild(chip);
+      }
 
       // Assistant-side banner confirming scope for upload turns
       if (uploadTurn) {
@@ -382,12 +502,14 @@
 
       setStatus("Thinking… ⏳");
       const ac = new AbortController(); currentAbort = ac;
+      $stop.disabled = false;
 
       let started = false;
       const watchdog = setTimeout(() => {
         if (!started) {
           aContent.innerHTML = `<span class="error-banner">⚠️ No stream started — check connectivity or CORS settings.</span>`;
           setStatus("");
+          $stop.disabled = true; currentAbort = null;
         }
       }, 10000);
 
@@ -402,7 +524,7 @@
       } catch (e) {
         clearTimeout(watchdog);
         aContent.innerHTML = `<span class="error-banner">⚠️ Request failed: ${escapeHtml(e?.message || e)}</span>`;
-        setStatus(""); currentAbort = null; return;
+        setStatus(""); currentAbort = null; $stop.disabled = true; return;
       }
 
       if (!r.ok || !r.body) {
@@ -410,10 +532,9 @@
         let err = `HTTP ${r.status}`;
         try { err += ` ${await r.text()}`; } catch {}
         aContent.innerHTML = `<span class="error-banner">⚠️ Stream failed: ${escapeHtml(err)}</span>`;
-        setStatus(""); currentAbort = null; return;
+        setStatus(""); currentAbort = null; $stop.disabled = true; return;
       }
 
-      // Single reader (avoid locked-stream error)
       const reader = r.body.getReader();
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
@@ -441,7 +562,7 @@
         if (event === "start") return;
 
         if (event === "info") {
-          // purely informational
+          // purely informational; you can surface tool telemetry here if you want
           return;
         }
 
@@ -452,7 +573,7 @@
           } catch {
             aContent.innerHTML = `<span class="error-banner">⚠️ ${escapeHtml(raw)}</span>`;
           }
-          setStatus(""); return;
+          setStatus(""); $stop.disabled = true; return;
         }
 
         if (event === "done" || event === "response.completed") {
@@ -467,6 +588,7 @@
             saveHistory();
             assistantTurnSaved = true;
           }
+          $stop.disabled = true; currentAbort = null;
           return;
         }
 
@@ -513,6 +635,7 @@
       } finally {
         clearTimeout(watchdog);
         currentAbort = null;
+        $stop.disabled = true;
         setStatus("");
       }
     }
@@ -522,16 +645,16 @@
     }
 
     // Events
-    document.getElementById("tc-ask-stream").addEventListener("click", () => {
+    $send.addEventListener("click", () => {
       const p = ($in.value || "").trim();
       if (!p) return;
       askStream(p);
       $in.value = "";
     });
     $in.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("tc-ask-stream").click(); }
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $send.click(); }
     });
-    document.getElementById("tc-clear").addEventListener("click", () => {
+    $clear.addEventListener("click", () => {
       if (currentAbort) { try { currentAbort.abort(); } catch {} currentAbort = null; }
       $chat.innerHTML = "";
       $in.value = "";
@@ -544,6 +667,13 @@
       $attachStatus.className = "attach-status pending";
       $attachIcon.textContent = "⌛";
       $attachName.textContent = "";
+      lastUsedAttachmentName = "";
+    });
+    $stop.addEventListener("click", () => {
+      if (currentAbort) { try { currentAbort.abort(); } catch {} }
+      currentAbort = null;
+      $stop.disabled = true;
+      setStatus("");
     });
   </script>
 </body>
