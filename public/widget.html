@@ -34,8 +34,10 @@
       position: sticky; bottom: 0; z-index: 2; /* keep controls visible */
     }
 
-    .inputrow { display: flex; gap: 8px; align-items: flex-start; flex-wrap: nowrap; }
-    .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    /* ---- layout tweak: textarea full width, buttons underneath on the left ---- */
+    .inputrow { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-start; padding-top: 4px; }
+    .inputrow textarea { width: 100%; }
 
     .sr { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden; }
 
@@ -76,8 +78,8 @@
     .spin-once { animation: spinOnce 500ms ease-in-out 1; }
 
     @media (max-width: 540px) {
-      .inputrow { flex-wrap: wrap; }
-      .inputrow textarea { flex: 1 1 100%; width: 100%; }
+      .inputrow { gap: 8px; }
+      .inputrow textarea { width: 100%; }
       .controls { gap: 6px; }
       .ui-btn { height: 38px; }
     }
@@ -426,7 +428,7 @@
           if (String(msg).includes("File type not supported")) {
             throw new Error("File type not supported. Please upload a different file.");
           }
-          throw new Error(msg || "Upload failed");
+          throw new Error(msg || "Upload failed";
         }
 
         pendingUpload = { file_id: data.file_id, filename: file.name };
