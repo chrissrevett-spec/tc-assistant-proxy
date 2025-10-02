@@ -34,7 +34,7 @@
       position: sticky; bottom: 0; z-index: 2; /* keep controls visible */
     }
 
-    /* ---- layout tweak: textarea full width, buttons underneath on the left ---- */
+    /* textarea full width, buttons underneath on the left */
     .inputrow { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
     .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-start; padding-top: 4px; }
     .inputrow textarea { width: 100%; }
@@ -428,7 +428,7 @@
           if (String(msg).includes("File type not supported")) {
             throw new Error("File type not supported. Please upload a different file.");
           }
-          throw new Error(msg || "Upload failed";
+          throw new Error(msg || "Upload failed");
         }
 
         pendingUpload = { file_id: data.file_id, filename: file.name };
@@ -611,7 +611,7 @@
         if (event.endsWith(".delta")) {
           let d; try { d = JSON.parse(raw); } catch { d = null; }
 
-          /* ---- ADDED: harvest embedded annotations/citations from deltas ---- */
+          /* harvest embedded annotations/citations from deltas */
           const harvest = (annos) => {
             if (!Array.isArray(annos)) return;
             for (const a of annos) {
@@ -629,7 +629,6 @@
               if (Array.isArray(part?.annotations)) harvest(part.annotations);
             }
           }
-          /* ---- END ADDED ---- */
 
           const deltaText =
             (d && typeof d.delta === "string") ? d.delta :
@@ -677,7 +676,9 @@
     }
 
     function escapeHtml(str) {
-      return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;","&gt;":">&gt;","\"":"&quot;","'":"&#039;" }[ch]));
+      return (str || "").replace(/[&<>"']/g, (ch) => ({
+        "&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#039;"
+      }[ch]));
     }
 
     // Events
