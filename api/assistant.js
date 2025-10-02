@@ -188,7 +188,7 @@ function cannedReply(kind) {
     case "process":
       return "Ask questions in plain English. If needed, attach a document for that turn and I’ll base my answer on the attached document.";
     case "privacy":
-      return "I don’t need personal data to help. Please avoid sharing names or sensitive details. For privacy information, see https://www.talkingcare.uk/privacy.";
+      return "For privacy information, see https://www.talkingcare.uk/privacy.";
     case "comparison":
       return "I’m focused on adult social care in England and prioritise practical, regulation-aligned guidance for providers and staff.";
     case "no_files":
