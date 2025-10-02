@@ -675,7 +675,7 @@
     }
 
     function escapeHtml(str) {
-      return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;" }[ch]));
+      return (str || "").replace(/[&<>"']/g, (ch) => ({ "&":"&amp;","<":"&lt;","&gt;":">&gt;","\"":"&quot;","'":"&#039;" }[ch]));
     }
 
     // Events
