@@ -220,6 +220,9 @@
     <div class="chat-wrap" id="chatwrap">
       <div id="chat" class="chat" aria-live="polite" aria-busy="false"></div>
     </div>
+
+    <!-- Sentinel used to scroll the nearest scrollable ancestor (or host page) -->
+    <div id="tcn-bottom" aria-hidden="true" style="height:1px;"></div>
   </div>
 
   <script>
@@ -260,7 +263,24 @@
 
     function setStatus(t){ $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
     function activateChat(){ if (!$shell.classList.contains("chat-active")) $shell.classList.add("chat-active"); }
-    function scrollToBottom(){ requestAnimationFrame(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })); }
+
+    // New: scroll the nearest scrollable ancestor (or page); ping parent if inside an iframe.
+    function scrollToBottom() {
+      const sentinel = document.getElementById("tcn-bottom") || $chat.lastElementChild;
+      if (!sentinel) return;
+
+      try {
+        sentinel.scrollIntoView({ block: "end", inline: "nearest", behavior: "smooth" });
+      } catch {
+        const se = document.scrollingElement || document.documentElement;
+        window.scrollTo({ top: se.scrollHeight, behavior: "smooth" });
+      }
+
+      // If embedded in an iframe, ask parent to bring the iframe into view as well
+      if (window.parent && window.parent !== window) {
+        try { window.parent.postMessage({ type: "tcn:scroll-into-view" }, "*"); } catch {}
+      }
+    }
 
     // Conversation history (client side)
     const history = (() => { try { return JSON.parse(sessionStorage.getItem("tc_history") || "[]"); } catch { return []; } })();
@@ -316,7 +336,7 @@
       bubble.appendChild(content);
       msg.appendChild(avatar); msg.appendChild(bubble);
       $chat.appendChild(msg);
-      scrollToBottom(); // fix auto-scroll
+      scrollToBottom(); // improved auto-scroll
       return { msg, content, bubble, usingSlot };
     }
 
@@ -324,7 +344,7 @@
       const html = marked.parse(md || "");
       const safe = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
       el.innerHTML = safe;
-      scrollToBottom(); // fix auto-scroll
+      scrollToBottom(); // improved auto-scroll
     }
 
     // Append a single consolidated "Sources:" list, with strong de-duplication.
@@ -395,7 +415,7 @@
 
       src.appendChild(list);
       containerEl.appendChild(src);
-      scrollToBottom(); // fix auto-scroll
+      scrollToBottom(); // improved auto-scroll
     }
 
     let currentAbort = null;
@@ -712,6 +732,14 @@
         "&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#039;"
       }[ch]));
     }
+
+    // Keep host page/container aligned when the chat grows
+    try {
+      if (window.ResizeObserver) {
+        const ro = new ResizeObserver(() => scrollToBottom());
+        ro.observe($chat);
+      }
+    } catch {}
 
     // Events
     $send.addEventListener("click", () => {
