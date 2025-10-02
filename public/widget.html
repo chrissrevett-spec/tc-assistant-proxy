@@ -327,17 +327,46 @@
       scrollToBottom(); // fix auto-scroll
     }
 
-    function appendSources(containerEl, citations) {
+    // Append a single consolidated "Sources:" list, with strong de-duplication.
+    function appendSources(containerEl, citations, { skipIfModelAlreadyCited = false, mdText = "" } = {}) {
       if (!citations || citations.length === 0) return;
-      const seenFile = new Set(), seenURL = new Set();
+
+      // If the model already wrote its own "Sources:" block, skip appending.
+      if (skipIfModelAlreadyCited) {
+        const hasModelSources =
+          /\n\s*(?:#{1,6}\s*)?sources?\s*:/i.test(mdText || "") ||               // markdown "Sources:" or "### Sources:"
+          /<h\d[^>]*>\s*sources?\s*<\/h\d>/i.test(containerEl.innerHTML) ||      // rendered heading
+          />\s*sources:\s*</i.test(containerEl.innerHTML);                       // bold/paragraph "Sources:"
+        if (hasModelSources) return;
+      }
+
+      const seenFile = new Set();
+      const seenURL  = new Set();
+      const seenLabel = new Set(); // NEW: dedupe by normalized label/title as well
+
+      const norm = (s) => (s || "").toString().trim().toLowerCase();
+
       const files = [], urls = [];
       for (const c of citations) {
-        if (c.kind === "file") { if (!seenFile.has(c.id)) { seenFile.add(c.id); files.push(c); } }
-        if (c.kind === "web")  { if (!seenURL.has(c.url)) { seenURL.add(c.url); urls.push(c); } }
+        const labelKey = norm(c.label || c.id || c.url || "");
+        if (labelKey && seenLabel.has(labelKey)) continue; // skip same titled doc (even if IDs differ)
+
+        if (c.kind === "file") {
+          if (c.id && seenFile.has(c.id)) continue;
+          seenFile.add(c.id);
+          seenLabel.add(labelKey);
+          files.push(c);
+        } else if (c.kind === "web") {
+          if (c.url && seenURL.has(c.url)) continue;
+          seenURL.add(c.url);
+          seenLabel.add(labelKey);
+          urls.push(c);
+        }
       }
+
       if (!files.length && !urls.length) return;
 
-      // avoid duplicate Sources blocks
+      // avoid duplicate appended Sources blocks
       if (containerEl.querySelector(".sources")) return;
 
       const src = document.createElement("div");
@@ -594,10 +623,13 @@
         if (event === "done" || event === "response.completed") {
           setStatus("");
           renderMarkdown(mdAccum, aContent);
+
+          // Append widget Sources only if the model didn't already include its own.
           if (!sourcesAppended && citations.length) {
-            appendSources(aContent, citations);
+            appendSources(aContent, citations, { skipIfModelAlreadyCited: true, mdText: mdAccum });
             sourcesAppended = true;
           }
+
           if (!assistantTurnSaved) {
             history.push({ role: "assistant", content: mdAccum.trim() });
             saveHistory();
@@ -611,7 +643,7 @@
         if (event.endsWith(".delta")) {
           let d; try { d = JSON.parse(raw); } catch { d = null; }
 
-          /* harvest embedded annotations/citations from deltas */
+          // harvest embedded annotations/citations from deltas
           const harvest = (annos) => {
             if (!Array.isArray(annos)) return;
             for (const a of annos) {
