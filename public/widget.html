@@ -608,6 +608,27 @@
         // Text deltas (append raw, no rewrites)
         if (event.endsWith(".delta")) {
           let d; try { d = JSON.parse(raw); } catch { d = null; }
+
+          /* ---- ADDED: harvest embedded annotations/citations from deltas ---- */
+          const harvest = (annos) => {
+            if (!Array.isArray(annos)) return;
+            for (const a of annos) {
+              if (a?.type === "file_citation" && a.file_id) {
+                citations.push({ kind: "file", id: a.file_id, label: a.filename || a.file_id });
+              } else if (a?.url) {
+                citations.push({ kind: "web", url: a.url, label: a.title || a.url });
+              }
+            }
+          };
+          if (d?.annotations) harvest(d.annotations);
+          if (d?.delta?.annotations) harvest(d.delta.annotations);
+          if (Array.isArray(d?.delta?.content)) {
+            for (const part of d.delta.content) {
+              if (Array.isArray(part?.annotations)) harvest(part.annotations);
+            }
+          }
+          /* ---- END ADDED ---- */
+
           const deltaText =
             (d && typeof d.delta === "string") ? d.delta :
             (d && d.delta && Array.isArray(d.delta.content))
@@ -622,7 +643,7 @@
           return;
         }
 
-        // Optional: capture citations if the API emits them
+        // Optional: capture citations if the API emits them as dedicated events
         if (event.includes("annotation") || event.includes("citation")) {
           let a;
           try { const obj = JSON.parse(raw); a = obj?.annotation || obj?.data || obj; } catch { a = null; }
