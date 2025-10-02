@@ -58,23 +58,19 @@
     }
     .ui-btn:hover { background: #f0f0f0; border-color: #ccc; }
     .ui-btn.secondary { background: #FAFAFA; color: #333; border-color: #ddd; }
-    .ui-btn.secondary:hover { background: #f0f0f0; border-color: #ccc; } /* fix: clear hover/darken */
+    .ui-btn.secondary:hover { background: #f0f0f0; border-color: #ccc; }
     .ui-btn.danger { border-color: #f2b8b8; color: #b40000; }
     .ui-btn:disabled { opacity: .5; cursor: not-allowed; }
 
-    /* slightly larger emojis in buttons */
     .ui-btn .emoji { font-size: 18px; line-height: 1; display: inline-block; }
 
-    /* hover/click animations */
     @keyframes hop { 0% { transform: translateY(0); } 50% { transform: translateY(-3px); } 100% { transform: translateY(0); } }
     @keyframes spinOnce { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
-    /* Hop while hovered */
     #attach-btn:hover .clip-emoji,
     #tc-ask-stream:hover .send-emoji,
     #tc-clear:hover .trash-emoji { animation: hop 600ms ease-in-out infinite; }
 
-    /* Spin once (added via JS) */
     .spin-once { animation: spinOnce 500ms ease-in-out 1; }
 
     @media (max-width: 540px) {
@@ -96,7 +92,6 @@
     .attach-status.error { border-color: #e57373; background: #fff5f5; color: #b71c1c; }
     .attach-status .icon { font-size: 14px; }
 
-    /* Drag & drop highlight */
     .drop-active textarea { border-color: #9ad0ff; box-shadow: 0 0 0 3px rgba(0,140,255,0.12); background: #f5fbff; }
 
     .chat-wrap { display: none; }
@@ -152,7 +147,6 @@
     .upload-banner { border-color: #4caf50; background: #f2fff2; color: #256f2a; }
     .error-banner { border-color: #e57373; background: #fff5f5; color: #b71c1c; }
 
-    /* Assistant “Using: …” chip */
     .using-chip {
       display: inline-flex; align-items: center; gap: 6px;
       font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid #cde6cd; background: #f6fff6; color: #215c21;
@@ -220,16 +214,9 @@
     <div class="chat-wrap" id="chatwrap">
       <div id="chat" class="chat" aria-live="polite" aria-busy="false"></div>
     </div>
-
-    <!-- Sentinel used to scroll the nearest scrollable ancestor (or host page) -->
-    <div id="tcn-bottom" aria-hidden="true" style="height:1px;"></div>
   </div>
 
-  <script>
-    if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
-    window.addEventListener('DOMContentLoaded', () => { window.scrollTo(0, 0); setTimeout(() => window.scrollTo(0, 0), 0); });
-    window.addEventListener('pageshow', (e) => { if (e.persisted) window.scrollTo(0, 0); });
-  </script>
+  <!-- Removed the page-top forcing script -->
 
   <script type="module">
     import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
@@ -264,23 +251,34 @@
     function setStatus(t){ $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
     function activateChat(){ if (!$shell.classList.contains("chat-active")) $shell.classList.add("chat-active"); }
 
-    // New: scroll the nearest scrollable ancestor (or page); ping parent if inside an iframe.
-    function scrollToBottom() {
-      const sentinel = document.getElementById("tcn-bottom") || $chat.lastElementChild;
-      if (!sentinel) return;
-
-      try {
-        sentinel.scrollIntoView({ block: "end", inline: "nearest", behavior: "smooth" });
-      } catch {
-        const se = document.scrollingElement || document.documentElement;
-        window.scrollTo({ top: se.scrollHeight, behavior: "smooth" });
+    /* -------- Sticky auto-scroll helpers (no top forcing) -------- */
+    function getScrollContainer(el = $chat) {
+      let n = el;
+      while (n && n !== document.body) {
+        const cs = getComputedStyle(n);
+        const canScroll = (/(auto|scroll)/).test(cs.overflowY) && n.scrollHeight > n.clientHeight;
+        if (canScroll) return n;
+        n = n.parentElement;
       }
-
-      // If embedded in an iframe, ask parent to bring the iframe into view as well
-      if (window.parent && window.parent !== window) {
-        try { window.parent.postMessage({ type: "tcn:scroll-into-view" }, "*"); } catch {}
-      }
+      return document.scrollingElement || document.documentElement;
     }
+    function isNearBottom(scroller, leeway = 120) {
+      const at = scroller.scrollTop + scroller.clientHeight;
+      return (scroller.scrollHeight - at) <= leeway;
+    }
+    let scrollTick = false;
+    function scrollToBottom({ force = false } = {}) {
+      const scroller = getScrollContainer();
+      if (!force && !isNearBottom(scroller)) return; // don't fight the user
+      if (scrollTick) return;
+      scrollTick = true;
+      requestAnimationFrame(() => {
+        try { scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" }); }
+        catch { scroller.scrollTop = scroller.scrollHeight; }
+        scrollTick = false;
+      });
+    }
+    /* ------------------------------------------------------------- */
 
     // Conversation history (client side)
     const history = (() => { try { return JSON.parse(sessionStorage.getItem("tc_history") || "[]"); } catch { return []; } })();
@@ -329,14 +327,13 @@
 
       bubble.appendChild(head);
 
-      // slot for “Using: …” chip (assistant turns)
       const usingSlot = document.createElement("div");
       bubble.appendChild(usingSlot);
 
       bubble.appendChild(content);
       msg.appendChild(avatar); msg.appendChild(bubble);
       $chat.appendChild(msg);
-      scrollToBottom(); // improved auto-scroll
+      scrollToBottom({ force: true });
       return { msg, content, bubble, usingSlot };
     }
 
@@ -344,49 +341,41 @@
       const html = marked.parse(md || "");
       const safe = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
       el.innerHTML = safe;
-      scrollToBottom(); // improved auto-scroll
+      scrollToBottom(); // sticky (only if user is near bottom)
     }
 
-    // Append a single consolidated "Sources:" list, with strong de-duplication.
+    // Append a single consolidated "Sources:" list, skipping if model already included one; strong de-duplication.
     function appendSources(containerEl, citations, { skipIfModelAlreadyCited = false, mdText = "" } = {}) {
       if (!citations || citations.length === 0) return;
 
-      // If the model already wrote its own "Sources:" block, skip appending.
       if (skipIfModelAlreadyCited) {
         const hasModelSources =
-          /\n\s*(?:#{1,6}\s*)?sources?\s*:/i.test(mdText || "") ||               // markdown "Sources:" or "### Sources:"
-          /<h\d[^>]*>\s*sources?\s*<\/h\d>/i.test(containerEl.innerHTML) ||      // rendered heading
-          />\s*sources:\s*</i.test(containerEl.innerHTML);                       // bold/paragraph "Sources:"
+          /\n\s*(?:#{1,6}\s*)?sources?\s*:/i.test(mdText || "") ||
+          /<h\d[^>]*>\s*sources?\s*<\/h\d>/i.test(containerEl.innerHTML) ||
+          />\s*sources:\s*</i.test(containerEl.innerHTML);
         if (hasModelSources) return;
       }
 
       const seenFile = new Set();
       const seenURL  = new Set();
-      const seenLabel = new Set(); // NEW: dedupe by normalized label/title as well
-
+      const seenLabel = new Set();
       const norm = (s) => (s || "").toString().trim().toLowerCase();
 
       const files = [], urls = [];
       for (const c of citations) {
         const labelKey = norm(c.label || c.id || c.url || "");
-        if (labelKey && seenLabel.has(labelKey)) continue; // skip same titled doc (even if IDs differ)
+        if (labelKey && seenLabel.has(labelKey)) continue;
 
         if (c.kind === "file") {
           if (c.id && seenFile.has(c.id)) continue;
-          seenFile.add(c.id);
-          seenLabel.add(labelKey);
-          files.push(c);
+          seenFile.add(c.id); seenLabel.add(labelKey); files.push(c);
         } else if (c.kind === "web") {
           if (c.url && seenURL.has(c.url)) continue;
-          seenURL.add(c.url);
-          seenLabel.add(labelKey);
-          urls.push(c);
+          seenURL.add(c.url); seenLabel.add(labelKey); urls.push(c);
         }
       }
 
       if (!files.length && !urls.length) return;
-
-      // avoid duplicate appended Sources blocks
       if (containerEl.querySelector(".sources")) return;
 
       const src = document.createElement("div");
@@ -415,7 +404,7 @@
 
       src.appendChild(list);
       containerEl.appendChild(src);
-      scrollToBottom(); // improved auto-scroll
+      scrollToBottom(); // sticky
     }
 
     let currentAbort = null;
@@ -424,11 +413,10 @@
 
     // Upload UI (click)
     $attachBtn.addEventListener("click", () => {
-      // spin on click (once)
       const icon = $attachBtn.querySelector('.clip-emoji');
       if (icon) {
         icon.classList.remove('spin-once');
-        void icon.offsetWidth; // restart animation
+        void icon.offsetWidth;
         icon.classList.add('spin-once');
       }
       $fileInput.click();
@@ -447,7 +435,6 @@
       handleFiles(dt.files);
     });
 
-    // File input change
     $fileInput.addEventListener("change", () => handleFiles($fileInput.files));
 
     async function handleFiles(fileList) {
@@ -506,7 +493,6 @@
       const userMsg = createMsg("user", "You");
       userMsg.content.textContent = prompt;
 
-      // Prepare request body (attach file if present for THIS turn)
       const body = { userMessage: prompt, history };
       let uploadTurn = false;
       lastUsedAttachmentName = "";
@@ -516,14 +502,12 @@
         uploadTurn = true;
         lastUsedAttachmentName = pendingUpload.filename || "";
 
-        // Show a chip in the user bubble
         const used = document.createElement("div");
         used.className = "used-file-note";
         const shortName = lastUsedAttachmentName.length > 36 ? lastUsedAttachmentName.slice(0,33) + "..." : lastUsedAttachmentName;
         used.innerHTML = `✅ Using: <strong>${shortName}</strong>`;
         userMsg.bubble.appendChild(used);
 
-        // Clear selection after consuming it
         pendingUpload = { file_id: null, filename: "" };
         $fileInput.value = "";
         $attachStatus.style.display = "none";
@@ -535,7 +519,6 @@
       const { content: aContent, bubble: aBubble, usingSlot } = createMsg("assistant", "Talking Care Navigator", true);
       aContent.innerHTML = `<em>Thinking… ⏳</em>`;
 
-      // Assistant “Using: …” chip
       if (uploadTurn && lastUsedAttachmentName) {
         const chip = document.createElement("div");
         chip.className = "using-chip";
@@ -543,7 +526,6 @@
         usingSlot.appendChild(chip);
       }
 
-      // Assistant-side banner confirming scope for upload turns
       if (uploadTurn) {
         const banner = document.createElement("div");
         banner.className = "upload-banner";
@@ -618,10 +600,7 @@
       function handleEvent(event, raw) {
         if (event === "start") return;
 
-        if (event === "info") {
-          // purely informational
-          return;
-        }
+        if (event === "info") { return; }
 
         if (event === "error") {
           try {
@@ -644,7 +623,6 @@
           setStatus("");
           renderMarkdown(mdAccum, aContent);
 
-          // Append widget Sources only if the model didn't already include its own.
           if (!sourcesAppended && citations.length) {
             appendSources(aContent, citations, { skipIfModelAlreadyCited: true, mdText: mdAccum });
             sourcesAppended = true;
@@ -663,7 +641,6 @@
         if (event.endsWith(".delta")) {
           let d; try { d = JSON.parse(raw); } catch { d = null; }
 
-          // harvest embedded annotations/citations from deltas
           const harvest = (annos) => {
             if (!Array.isArray(annos)) return;
             for (const a of annos) {
@@ -691,12 +668,11 @@
           if (deltaText) {
             if (!started) { started = true; clearTimeout(watchdog); }
             mdAccum += deltaText;
-            renderMarkdown(mdAccum, aContent);
+            renderMarkdown(mdAccum, aContent); // sticky auto-scroll
           }
           return;
         }
 
-        // Optional: capture citations if the API emits them as dedicated events
         if (event.includes("annotation") || event.includes("citation")) {
           let a;
           try { const obj = JSON.parse(raw); a = obj?.annotation || obj?.data || obj; } catch { a = null; }
@@ -733,7 +709,7 @@
       }[ch]));
     }
 
-    // Keep host page/container aligned when the chat grows
+    // Keep host aligned only when the user is near bottom (prevent snap when scrolling up)
     try {
       if (window.ResizeObserver) {
         const ro = new ResizeObserver(() => scrollToBottom());
@@ -769,7 +745,7 @@
       $attachIcon.textContent = "⌛";
       $attachName.textContent = "";
       lastUsedAttachmentName = "";
-      scrollToBottom();
+      scrollToBottom({ force: true });
     });
     $stop.addEventListener("click", () => {
       if (currentAbort) { try { currentAbort.abort(); } catch {} }
