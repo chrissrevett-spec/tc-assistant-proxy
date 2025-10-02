@@ -216,7 +216,10 @@
     </div>
   </div>
 
-  <!-- Removed the page-top forcing script -->
+  <!-- Sentinel used for smooth page scrolling to the bottom -->
+  <div id="tcn-sentinel" aria-hidden="true" style="height:1px;"></div>
+
+  <!-- No script that forces scrolling to the top -->
 
   <script type="module">
     import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
@@ -228,16 +231,16 @@
     const ASSISTANT_AVATAR_URL = "https://images.squarespace-cdn.com/content/66d7774bf0cbbe646aefb211/264b05cb-b865-404b-9ac9-cc7f77f15ce9/TRANSPARENCY+crop.png?content-type=image%2Fpng";
     const API_BASE = location.origin.replace(/\/$/, "");
 
-    const $shell   = document.getElementById("shell");
-    const $chat    = document.getElementById("chat");
-    const $chatwrap= document.getElementById("chatwrap");
-    const $inputbar= document.getElementById("inputbar");
-    const $drop    = document.getElementById("dropzone");
-    const $in      = document.getElementById("tc-input");
-    const $send    = document.getElementById("tc-ask-stream");
-    const $stop    = document.getElementById("tc-stop");
-    const $clear   = document.getElementById("tc-clear");
-    const $status  = document.getElementById("status");
+    const $shell    = document.getElementById("shell");
+    const $chat     = document.getElementById("chat");
+    const $chatwrap = document.getElementById("chatwrap");
+    const $inputbar = document.getElementById("inputbar");
+    const $drop     = document.getElementById("dropzone");
+    const $in       = document.getElementById("tc-input");
+    const $send     = document.getElementById("tc-ask-stream");
+    const $stop     = document.getElementById("tc-stop");
+    const $clear    = document.getElementById("tc-clear");
+    const $status   = document.getElementById("status");
 
     const $fileInput    = document.getElementById("file-input");
     const $attachBtn    = document.getElementById("attach-btn");
@@ -245,40 +248,38 @@
     const $attachIcon   = document.getElementById("attach-icon");
     const $attachName   = document.getElementById("attach-name");
 
+    const $sentinel = document.getElementById("tcn-sentinel");
+
     const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20 MB
     const SOURCE_TITLE = "Sources:";
 
     function setStatus(t){ $status.textContent = t || ""; $chat.setAttribute("aria-busy", t ? "true" : "false"); }
     function activateChat(){ if (!$shell.classList.contains("chat-active")) $shell.classList.add("chat-active"); }
 
-    /* -------- Sticky auto-scroll helpers (no top forcing) -------- */
-    function getScrollContainer(el = $chat) {
-      let n = el;
-      while (n && n !== document.body) {
-        const cs = getComputedStyle(n);
-        const canScroll = (/(auto|scroll)/).test(cs.overflowY) && n.scrollHeight > n.clientHeight;
-        if (canScroll) return n;
-        n = n.parentElement;
-      }
-      return document.scrollingElement || document.documentElement;
+    /* ---------- Sticky auto-scroll via sentinel (no top snapping) ---------- */
+    const SCROLLER = document.scrollingElement || document.documentElement;
+    let userNearBottom = true; // assume yes on first load
+
+    function recomputeNearBottom() {
+      const at = SCROLLER.scrollTop + window.innerHeight;
+      userNearBottom = (SCROLLER.scrollHeight - at) <= 200; // 200px leeway
     }
-    function isNearBottom(scroller, leeway = 120) {
-      const at = scroller.scrollTop + scroller.clientHeight;
-      return (scroller.scrollHeight - at) <= leeway;
-    }
-    let scrollTick = false;
-    function scrollToBottom({ force = false } = {}) {
-      const scroller = getScrollContainer();
-      if (!force && !isNearBottom(scroller)) return; // don't fight the user
-      if (scrollTick) return;
-      scrollTick = true;
-      requestAnimationFrame(() => {
-        try { scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" }); }
-        catch { scroller.scrollTop = scroller.scrollHeight; }
-        scrollTick = false;
+    window.addEventListener("scroll", () => recomputeNearBottom(), { passive: true });
+    window.addEventListener("resize", () => recomputeNearBottom(), { passive: true });
+    // Initial compute (after layout)
+    requestAnimationFrame(recomputeNearBottom);
+
+    let scrollRAF = null;
+    function scrollSentinelIntoView({ force = false } = {}) {
+      if (!force && !userNearBottom) return; // don't fight the user
+      if (scrollRAF) return;
+      scrollRAF = requestAnimationFrame(() => {
+        try { $sentinel.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" }); }
+        catch { SCROLLER.scrollTop = SCROLLER.scrollHeight; }
+        scrollRAF = null;
       });
     }
-    /* ------------------------------------------------------------- */
+    /* ---------------------------------------------------------------------- */
 
     // Conversation history (client side)
     const history = (() => { try { return JSON.parse(sessionStorage.getItem("tc_history") || "[]"); } catch { return []; } })();
@@ -333,16 +334,33 @@
       bubble.appendChild(content);
       msg.appendChild(avatar); msg.appendChild(bubble);
       $chat.appendChild(msg);
-      scrollToBottom({ force: true });
+
+      // Only scroll if user is already near bottom
+      scrollSentinelIntoView();
       return { msg, content, bubble, usingSlot };
     }
 
+    /* -------- Throttled markdown rendering (coalesce stream deltas) -------- */
     function renderMarkdown(md, el) {
       const html = marked.parse(md || "");
       const safe = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
       el.innerHTML = safe;
-      scrollToBottom(); // sticky (only if user is near bottom)
+      scrollSentinelIntoView(); // keep sticky if userNearBottom
     }
+    const RENDER_INTERVAL_MS = 80; // ~12.5fps: smooth, low CPU
+    let renderTimer = null;
+    function scheduleRender(md, el) {
+      if (renderTimer) return;
+      renderTimer = setTimeout(() => {
+        renderTimer = null;
+        renderMarkdown(md, el);
+      }, RENDER_INTERVAL_MS);
+    }
+    function flushRender(md, el) {
+      if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
+      renderMarkdown(md, el);
+    }
+    /* ---------------------------------------------------------------------- */
 
     // Append a single consolidated "Sources:" list, skipping if model already included one; strong de-duplication.
     function appendSources(containerEl, citations, { skipIfModelAlreadyCited = false, mdText = "" } = {}) {
@@ -404,7 +422,7 @@
 
       src.appendChild(list);
       containerEl.appendChild(src);
-      scrollToBottom(); // sticky
+      scrollSentinelIntoView(); // sticky
     }
 
     let currentAbort = null;
@@ -621,7 +639,7 @@
 
         if (event === "done" || event === "response.completed") {
           setStatus("");
-          renderMarkdown(mdAccum, aContent);
+          flushRender(mdAccum, aContent);
 
           if (!sourcesAppended && citations.length) {
             appendSources(aContent, citations, { skipIfModelAlreadyCited: true, mdText: mdAccum });
@@ -634,10 +652,13 @@
             assistantTurnSaved = true;
           }
           $stop.disabled = true; currentAbort = null;
+
+          // Ensure we finish scrolled to the end (but still respect user intent if they scrolled up)
+          scrollSentinelIntoView();
           return;
         }
 
-        // Text deltas (append raw, no rewrites)
+        // Text deltas (append raw, throttled renders)
         if (event.endsWith(".delta")) {
           let d; try { d = JSON.parse(raw); } catch { d = null; }
 
@@ -668,7 +689,7 @@
           if (deltaText) {
             if (!started) { started = true; clearTimeout(watchdog); }
             mdAccum += deltaText;
-            renderMarkdown(mdAccum, aContent); // sticky auto-scroll
+            scheduleRender(mdAccum, aContent); // throttle
           }
           return;
         }
@@ -709,11 +730,12 @@
       }[ch]));
     }
 
-    // Keep host aligned only when the user is near bottom (prevent snap when scrolling up)
+    // Keep host aligned when content grows (but only if userNearBottom)
     try {
       if (window.ResizeObserver) {
-        const ro = new ResizeObserver(() => scrollToBottom());
+        const ro = new ResizeObserver(() => scrollSentinelIntoView());
         ro.observe($chat);
+        ro.observe($inputbar);
       }
     } catch {}
 
@@ -745,7 +767,8 @@
       $attachIcon.textContent = "⌛";
       $attachName.textContent = "";
       lastUsedAttachmentName = "";
-      scrollToBottom({ force: true });
+      // We don't force the page to the very top; just keep things consistent if user is already at bottom
+      scrollSentinelIntoView();
     });
     $stop.addEventListener("click", () => {
       if (currentAbort) { try { currentAbort.abort(); } catch {} }
