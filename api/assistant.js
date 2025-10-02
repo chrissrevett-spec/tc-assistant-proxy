@@ -139,15 +139,16 @@ function classifyIntent(text) {
   if (/\bwho (made|created|built) (you|u)\b|\bwho owns you\b|\bowner\b/.test(t)) return "creator";
   if (/\bwhat (is|’s|'s) your (purpose|goal|mission|objective|role)\b|\bwhy (were you created|do you exist)\b|\bprime directive\b/.test(t)) return "purpose";
 
+  // --- PRIVACY/DATA HANDLING (moved above capability) ---
+  if (/\b(what happens to)\s+my\s+(data|information|info)\b/.test(t)) return "privacy";
+  if (/\b(what|how)\s+(do|will)\s+(you|u)\s+(do|use|handle)\s+(with )?my\s+(data|information|info)\b|\bdata\s+(policy|privacy)\b|\bprivacy\b/.test(t)) return "privacy";
+
   // capability
   if (/\bwhat do (you|u) do\b|\bwhat('?|’)?s your (role|job|function|capabilities?)\b/.test(t)) return "capability";
   if (/\bwhat can (you|u) do\b|\bhow can (you|u) help\b|\bexamples? of (how|what) (you|u) can do\b|\bwhat can u even do\b/.test(t)) return "capability";
 
   // process / “how does this work”
   if (/\bhow (does|do) (this|it) work\b|\bhow (do|to) (i|we) (use|work with) (you|this)\b|\bcan i upload\b|\bhow to upload\b/.test(t)) return "process";
-
-  // privacy / data handling
-  if (/\b(what|how) (do|will) (you|u) (do|use|handle) (with )?my data\b|\bdata (policy|privacy)\b|\bprivacy\b/.test(t)) return "privacy";
 
   // comparison to ChatGPT / others
   if (/\bwhy (should|would) i use (this|you) (instead of|over) (chatgpt|chat gpt|gpt|openai)\b/.test(t)) return "comparison";
