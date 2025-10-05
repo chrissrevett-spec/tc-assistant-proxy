@@ -1,10 +1,7 @@
 // /api/assistant.js — Vercel serverless (CommonJS)
 //
 // Intent gate + tool gating + streaming sanitizer + tool usage telemetry
-// - Meta/low-signal => canned UK-English reply. NO tools.
-// - Content => Assistant(v2) + shim + library tool (and temp VS on upload turn).
-// - Sanitizer preserves "Sources:" blocks across chunks, suppresses upload-inventory chatter only.
-// - Emits SSE "info" -> { note: "tools_summary", used_file_search, library_candidate, upload_turn }.
+// Privacy-safe uploads: per-turn temp vector store + cleanup (and belt-and-braces removal from library if needed)
 //
 // Env:
 // - OPENAI_API_KEY               (required)
@@ -45,7 +42,7 @@ function sseEvent(res, event, data) {
   res.write(`event: ${event}\n`);
   res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
 }
-function sseDone(res) { sseEvent(res, "done", "[DONE]"); res.end(); }
+function sseDone(res) { sseEvent(res, "done", "[DONE]"); try { res.end(); } catch {} }
 
 // ---- OpenAI REST (no SDK) ----
 async function oi(path, { method = "GET", body, headers, stream = false } = {}) {
@@ -84,7 +81,7 @@ async function createTempVS(name = "TCN temp (this turn)") {
 async function addFileToVS(vsId, fileId) {
   const r = await oi(`/v1/vector_stores/${vsId}/files`, { method: "POST", body: { file_id: fileId } });
   if (!r.ok) throw new Error(`add file failed: ${r.status} ${await r.text()}`);
-  const d = await r.json(); return d.id;
+  const d = await r.json(); return d.id; // vector_store_file.id
 }
 async function waitVSFileReady(vsId, vsFileId, { timeoutMs = 30000, pollMs = 900 } = {}) {
   const deadline = Date.now() + timeoutMs; let last = "";
@@ -97,6 +94,39 @@ async function waitVSFileReady(vsId, vsFileId, { timeoutMs = 30000, pollMs = 900
     await new Promise(r => setTimeout(r, pollMs));
   }
   throw new Error(`vector store file not ready (last: ${last || "unknown"})`);
+}
+
+// Best-effort: if upload leaked into library store, detach it.
+async function detachFromLibraryIfPresent(fileId) {
+  if (!LIBRARY_VS_ID || !fileId) return;
+  try {
+    // page through library VS files to find the VS-file id that references this file
+    let after = null;
+    while (true) {
+      const path = `/v1/vector_stores/${LIBRARY_VS_ID}/files` + (after ? `?after=${encodeURIComponent(after)}` : "");
+      const r = await oi(path, { method: "GET" });
+      if (!r.ok) break;
+      const d = await r.json();
+      const items = Array.isArray(d?.data) ? d.data : [];
+      const hit = items.find(x => (x && (x.file_id === fileId || x.id === fileId)));
+      if (hit && hit.id) {
+        await oi(`/v1/vector_stores/${LIBRARY_VS_ID}/files/${hit.id}`, { method: "DELETE" });
+        break;
+      }
+      if (!d?.has_more || !items.length) break;
+      after = items[items.length - 1].id;
+    }
+  } catch {}
+}
+
+// Cleanup helpers
+async function deleteVS(vsId) {
+  if (!vsId) return;
+  try { await oi(`/v1/vector_stores/${vsId}`, { method: "DELETE" }); } catch {}
+}
+async function deleteFile(fileId) {
+  if (!fileId) return;
+  try { await oi(`/v1/files/${fileId}`, { method: "DELETE" }); } catch {}
 }
 
 // ---- map client history -> Responses input messages
@@ -128,7 +158,7 @@ function classifyIntent(text) {
   if (!t) return "greeting";
   if (isLowSignal(t)) return "greeting";
 
-  // greetings / small talk (expanded + curly apostrophe support)
+  // greetings / small talk
   if (/^(hi|hello|hey|hiya|howdy|yo|yoyo|oi(?:\s+oi)?|sup|wass?up|wazz+up|whazz+up|what(?:'|’)?s up|whatsup)\b/.test(t)) return "greeting";
   if (/^good (morning|afternoon|evening)\b/.test(t)) return "greeting";
   if (/(are|r)\s*(you|u)\s*ok(ay)?\??$/.test(t)) return "greeting";
@@ -139,7 +169,7 @@ function classifyIntent(text) {
   if (/\bwho (made|created|built) (you|u)\b|\bwho owns you\b|\bowner\b/.test(t)) return "creator";
   if (/\bwhat (is|’s|'s) your (purpose|goal|mission|objective|role)\b|\bwhy (were you created|do you exist)\b|\bprime directive\b/.test(t)) return "purpose";
 
-  // --- PRIVACY/DATA HANDLING (moved above capability) ---
+  // privacy/data handling
   if (/\b(what happens to)\s+my\s+(data|information|info)\b/.test(t)) return "privacy";
   if (/\b(what|how)\s+(do|will)\s+(you|u)\s+(do|use|handle)\s+(with )?my\s+(data|information|info)\b|\bdata\s+(policy|privacy)\b|\bprivacy\b/.test(t)) return "privacy";
 
@@ -147,10 +177,10 @@ function classifyIntent(text) {
   if (/\bwhat do (you|u) do\b|\bwhat('?|’)?s your (role|job|function|capabilities?)\b/.test(t)) return "capability";
   if (/\bwhat can (you|u) do\b|\bhow can (you|u) help\b|\bexamples? of (how|what) (you|u) can do\b|\bwhat can u even do\b/.test(t)) return "capability";
 
-  // process / “how does this work”
+  // process
   if (/\bhow (does|do) (this|it) work\b|\bhow (do|to) (i|we) (use|work with) (you|this)\b|\bcan i upload\b|\bhow to upload\b/.test(t)) return "process";
 
-  // comparison to ChatGPT / others
+  // comparison
   if (/\bwhy (should|would) i use (this|you) (instead of|over) (chatgpt|chat gpt|gpt|openai)\b/.test(t)) return "comparison";
   if (/\bwhy (is|are) (this|you) (better|different) (than|to) (chatgpt|chat gpt|gpt|openai)\b/.test(t)) return "comparison";
   if (/\b(compare|difference|vs\.?|versus)\b.*\b(chatgpt|chat gpt|gpt|openai)\b/.test(t)) return "comparison";
@@ -163,7 +193,7 @@ function classifyIntent(text) {
   if (/\bwhat do you look like\b|\bappearance\b/.test(t)) return "appearance";
   if (/\bdo (you|u) like\b|\bwhat('?|’)?s your favourite\b|\bfavorite\b/.test(t)) return "preference";
 
-  return null; // treat as potential content
+  return null;
 }
 
 function cannedReply(kind) {
@@ -238,9 +268,7 @@ function makeSanitizer({ uploadTurn }) {
 
   function neutraliseUploadPhrasing(txt) {
     let s = txt;
-
     const up = "(?:you(?:'|’)?ve|you have) uploaded";
-
     if (!uploadTurn) {
       s = s.replace(new RegExp(`\\b(files|documents)\\s+${up}\\b`, "gi"), "documents");
       s = s.replace(new RegExp(`\\b${up}\\b`, "gi"), "you add an attached document for this turn");
@@ -251,54 +279,36 @@ function makeSanitizer({ uploadTurn }) {
       s = s.replace(/\b(the|your)\s+uploaded\s+(files|documents)\b/gi, "documents");
       s = s.replace(/\bfiles\s+you\s+uploaded\b/gi, "documents");
     }
-
-    // detect start of inventory phrasing
     if (/\b(here (are|is) (the )?(files|documents).*(uploaded|attached)|you (?:have|(?:'|’)??ve) uploaded)\b/i.test(s)) {
       state.suppressList = true;
     }
-
-    // detect entering a Sources block in this delta
     if (/^\s*sources?\s*:\s*$/im.test(s) || /\bSources:\s*$/i.test(s)) {
-      state.inSources = true;
-      state.suppressList = false; // ensure no suppression inside Sources
+      state.inSources = true; state.suppressList = false;
     }
     if (/^\s*sources?\s*:/im.test(s)) {
-      state.inSources = true;
-      state.suppressList = false;
+      state.inSources = true; state.suppressList = false;
     }
-
     return s;
   }
 
   function scrubFilenameLines(s) {
-    if (state.inSources) return s; // never scrub inside citations
+    if (state.inSources) return s;
     if (!state.suppressList) return s;
-
     const lines = s.split("\n");
     for (let i = 0; i < lines.length; i++) {
       const L = lines[i];
-
       if (/^\s*sources?\s*:/i.test(L)) { state.inSources = true; state.suppressList = false; continue; }
-
-      // typical filename bullets
       if (/^[\s\-\*\•\u2022]*.+\.(pdf|docx?|pptx?|xlsx?|xls|csv)\b/i.test(L)) {
-        lines[i] = "• [document omitted]";
-        continue;
+        lines[i] = "• [document omitted]"; continue;
       }
-
-      // stop suppression at sentence end or blank line
-      if (/[.!?]\s*$/.test(L) || /^\s*$/.test(L)) {
-        state.suppressList = false;
-      }
+      if (/[.!?]\s*$/.test(L) || /^\s*$/.test(L)) { state.suppressList = false; }
     }
     return lines.join("\n");
   }
 
   return function sanitizeDeltaText(deltaText) {
     if (!deltaText) return deltaText;
-    // If this chunk itself starts a Sources header, mark state and pass through untouched
     if (/^\s*sources?\s*:/im.test(deltaText)) { state.inSources = true; return deltaText; }
-
     let s = deltaText;
     s = neutraliseUploadPhrasing(s);
     s = scrubFilenameLines(s);
@@ -316,9 +326,15 @@ module.exports = async (req, res) => {
   }
   if (!OPENAI_API_KEY) { res.statusCode = 500; return res.end(JSON.stringify({ error: "Missing OPENAI_API_KEY" })); }
 
+  // Book-keeping for cleanup even if something fails mid-flight
+  let tempVS = null;
+  let tempVSFileId = null; // vector_store_file.id in temp store
+  let upload_file_id = null; // original file id from /api/upload
+  let uploadTurn = false;
+  let wantStream = false;
+
   try {
     // Parse query (?stream=on)
-    let wantStream = false;
     try { const u = new URL(req.url, "http://localhost"); wantStream = u.searchParams.get("stream") === "on"; } catch {}
 
     // Parse body
@@ -327,12 +343,14 @@ module.exports = async (req, res) => {
       req.on("end", () => resolve(Buffer.concat(chunks)));
       req.on("error", reject);
     });
-    const { userMessage, history, upload_file_id } = JSON.parse(bodyBuf.toString("utf8") || "{}");
+    const parsed = JSON.parse(bodyBuf.toString("utf8") || "{}");
+    const { userMessage, history, upload_file_id: bodyUploadId } = parsed;
     if (!userMessage || typeof userMessage !== "string") {
       res.statusCode = 400; return res.end(JSON.stringify({ error: "Missing userMessage" }));
     }
 
-    const uploadTurn = !!upload_file_id;
+    upload_file_id = bodyUploadId || null;
+    uploadTurn = !!upload_file_id;
 
     // ---- INTENT GATE
     const intent = classifyIntent(userMessage);
@@ -352,11 +370,7 @@ module.exports = async (req, res) => {
           object: "response",
           model: "canned",
           status: "completed",
-          output: [{
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: canned }]
-          }]
+          output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: canned }] }]
         }));
       }
     }
@@ -389,21 +403,26 @@ module.exports = async (req, res) => {
     input.push({ role: "user", content: [{ type: "input_text", text: userMessage }] });
 
     // Tool wiring:
-    // - For any non-meta content, include Library (if configured).
-    // - If there's an upload this turn, use a temp VS for that file.
+    // - If upload this turn: create temp VS, attach upload to it, and ONLY use temp VS.
+    // - Else: use library VS if configured.
     let tools = [];
-    let tempVS = null;
+    const libraryCandidate = !!LIBRARY_VS_ID;
 
-    const libraryCandidate = !!LIBRARY_VS_ID; // report for telemetry
     if (uploadTurn) {
+      // Strict isolation: we will (a) attach to a brand-new VS, (b) ensure not present in library, (c) clean up later.
       tempVS = await createTempVS("TCN temp (this turn)");
       const vsFileId = await addFileToVS(tempVS, upload_file_id);
+      tempVSFileId = vsFileId;
       if (wantStream) { if (!res.headersSent) sseHead(res); sseEvent(res, "start", { ok: true }); sseEvent(res, "info", { note: "temp_vector_store_created", id: tempVS }); }
       await waitVSFileReady(tempVS, vsFileId);
       if (wantStream) sseEvent(res, "info", { note: "temp_vector_store_ready", id: tempVS });
+
+      // Proactively detach from library if some other path attached it there.
+      await detachFromLibraryIfPresent(upload_file_id);
+
       tools = [{ type: "file_search", vector_store_ids: [tempVS] }];
+      if (wantStream && !res.headersSent) { sseHead(res); sseEvent(res, "start", { ok: true }); }
     } else if (LIBRARY_VS_ID) {
-      // non-meta => include library by default to ground answers
       tools = [{ type: "file_search", vector_store_ids: [LIBRARY_VS_ID] }];
       if (wantStream && !res.headersSent) { sseHead(res); sseEvent(res, "start", { ok: true }); }
     } else {
@@ -419,7 +438,7 @@ module.exports = async (req, res) => {
       text: { format: { type: "text" }, verbosity: "medium" },
       top_p: 1,
       truncation: "disabled",
-      store: true
+      store: false // IMPORTANT: do not persist the response object
     };
 
     // Debug info
@@ -433,6 +452,7 @@ module.exports = async (req, res) => {
       tools_enabled: tools.length > 0,
       upload_turn: uploadTurn,
       library_candidate: libraryCandidate,
+      temp_vs: tempVS || null,
       sanitizer: true
     });
 
@@ -447,7 +467,19 @@ module.exports = async (req, res) => {
       // Fallback to non-stream and emit via SSE
       const r2 = await oi("/v1/responses", { method: "POST", body: payload, stream: false });
       const txt2 = await r2.text();
-      if (!r2.ok) { sseEvent(res, "error", { message: `OpenAI stream init failed: ${String(e?.message || e)}; fallback also failed: ${txt2}` }); sseDone(res); return; }
+      if (!r2.ok) {
+        sseEvent(res, "error", { message: `OpenAI stream init failed: ${String(e?.message || e)}; fallback also failed: ${txt2}` });
+        // Cleanup even on failure
+        try {
+          if (uploadTurn) {
+            await detachFromLibraryIfPresent(upload_file_id);
+            await deleteVS(tempVS);
+            await deleteFile(upload_file_id);
+            sseEvent(res, "info", { note: "cleanup_done_on_error", temp_vs_deleted: !!tempVS, file_deleted: !!upload_file_id });
+          }
+        } catch {}
+        sseDone(res); return;
+      }
       try {
         const obj = JSON.parse(txt2);
         const out = (obj?.output || []).find(o => o.type === "message");
@@ -456,6 +488,15 @@ module.exports = async (req, res) => {
         sseEvent(res, "response.output_text.delta", { delta: text || "" });
       } catch {}
       sseEvent(res, "info", { note: "tools_summary", used_file_search: false, library_candidate: libraryCandidate, upload_turn: uploadTurn });
+      // Cleanup after non-stream path
+      try {
+        if (uploadTurn) {
+          await detachFromLibraryIfPresent(upload_file_id);
+          await deleteVS(tempVS);
+          await deleteFile(upload_file_id);
+          sseEvent(res, "info", { note: "cleanup_done_nonstream", temp_vs_deleted: !!tempVS, file_deleted: !!upload_file_id });
+        }
+      } catch {}
       sseEvent(res, "response.completed", { done: true });
       return sseDone(res);
     }
@@ -463,6 +504,15 @@ module.exports = async (req, res) => {
     if (!streamResp.ok || !streamResp.body) {
       const errTxt = await (streamResp && streamResp.text ? streamResp.text().catch(() => "") : "");
       sseEvent(res, "error", { message: `OpenAI stream failed: ${errTxt || `HTTP ${streamResp && streamResp.status}`}` });
+      // Cleanup even on failure
+      try {
+        if (uploadTurn) {
+          await detachFromLibraryIfPresent(upload_file_id);
+          await deleteVS(tempVS);
+          await deleteFile(upload_file_id);
+          sseEvent(res, "info", { note: "cleanup_done_on_error", temp_vs_deleted: !!tempVS, file_deleted: !!upload_file_id });
+        }
+      } catch {}
       return sseDone(res);
     }
 
@@ -526,17 +576,41 @@ module.exports = async (req, res) => {
               forward(event, raw);
             }
           } else {
-            forward(event, raw); // forward non-text events (citations, tool calls, etc.) untouched
+            forward(event, raw); // forward non-text events untouched
           }
         }
       }
     } catch (e) {
       sseEvent(res, "error", { message: `Stream error: ${String(e?.message || e)}` });
     } finally {
-      // Emit a one-line telemetry summary you can watch in DevTools
-      sseEvent(res, "info", { note: "tools_summary", used_file_search: !!usedFileSearch, library_candidate: libraryCandidate, upload_turn: uploadTurn });
-      sseEvent(res, "response.completed", { done: true });
-      sseDone(res);
+      // Emit telemetry + cleanup (always)
+      try {
+        sseEvent(res, "info", {
+          note: "tools_summary",
+          used_file_search: !!usedFileSearch,
+          library_candidate: libraryCandidate,
+          upload_turn: uploadTurn
+        });
+
+        // Strict cleanup for upload turns
+        if (uploadTurn) {
+          await detachFromLibraryIfPresent(upload_file_id); // if any stray attach happened
+          await deleteVS(tempVS);
+          await deleteFile(upload_file_id);
+          sseEvent(res, "info", {
+            note: "cleanup_done",
+            temp_vs_deleted: !!tempVS,
+            file_deleted: !!upload_file_id
+          });
+        }
+
+        sseEvent(res, "response.completed", { done: true });
+        sseDone(res);
+      } catch {
+        // even if cleanup throws, we still finish the SSE
+        try { sseEvent(res, "response.completed", { done: true }); } catch {}
+        sseDone(res);
+      }
     }
   } catch (err) {
     console.error("assistant error:", err);
@@ -545,6 +619,18 @@ module.exports = async (req, res) => {
       res.setHeader("Content-Type", "application/json");
       return res.end(JSON.stringify({ error: (err && err.message) || String(err) }));
     }
-    try { sseEvent(res, "error", { message: (err && err.message) || String(err) }); sseDone(res); } catch {}
+    try {
+      sseEvent(res, "error", { message: (err && err.message) || String(err) });
+    } catch {}
+    try {
+      // Cleanup even on outer catch
+      if (uploadTurn) {
+        await detachFromLibraryIfPresent(upload_file_id);
+        await deleteVS(tempVS);
+        await deleteFile(upload_file_id);
+        sseEvent(res, "info", { note: "cleanup_done_on_outer_error", temp_vs_deleted: !!tempVS, file_deleted: !!upload_file_id });
+      }
+    } catch {}
+    try { sseDone(res); } catch {}
   }
 };
