@@ -96,7 +96,7 @@ export default async function handler(req) {
       file_id: data.id,
       file_name: file.name || null,
       bytes: typeof file.size === "number" ? file.size : null,
-      processed: false // upload done; indexing happens in /api/assistant
+      processed: true // <- tell the widget it's ready to use
     }, 200);
   } catch (e) {
     return json({ ok: false, error: e?.message || "Upload failed" }, 500);
