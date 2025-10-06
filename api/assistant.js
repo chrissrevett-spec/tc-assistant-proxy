@@ -173,6 +173,12 @@ function classifyIntent(text) {
   if (/\b(what happens to)\s+my\s+(data|information|info)\b/.test(t)) return "privacy";
   if (/\b(what|how)\s+(do|will)\s+(you|u)\s+(do|use|handle)\s+(with )?my\s+(data|information|info)\b|\bdata\s+(policy|privacy)\b|\bprivacy\b/.test(t)) return "privacy";
 
+  // --- TECH / “HOW IT'S MADE” (added) ---
+  if (
+    /\b(how (?:is|was) (?:this|it) (?:built|made)|what (?:tech|technology|stack) (?:do|does) (?:you|it) use|what model(?:s)? (?:do you|does it) use|which (?:gpt|model)|are you (?:chatgpt|gpt)|do you use openai|under the hood|tech stack|architecture|how does the ai work|what powers (?:this|you))\b/i
+      .test(t)
+  ) return "tech_sales";
+
   // capability
   if (/\bwhat do (you|u) do\b|\bwhat('?|’)?s your (role|job|function|capabilities?)\b/.test(t)) return "capability";
   if (/\bwhat can (you|u) do\b|\bhow can (you|u) help\b|\bexamples? of (how|what) (you|u) can do\b|\bwhat can u even do\b/.test(t)) return "capability";
@@ -229,6 +235,13 @@ function cannedReply(kind) {
       return "I don’t have a physical appearance. How may I assist you today?";
     case "preference":
       return "I don’t have personal preferences. How may I assist you today?";
+    // --- NEW ---
+    case "tech_sales":
+      return [
+        "Here’s the short version: I use OpenAI’s models under the hood. Talking Care configures and safeguards the experience for adult social care in England.",
+        "",
+        "If you’re exploring a bespoke version — for example tailored content, your organisation’s policies or integrations — please get in touch and we’ll happily discuss options: https://www.talkingcare.uk/contact",
+      ].join("\n");
     default:
       return null;
   }
