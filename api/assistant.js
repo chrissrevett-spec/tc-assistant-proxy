@@ -166,16 +166,29 @@ function classifyIntent(text) {
 
   // identity / creator / purpose / capability
   if (/\bwho (are|r) (you|u)\b/.test(t)) return "who";
-  if (/\bwho (made|created|built) (you|u)\b|\bwho owns you\b|\bowner\b/.test(t)) return "creator";
+  if (/\bwho (made|created|built) (you|u|this)\b|\bwho owns (you|this)\b|\bowner\b/.test(t)) return "creator";
   if (/\bwhat (is|’s|'s) your (purpose|goal|mission|objective|role)\b|\bwhy (were you created|do you exist)\b|\bprime directive\b/.test(t)) return "purpose";
 
   // privacy/data handling
   if (/\b(what happens to)\s+my\s+(data|information|info)\b/.test(t)) return "privacy";
   if (/\b(what|how)\s+(do|will)\s+(you|u)\s+(do|use|handle)\s+(with )?my\s+(data|information|info)\b|\bdata\s+(policy|privacy)\b|\bprivacy\b/.test(t)) return "privacy";
 
-  // --- TECH / “HOW IT'S MADE” (added) ---
+  // --- TECH / BUILD / ARCHITECTURE / WHITE-LABEL / INTEGRATIONS (broadened) ---
   if (
-    /\b(how (?:is|was) (?:this|it) (?:built|made)|what (?:tech|technology|stack) (?:do|does) (?:you|it) use|what model(?:s)? (?:do you|does it) use|which (?:gpt|model)|are you (?:chatgpt|gpt)|do you use openai|under the hood|tech stack|architecture|how does the ai work|what powers (?:this|you))\b/i
+    // how it's built / underlying tech
+    /\b(how (?:is|was) (?:this|it) (?:built|made)|how did (?:you|they) build (?:this|it)|what(?:'|’)?s (?:the )?tech(?:nology)? stack|what (?:tech|technology|stack) (?:do|does) (?:you|it) use|what model(?:s)? (?:do you|does it) use|which (?:gpt|model)|are you (?:chatgpt|gpt)|do you use (?:openai|gpt)|under the hood|architecture|how does the ai work|what powers (?:this|you))\b/i
+      .test(t)
+    ||
+    // build/replicate one yourself
+    /\bhow (?:do|can) i (?:make|build|create|set ?up|spin ?up|replicate|clone|copy)\b.*\b(this|one of these|something like this|a (?:tool|assistant|bot|chatbot|navigator))\b/i
+      .test(t)
+    ||
+    // ask us to build one / bespoke versions
+    /\b(?:can (?:you|u) (?:build|make|create|set ?up|develop)(?: me| us)? (?:one|this)|we (?:want|need) (?:a|our own) (?:version|one) (?:of )?(?:this|like this)|bespoke|custom|white[- ]?label(?:ling)?)\b/i
+      .test(t)
+    ||
+    // integrations & implementation-y signals
+    /\b(integrations?|integrate|api|webhooks?|embed|squarespace|sharepoint|microsoft teams|teams|slack)\b/i
       .test(t)
   ) return "tech_sales";
 
@@ -550,7 +563,7 @@ module.exports = async (req, res) => {
         buffer = blocks.pop(); // keep last partial
 
         for (const block of blocks) {
-          const lines = block.split(/\n/);
+          const lines = block.split("\n");
           let event = "message";
           const dataLines = [];
           for (const line of lines) {
