@@ -1,0 +1,245 @@
+// /api/feedback.js
+export const config = { runtime: "edge" };
+
+/**
+ * Accepts both manual reports (from the Help modal) and automatic error captures.
+ * Sends an email to hello@talkingcare.uk via Resend.
+ *
+ * Env:
+ * - RESEND_API_KEY        (required for sending email)
+ * - FEEDBACK_FROM_EMAIL   (required, verified sender in Resend, e.g. tcn@yourdomain.com)
+ * - FEEDBACK_TO_EMAIL     (optional, defaults to hello@talkingcare.uk)
+ * - TCN_ALLOWED_ORIGIN    (optional, CORS allow-list; defaults to https://www.talkingcare.uk)
+ */
+
+const ALLOWED_ORIGIN = process.env.TCN_ALLOWED_ORIGIN || "https://www.talkingcare.uk";
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
+const FEEDBACK_FROM  = process.env.FEEDBACK_FROM_EMAIL || "";
+const FEEDBACK_TO    = process.env.FEEDBACK_TO_EMAIL || "hello@talkingcare.uk";
+
+function withCorsHeaders(init = {}) {
+  const h = new Headers(init.headers || {});
+  h.set("access-control-allow-origin", ALLOWED_ORIGIN);
+  h.set("vary", "origin");
+  return new Response(init.body ?? null, { ...init, headers: h });
+}
+
+function json(data, status = 200) {
+  return withCorsHeaders({
+    status,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+function cors204() {
+  return withCorsHeaders({
+    status: 204,
+    headers: {
+      "access-control-allow-methods": "POST, OPTIONS",
+      "access-control-allow-headers": "content-type, authorization",
+    },
+  });
+}
+
+// Minimal in-memory dedupe for auto errors (per instance)
+// Prevents repeated identical errors spamming your inbox.
+const seen = new Map(); // hash -> timestamp (ms)
+const AUTO_DEDUPE_MS = 10 * 60 * 1000; // 10 minutes
+
+async function sha256(s) {
+  const enc = new TextEncoder().encode(s);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  const b = Array.from(new Uint8Array(buf)).map(x => x.toString(16).padStart(2, "0")).join("");
+  return b;
+}
+
+function cap(str, n) {
+  return (str || "").toString().slice(0, n);
+}
+
+function safeDiag(diag = {}) {
+  // Strip to safe diagnostic fields and cap sizes.
+  const out = {
+    url: cap(diag.url, 2000) || null,
+    ua: cap(diag.ua, 1000) || null,
+    tz: cap(diag.tz, 128) || null,
+    lang: cap(diag.lang, 64) || null,
+    viewport: typeof diag.viewport === "object" ? diag.viewport : null,
+    net: typeof diag.net === "object" ? diag.net : null,
+    time: cap(diag.time, 64) || new Date().toISOString(),
+  };
+
+  // Optional arrays (already redacted client-side), further capped here:
+  if (Array.isArray(diag.logs)) {
+    out.logs = diag.logs.slice(-50).map(x => ({
+      t: cap(x?.t, 64),
+      ev: cap(x?.ev, 128),
+      data: cap(JSON.stringify(x?.data ?? ""), 1000),
+    }));
+  }
+  if (Array.isArray(diag.chat)) {
+    out.chat = diag.chat.slice(-5).map(x => ({
+      role: cap(x?.role, 16),
+      content: cap(x?.content, 2000),
+    }));
+  }
+
+  // Auto error fields
+  if (diag.error) {
+    out.error = {
+      message: cap(diag.error.message, 2000) || null,
+      stack: cap(diag.error.stack, 4000) || null,
+      filename: cap(diag.error.filename, 1000) || null,
+      lineno: Number.isFinite(diag.error.lineno) ? diag.error.lineno : undefined,
+      colno: Number.isFinite(diag.error.colno) ? diag.error.colno : undefined,
+      kind: cap(diag.error.kind, 32) || undefined, // 'onerror' | 'unhandledrejection'
+    };
+  }
+
+  return out;
+}
+
+function renderText(kind, message, diag) {
+  const lines = [];
+  lines.push(`Kind: ${kind}`);
+  if (message) lines.push(`Message:\n${message}`);
+  if (diag?.error) {
+    lines.push(`\n[Error] ${diag.error.message || "(no message)"}`);
+    if (diag.error.stack) lines.push(`Stack:\n${diag.error.stack}`);
+    if (diag.error.filename) lines.push(`File: ${diag.error.filename} (${diag.error.lineno}:${diag.error.colno})`);
+  }
+  lines.push("\n--- Diagnostics ---");
+  lines.push(`URL: ${diag?.url || "n/a"}`);
+  lines.push(`Time: ${diag?.time || "n/a"}`);
+  lines.push(`UA: ${diag?.ua || "n/a"}`);
+  lines.push(`TZ: ${diag?.tz || "n/a"} | Lang: ${diag?.lang || "n/a"}`);
+  lines.push(`Viewport: ${JSON.stringify(diag?.viewport || {})}`);
+  lines.push(`Net: ${JSON.stringify(diag?.net || {})}`);
+  if (Array.isArray(diag?.logs)) {
+    lines.push(`\nLast client events (max 50):`);
+    lines.push(JSON.stringify(diag.logs, null, 2));
+  }
+  if (Array.isArray(diag?.chat)) {
+    lines.push(`\nLast chat turns (max 5, redacted):`);
+    lines.push(JSON.stringify(diag.chat, null, 2));
+  }
+  return lines.join("\n");
+}
+
+function renderHtml(kind, message, diag) {
+  // Simple, readable HTML email
+  const esc = (s) => (s || "").toString()
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
+  const pre = (s) => `<pre style="white-space:pre-wrap;font-family:ui-monospace,monospace;background:#fafafa;border:1px solid #eee;padding:8px;border-radius:8px;">${esc(s)}</pre>`;
+
+  const parts = [];
+  parts.push(`<h2 style="margin:0 0 6px;">TCN — ${kind === "auto" ? "Automatic error" : "User feedback"}</h2>`);
+  if (message) {
+    parts.push(`<p><strong>Message</strong></p>`);
+    parts.push(pre(message));
+  }
+  if (diag?.error) {
+    parts.push(`<p><strong>Error</strong></p>`);
+    parts.push(pre(`${diag.error.message || "(no message)"}\n\n${diag.error.stack || ""}`));
+    if (diag.error.filename) parts.push(`<p>At: ${esc(diag.error.filename)} (${diag.error.lineno}:${diag.error.colno})</p>`);
+  }
+
+  parts.push(`<hr><p><strong>Diagnostics</strong></p>`);
+  parts.push(`<ul>
+    <li>URL: ${esc(diag?.url || "n/a")}</li>
+    <li>Time: ${esc(diag?.time || "n/a")}</li>
+    <li>UA: ${esc(diag?.ua || "n/a")}</li>
+    <li>TZ: ${esc(diag?.tz || "n/a")} &nbsp;|&nbsp; Lang: ${esc(diag?.lang || "n/a")}</li>
+    <li>Viewport: ${esc(JSON.stringify(diag?.viewport || {}))}</li>
+    <li>Net: ${esc(JSON.stringify(diag?.net || {}))}</li>
+  </ul>`);
+
+  if (Array.isArray(diag?.logs)) {
+    parts.push(`<p><strong>Last client events (max 50)</strong></p>`);
+    parts.push(pre(JSON.stringify(diag.logs, null, 2)));
+  }
+  if (Array.isArray(diag?.chat)) {
+    parts.push(`<p><strong>Last chat turns (max 5, redacted)</strong></p>`);
+    parts.push(pre(JSON.stringify(diag.chat, null, 2)));
+  }
+
+  // Handy link to your contact page:
+  parts.push(`<p style="margin-top:12px;">Need to follow up? <a href="https://www.talkingcare.uk/contact" target="_blank" rel="noopener">Contact Talking Care</a></p>`);
+  return parts.join("\n");
+}
+
+async function sendEmail({ subject, text, html }) {
+  if (!RESEND_API_KEY || !FEEDBACK_FROM) {
+    // Tell client to fallback to mailto for manual reports; auto reports will be dropped client-side.
+    return { ok: false, needs_mailto_fallback: true, error: "Email provider not configured" };
+  }
+
+  const r = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "authorization": `Bearer ${RESEND_API_KEY}`
+    },
+    body: JSON.stringify({
+      from: FEEDBACK_FROM,
+      to: [FEEDBACK_TO],
+      subject,
+      text,
+      html
+    })
+  });
+
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    return { ok: false, error: `Resend error ${r.status}: ${t.slice(0, 500)}` };
+  }
+  return { ok: true };
+}
+
+export default async function handler(req) {
+  if (req.method === "OPTIONS") return cors204();
+  if (req.method !== "POST") return json({ ok: false, error: "Method Not Allowed" }, 405);
+
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ ok: false, error: "Invalid JSON" }, 400);
+  }
+
+  const kind = (body?.kind === "auto" ? "auto" : "manual");
+  const message = cap(body?.message || "", 4000);
+  const diag = safeDiag(body?.diagnostics || {});
+  if (kind === "manual" && !message) return json({ ok: false, error: "Missing message" }, 400);
+
+  // Light dedupe for auto errors
+  if (kind === "auto") {
+    const sig = await sha256(
+      (diag?.error?.message || "") +
+      "|" + (diag?.error?.stack || "") +
+      "|" + (diag?.url || "")
+    );
+    const now = Date.now();
+    const last = seen.get(sig) || 0;
+    if (now - last < AUTO_DEDUPE_MS) {
+      return json({ ok: true, deduped: true });
+    }
+    seen.set(sig, now);
+  }
+
+  const subject =
+    kind === "auto"
+      ? `TCN auto error — ${cap(diag?.error?.message || message || "(no message)", 80)}`
+      : `TCN feedback — ${cap(message || "(no message)", 80)}`;
+
+  const text = renderText(kind, message, diag);
+  const html = renderHtml(kind, message, diag);
+
+  const sent = await sendEmail({ subject, text, html });
+  if (!sent.ok) {
+    return json({ ok: false, ...sent }, 502);
+  }
+  return json({ ok: true });
+}
